@@ -30,14 +30,14 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R003 — Structural reading (outline + zoom)
 - Class: primary-user-loop
-- Status: active
+- Status: validated
 - Description: `outline` returns a file's structural overview — all symbols with kind, name, range, signature, export status, and member nesting. `zoom` returns a single symbol's full body with surrounding context and caller/callee annotations.
 - Why it matters: Replaces reading a 500-line file to find 5 lines. Agent gets targeted information in ~50 lines instead of ~500.
 - Source: user
 - Primary owning slice: M001/S03
 - Supporting slices: none
-- Validation: unmapped
-- Notes: zoom annotations include both outbound calls (what this function calls) and inbound callers (what calls this function).
+- Validation: S03 — 19 unit tests + 8 integration tests verify nested outline structure, all symbol kinds, call annotations, context lines, error paths, and multi-language fixtures (TS, Python, Rust).
+- Notes: zoom annotations include both outbound calls (what this function calls) and inbound callers (what calls this function). Annotations are file-scoped; cross-file deferred to M003.
 
 ### R004 — Semantic editing (edit by symbol name)
 - Class: core-capability
@@ -467,7 +467,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 |---|---|---|---|---|---|
 | R001 | core-capability | validated | M001/S01 | none | S01 |
 | R002 | core-capability | validated | M001/S02 | none | S02 |
-| R003 | primary-user-loop | active | M001/S03 | none | unmapped |
+| R003 | primary-user-loop | validated | M001/S03 | none | S03 |
 | R004 | core-capability | active | M001/S05 | none | unmapped |
 | R005 | core-capability | active | M001/S05 | none | unmapped |
 | R006 | core-capability | active | M001/S05 | none | unmapped |
@@ -509,7 +509,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ## Coverage Summary
 
-- Active requirements: 31
+- Active requirements: 30
 - Mapped to slices: 34
-- Validated: 3
+- Validated: 4
 - Unmapped active requirements: 0

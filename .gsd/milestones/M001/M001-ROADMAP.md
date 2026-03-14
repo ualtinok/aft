@@ -57,7 +57,7 @@ This milestone is complete only when all are true:
 - [x] **S02: Tree-sitter Multi-Language Engine** `risk:high` `depends:[S01]`
   > After this: binary parses files in all 6 languages and extracts symbols (functions, classes, methods, structs, interfaces, enums) with names, ranges, signatures, scope chains, and export status. Verified by test suite against representative code files per language.
 
-- [ ] **S03: Structural Reading** `risk:medium` `depends:[S02]`
+- [x] **S03: Structural Reading** `risk:medium` `depends:[S02]`
   > After this: `outline` returns a file's full symbol structure and `zoom` returns a single symbol's body with caller/callee annotations. Verified by running outline and zoom on real multi-symbol files.
 
 - [ ] **S04: Safety & Recovery System** `risk:medium` `depends:[S01]`

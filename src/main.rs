@@ -1,12 +1,13 @@
 use std::io::{self, BufRead, BufWriter, Write};
 
+use aft::language::LanguageProvider;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, RawRequest, Response};
 
 fn main() {
     eprintln!("[aft] started, pid {}", std::process::id());
 
-    let _provider = TreeSitterProvider::new();
+    let provider = TreeSitterProvider::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -28,7 +29,7 @@ fn main() {
         }
 
         let response = match serde_json::from_str::<RawRequest>(trimmed) {
-            Ok(req) => dispatch(req),
+            Ok(req) => dispatch(req, &provider),
             Err(e) => {
                 eprintln!("[aft] parse error: {} — input: {}", e, trimmed);
                 Response::error(
@@ -48,11 +49,13 @@ fn main() {
     eprintln!("[aft] stdin closed, shutting down");
 }
 
-fn dispatch(req: RawRequest) -> Response {
+fn dispatch(req: RawRequest, provider: &dyn LanguageProvider) -> Response {
     match req.command.as_str() {
         "ping" => Response::success(&req.id, serde_json::json!({ "command": "pong" })),
         "version" => Response::success(&req.id, serde_json::json!({ "version": "0.1.0" })),
         "echo" => handle_echo(&req),
+        "outline" => aft::commands::outline::handle_outline(&req, provider),
+        "zoom" => aft::commands::zoom::handle_zoom(&req, provider),
         _ => {
             eprintln!("[aft] unknown command: {}", req.command);
             Response::error(
