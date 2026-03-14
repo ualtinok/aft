@@ -183,6 +183,14 @@ pub fn handle_add_struct_tags(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
+    // Dry-run: return diff without modifying disk
+    if edit::is_dry_run(&req.params) {
+        let dr = edit::dry_run_diff(&source, &new_source, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
+    }
+
     // --- Auto-backup ---
     let backup_id = match edit::auto_backup(ctx, path, "add_struct_tags: pre-edit backup") {
         Ok(id) => id,

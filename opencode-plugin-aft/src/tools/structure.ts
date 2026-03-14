@@ -34,6 +34,10 @@ export function structureTools(
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -43,6 +47,7 @@ export function structureTools(
         };
         if (args.position !== undefined) params.position = args.position;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("add_member", params);
         return JSON.stringify(response);
       },
@@ -61,6 +66,10 @@ export function structureTools(
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -69,6 +78,7 @@ export function structureTools(
           derives: args.derives,
         };
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("add_derive", params);
         return JSON.stringify(response);
       },
@@ -90,6 +100,10 @@ export function structureTools(
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -98,6 +112,7 @@ export function structureTools(
         };
         if (args.catch_body !== undefined) params.catch_body = args.catch_body;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("wrap_try_catch", params);
         return JSON.stringify(response);
       },
@@ -122,6 +137,10 @@ export function structureTools(
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -131,6 +150,7 @@ export function structureTools(
         };
         if (args.position !== undefined) params.position = args.position;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("add_decorator", params);
         return JSON.stringify(response);
       },
@@ -151,6 +171,10 @@ export function structureTools(
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -161,6 +185,7 @@ export function structureTools(
           value: args.value,
         };
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("add_struct_tags", params);
         return JSON.stringify(response);
       },

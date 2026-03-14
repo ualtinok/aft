@@ -41,6 +41,10 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -49,6 +53,7 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
         };
         if (args.create_dirs !== undefined) params.create_dirs = args.create_dirs;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("write", params);
         return JSON.stringify(response);
       },
@@ -73,6 +78,10 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -83,6 +92,7 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
         if (args.content !== undefined) params.content = args.content;
         if (args.scope !== undefined) params.scope = args.scope;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("edit_symbol", params);
         return JSON.stringify(response);
       },
@@ -103,6 +113,10 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -112,6 +126,7 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
         };
         if (args.occurrence !== undefined) params.occurrence = args.occurrence;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("edit_match", params);
         return JSON.stringify(response);
       },
@@ -129,6 +144,10 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -136,6 +155,7 @@ export function editingTools(bridge: BinaryBridge): Record<string, ToolDefinitio
           edits: args.edits,
         };
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("batch", params);
         return JSON.stringify(response);
       },

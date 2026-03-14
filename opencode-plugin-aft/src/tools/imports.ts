@@ -31,6 +31,10 @@ export function importTools(bridge: BinaryBridge): Record<string, ToolDefinition
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -41,6 +45,7 @@ export function importTools(bridge: BinaryBridge): Record<string, ToolDefinition
         if (args.default_import !== undefined) params.default_import = args.default_import;
         if (args.type_only !== undefined) params.type_only = args.type_only;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("add_import", params);
         return JSON.stringify(response);
       },
@@ -60,6 +65,10 @@ export function importTools(bridge: BinaryBridge): Record<string, ToolDefinition
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
@@ -68,6 +77,7 @@ export function importTools(bridge: BinaryBridge): Record<string, ToolDefinition
         };
         if (args.name !== undefined) params.name = args.name;
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("remove_import", params);
         return JSON.stringify(response);
       },
@@ -82,12 +92,17 @@ export function importTools(bridge: BinaryBridge): Record<string, ToolDefinition
           .enum(["syntax", "full"])
           .optional()
           .describe("Validation level: 'syntax' (default, tree-sitter only) or 'full' (invoke project type checker)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("Preview the edit as a unified diff without modifying the file"),
       },
       execute: async (args): Promise<string> => {
         const params: Record<string, unknown> = {
           file: args.file,
         };
         if (args.validate !== undefined) params.validate = args.validate;
+        if (args.dry_run !== undefined) params.dry_run = args.dry_run;
         const response = await bridge.send("organize_imports", params);
         return JSON.stringify(response);
       },

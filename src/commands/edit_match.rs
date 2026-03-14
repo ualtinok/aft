@@ -144,15 +144,27 @@ pub fn handle_edit_match(req: &RawRequest, ctx: &AppContext) -> Response {
     let byte_start = positions[target_idx];
     let byte_end = byte_start + match_str.len();
 
-    // Auto-backup before mutation
-    let backup_id = match edit::auto_backup(ctx, path, &format!("edit_match: {}", match_str)) {
-        Ok(id) => id,
-        Err(e) => {
-            return Response::error(&req.id, e.code(), e.to_string());
+    // Auto-backup before mutation (skip for dry-run)
+    let backup_id = if !edit::is_dry_run(&req.params) {
+        match edit::auto_backup(ctx, path, &format!("edit_match: {}", match_str)) {
+            Ok(id) => id,
+            Err(e) => {
+                return Response::error(&req.id, e.code(), e.to_string());
+            }
         }
+    } else {
+        None
     };
 
     let new_source = edit::replace_byte_range(&source, byte_start, byte_end, replacement);
+
+    // Dry-run: return diff without modifying disk
+    if edit::is_dry_run(&req.params) {
+        let dr = edit::dry_run_diff(&source, &new_source, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
+    }
 
     // Write, format, and validate via shared pipeline
     let write_result = match edit::write_format_validate(path, &new_source, ctx.config(), &req.params) {

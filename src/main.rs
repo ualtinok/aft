@@ -66,6 +66,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "edit_symbol" => aft::commands::edit_symbol::handle_edit_symbol(&req, ctx),
         "edit_match" => aft::commands::edit_match::handle_edit_match(&req, ctx),
         "batch" => aft::commands::batch::handle_batch(&req, ctx),
+        "transaction" => aft::commands::transaction::handle_transaction(&req, ctx),
         "add_import" => aft::commands::add_import::handle_add_import(&req, ctx),
         "add_member" => aft::commands::add_member::handle_add_member(&req, ctx),
         "add_derive" => aft::commands::add_derive::handle_add_derive(&req, ctx),

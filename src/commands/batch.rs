@@ -88,21 +88,34 @@ pub fn handle_batch(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    // Phase 2: Auto-backup once before applying
-    let backup_id = match edit::auto_backup(ctx, path, "batch: pre-batch backup") {
-        Ok(id) => id,
-        Err(e) => {
-            return Response::error(&req.id, e.code(), e.to_string());
+    // Phase 2: Auto-backup once before applying (skip for dry-run)
+    let dry_run = edit::is_dry_run(&req.params);
+    let backup_id = if !dry_run {
+        match edit::auto_backup(ctx, path, "batch: pre-batch backup") {
+            Ok(id) => id,
+            Err(e) => {
+                return Response::error(&req.id, e.code(), e.to_string());
+            }
         }
+    } else {
+        None
     };
 
     // Phase 3: Sort edits by byte_start descending (bottom-to-top) to prevent drift
     resolved.sort_by(|a, b| b.byte_start.cmp(&a.byte_start));
 
     // Phase 4: Apply all edits sequentially to the content
-    let mut content = source;
+    let mut content = source.clone();
     for r in &resolved {
         content = edit::replace_byte_range(&content, r.byte_start, r.byte_end, &r.replacement);
+    }
+
+    // Dry-run: return combined diff without modifying disk
+    if dry_run {
+        let dr = edit::dry_run_diff(&source, &content, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
     }
 
     // Phase 5: Write, format, and validate via shared pipeline

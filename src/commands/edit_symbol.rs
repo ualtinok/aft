@@ -195,6 +195,14 @@ pub fn handle_edit_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
         _ => unreachable!(),
     };
 
+    // Dry-run: return diff without modifying disk
+    if edit::is_dry_run(&req.params) {
+        let dr = edit::dry_run_diff(&source, &new_source, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
+    }
+
     // Auto-backup before writing
     let backup_id = match edit::auto_backup(ctx, path, &format!("edit_symbol: {} {}", operation, symbol_name)) {
         Ok(id) => id,

@@ -113,12 +113,16 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
         );
     }
 
-    // --- Auto-backup ---
-    let backup_id = match edit::auto_backup(ctx, path, "remove_import: pre-edit backup") {
-        Ok(id) => id,
-        Err(e) => {
-            return Response::error(&req.id, e.code(), e.to_string());
+    // --- Auto-backup (skip for dry-run) ---
+    let backup_id = if !edit::is_dry_run(&req.params) {
+        match edit::auto_backup(ctx, path, "remove_import: pre-edit backup") {
+            Ok(id) => id,
+            Err(e) => {
+                return Response::error(&req.id, e.code(), e.to_string());
+            }
         }
+    } else {
+        None
     };
 
     // --- Determine edit ---
@@ -127,6 +131,14 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
     } else {
         remove_entire_imports(&source, &matching)
     };
+
+    // Dry-run: return diff without modifying disk
+    if edit::is_dry_run(&req.params) {
+        let dr = edit::dry_run_diff(&source, &new_source, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
+    }
 
     // --- Write, format, and validate ---
     let write_result = match edit::write_format_validate(path, &new_source, ctx.config(), &req.params) {

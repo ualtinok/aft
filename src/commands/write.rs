@@ -46,6 +46,21 @@ pub fn handle_write(req: &RawRequest, ctx: &AppContext) -> Response {
     let path = Path::new(file);
     let existed = path.exists();
 
+    // Read original content for potential dry-run diff
+    let original = if existed {
+        std::fs::read_to_string(path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Dry-run: return diff without modifying disk
+    if edit::is_dry_run(&req.params) {
+        let dr = edit::dry_run_diff(&original, content, path);
+        return Response::success(&req.id, serde_json::json!({
+            "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+        }));
+    }
+
     // Auto-backup existing file before overwriting
     let backup_id = match edit::auto_backup(ctx, path, "write: pre-write backup") {
         Ok(id) => id,

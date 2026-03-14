@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::context::AppContext;
 use crate::error::AftError;
 use crate::format;
-use crate::parser::FileParser;
+use crate::parser::{detect_language, grammar_for, FileParser};
 
 /// Convert 0-indexed line/col to a byte offset within `source`.
 ///
@@ -54,6 +54,59 @@ pub fn validate_syntax(path: &Path) -> Result<Option<bool>, AftError> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Validate syntax of an in-memory string without touching disk.
+///
+/// Uses `detect_language(path)` + `grammar_for(lang)` + `parser.parse()`
+/// to validate syntax of a proposed content string. Returns `None` for
+/// unsupported languages, `Some(true)` for valid, `Some(false)` for invalid.
+pub fn validate_syntax_str(content: &str, path: &Path) -> Option<bool> {
+    let lang = detect_language(path)?;
+    let grammar = grammar_for(lang);
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return None;
+    }
+    let tree = parser.parse(content.as_bytes(), None)?;
+    Some(!tree.root_node().has_error())
+}
+
+/// Result of a dry-run diff computation.
+pub struct DryRunResult {
+    /// Unified diff between original and proposed content.
+    pub diff: String,
+    /// Whether the proposed content has valid syntax. `None` for unsupported languages.
+    pub syntax_valid: Option<bool>,
+}
+
+/// Compute a unified diff between original and proposed content, plus syntax validation.
+///
+/// Returns a standard unified diff with `a/` and `b/` path prefixes and 3 lines of context.
+/// Also validates syntax of the proposed content via tree-sitter.
+pub fn dry_run_diff(original: &str, proposed: &str, path: &Path) -> DryRunResult {
+    let display_path = path.display().to_string();
+    let text_diff = similar::TextDiff::from_lines(original, proposed);
+    let diff = text_diff
+        .unified_diff()
+        .context_radius(3)
+        .header(
+            &format!("a/{}", display_path),
+            &format!("b/{}", display_path),
+        )
+        .to_string();
+    let syntax_valid = validate_syntax_str(proposed, path);
+    DryRunResult { diff, syntax_valid }
+}
+
+/// Extract the `dry_run` boolean from request params.
+///
+/// Returns `true` if `params["dry_run"]` is `true`, `false` otherwise.
+pub fn is_dry_run(params: &serde_json::Value) -> bool {
+    params
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// Snapshot the file into the backup store before mutation.

@@ -56,4 +56,29 @@ impl Response {
             }),
         }
     }
+
+    /// Build an error response with `code`, `message`, and additional structured data.
+    ///
+    /// The `extra` fields are merged into the top-level response alongside `code` and `message`.
+    pub fn error_with_data(
+        id: impl Into<String>,
+        code: &str,
+        message: impl Into<String>,
+        extra: serde_json::Value,
+    ) -> Self {
+        let mut data = serde_json::json!({
+            "code": code,
+            "message": message.into(),
+        });
+        if let (Some(base), Some(ext)) = (data.as_object_mut(), extra.as_object()) {
+            for (k, v) in ext {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        Response {
+            id: id.into(),
+            ok: false,
+            data,
+        }
+    }
 }

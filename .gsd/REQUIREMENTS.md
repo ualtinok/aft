@@ -193,25 +193,25 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R018 — Dry-run mode on all mutations
 - Class: failure-visibility
-- Status: active
+- Status: validated
 - Description: Every mutation command accepts `dry_run: true` and returns a diff preview without applying changes. Shows lines added/removed and syntax validity of the proposed change.
 - Why it matters: Lets agents preview destructive operations before committing. Essential for cautious multi-file refactors.
 - Source: user
 - Primary owning slice: M002/S04
 - Supporting slices: none
-- Validation: unmapped
-- Notes: Dry-run diff format should be unified diff (parseable by agents).
+- Validation: S04 — 8 integration tests prove all 12 mutation commands accept `dry_run: true`, return unified diff and `syntax_valid`, leave files unchanged, create no backups. Plugin round-trip test proves dry_run param flows through the plugin bridge. Milestone acceptance: `edit_symbol` dry-run returns diff, file unchanged.
+- Notes: Dry-run diff format is unified diff (parseable by agents). Dry-run shows raw edit diff, not post-format result (D071).
 
 ### R019 — Multi-file atomic transactions
 - Class: core-capability
-- Status: active
+- Status: validated
 - Description: `transaction` applies edits to multiple files atomically — all succeed or all roll back. Each file's result is reported individually. If any file fails validation, all changes revert.
 - Why it matters: Multi-file refactors with partial failures leave the codebase in a broken state. Atomic transactions eliminate partial failure.
 - Source: user
 - Primary owning slice: M002/S04
 - Supporting slices: none
-- Validation: unmapped
-- Notes: Builds on the per-file backup system from R007.
+- Validation: S04 — 6 integration tests prove transaction success (3-file atomic write), rollback on syntax error (milestone acceptance: 3-file transaction with third failing, all rolled back), new file rollback (deleted on failure), edit_match within transaction, dry-run transaction, empty operations rejection. Plugin round-trip tests prove success and rollback paths through the plugin bridge. Error response includes `failed_operation` index and `rolled_back` array.
+- Notes: Builds on the per-file backup system from R007. Supports write and edit_match operations (D072).
 
 ### R020 — Call graph construction (lazy, incremental, file watcher)
 - Class: core-capability
@@ -480,8 +480,8 @@ Use it to track what is actively in scope, what has been validated by completed 
 | R015 | differentiator | validated | M002/S02 | none | S02 |
 | R016 | quality-attribute | validated | M002/S03 | none | S03 |
 | R017 | quality-attribute | validated | M002/S03 | none | S03 |
-| R018 | failure-visibility | active | M002/S04 | none | unmapped |
-| R019 | core-capability | active | M002/S04 | none | unmapped |
+| R018 | failure-visibility | validated | M002/S04 | none | S04 |
+| R019 | core-capability | validated | M002/S04 | none | S04 |
 | R020 | core-capability | active | M003/S01 | none | unmapped |
 | R021 | primary-user-loop | active | M003/S02 | none | unmapped |
 | R022 | primary-user-loop | active | M003/S02 | none | unmapped |
@@ -507,7 +507,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ## Coverage Summary
 
-- Active requirements: 17
+- Active requirements: 15
 - Mapped to slices: 34
-- Validated: 18
+- Validated: 20
 - Unmapped active requirements: 0
