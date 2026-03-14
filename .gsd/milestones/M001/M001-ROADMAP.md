@@ -66,7 +66,7 @@ This milestone is complete only when all are true:
 - [x] **S05: Three-Layer Editing Engine** `risk:medium` `depends:[S02,S04]`
   > After this: `edit_symbol`, `edit_match`, `write`, and `batch` all work with auto-backup, syntax validation, and symbol disambiguation. Verified by editing real code files using all three edit modes and confirming syntax validation catches intentional errors.
 
-- [ ] **S06: OpenCode Plugin Bridge** `risk:medium` `depends:[S01,S02,S03,S04,S05]`
+- [x] **S06: OpenCode Plugin Bridge** `risk:medium` `depends:[S01,S02,S03,S04,S05]`
   > After this: all M001 commands are available as OpenCode tools — plugin spawns the binary, manages its lifecycle, and registers tools with Zod schemas. Verified by an agent using AFT tools in a real OpenCode session.
 
 - [ ] **S07: Binary Distribution Pipeline** `risk:low` `depends:[S06]`

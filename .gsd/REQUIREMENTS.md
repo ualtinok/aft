@@ -96,13 +96,13 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R009 — OpenCode plugin bridge
 - Class: integration
-- Status: active
+- Status: validated
 - Description: TypeScript plugin registers all AFT commands as OpenCode tools with Zod schemas. Binary bridge manages the persistent process (spawn, health check, restart on crash). Platform binary resolver finds the correct binary (npm package, PATH, cargo).
 - Why it matters: Without the plugin, agents can't access AFT tools. The bridge must handle process lifecycle robustly — crashed binary should auto-restart transparently.
 - Source: user
 - Primary owning slice: M001/S06
 - Supporting slices: none
-- Validation: unmapped
+- Validation: S06 — 9 integration tests (51 assertions) prove: resolver finds binary, bridge spawns and manages process lifecycle (ping, crash auto-restart with backoff, clean shutdown), 4 tool round-trips (outline, write, edit_symbol, undo) through full plugin→binary→response stack. All 11 tools registered with Zod schemas, type-checked at build time.
 - Notes: Plugin is intentionally thin — all logic lives in the Rust binary.
 
 ### R010 — Post-edit syntax validation
@@ -473,7 +473,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 | R006 | core-capability | validated | M001/S05 | none | S05 |
 | R007 | failure-visibility | validated | M001/S04 | M001/S05 | S04+S05 |
 | R008 | failure-visibility | validated | M001/S04 | none | S04 |
-| R009 | integration | active | M001/S06 | none | unmapped |
+| R009 | integration | validated | M001/S06 | none | S06 |
 | R010 | quality-attribute | validated | M001/S05 | none | S05 |
 | R011 | quality-attribute | validated | M001/S05 | M001/S03 | S05 |
 | R012 | launchability | active | M001/S07 | none | unmapped |
@@ -511,5 +511,5 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 - Active requirements: 23
 - Mapped to slices: 34
-- Validated: 11
+- Validated: 12
 - Unmapped active requirements: 0
