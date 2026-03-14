@@ -361,6 +361,216 @@ fn callgraph_callers_recursive() {
 }
 
 // ---------------------------------------------------------------------------
+// trace_to command
+// ---------------------------------------------------------------------------
+
+/// `trace_to` without prior `configure` returns not_configured error.
+#[test]
+fn callgraph_trace_to_not_configured() {
+    let mut aft = AftProcess::spawn();
+
+    let resp = aft.send(
+        r#"{"id":"1","command":"trace_to","file":"helpers.ts","symbol":"checkFormat"}"#,
+    );
+
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["code"], "not_configured");
+
+    aft.shutdown();
+}
+
+/// `trace_to` on a nonexistent symbol returns symbol_not_found error.
+#[test]
+fn callgraph_trace_to_symbol_not_found() {
+    let mut aft = AftProcess::spawn();
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"trace_to","file":"{}/helpers.ts","symbol":"nonexistent"}}"#,
+        root
+    ));
+
+    assert_eq!(resp["ok"], false, "unknown symbol should fail: {:?}", resp);
+    assert_eq!(resp["code"], "symbol_not_found");
+
+    aft.shutdown();
+}
+
+/// `trace_to` on a deeply-nested symbol returns a single path through the chain.
+///
+/// checkFormat is called by validate (helpers.ts), which is called by processData (utils.ts),
+/// which is called by main (main.ts). Should return at least one path with main as entry point.
+#[test]
+fn callgraph_trace_to_single_path() {
+    let mut aft = AftProcess::spawn();
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"trace_to","file":"{}/helpers.ts","symbol":"checkFormat","depth":10}}"#,
+        root
+    ));
+
+    assert_eq!(resp["ok"], true, "trace_to should succeed: {:?}", resp);
+    assert_eq!(resp["target_symbol"], "checkFormat");
+    assert!(resp["target_file"].as_str().unwrap().contains("helpers.ts"));
+
+    let paths = resp["paths"].as_array().expect("paths should be array");
+    assert!(
+        !paths.is_empty(),
+        "checkFormat should have at least one path to an entry point"
+    );
+
+    // At least one path should start at main and end at checkFormat
+    let main_path = paths.iter().find(|p| {
+        let hops = p["hops"].as_array().unwrap();
+        !hops.is_empty() && hops[0]["symbol"] == "main"
+    });
+    assert!(
+        main_path.is_some(),
+        "should have a path starting from main, paths: {:?}",
+        paths
+    );
+
+    // That path should end at checkFormat (last hop)
+    let hops = main_path.unwrap()["hops"].as_array().unwrap();
+    let last = &hops[hops.len() - 1];
+    assert_eq!(
+        last["symbol"], "checkFormat",
+        "path should end at checkFormat"
+    );
+
+    // Verify diagnostic fields exist
+    assert!(resp["total_paths"].as_u64().unwrap() >= 1);
+    assert!(resp["entry_points_found"].as_u64().unwrap() >= 1);
+
+    aft.shutdown();
+}
+
+/// `trace_to` on validate (called from multiple paths) returns multiple paths.
+///
+/// validate is called by:
+/// - main (main.ts) → processData (utils.ts) → validate
+/// - handleRequest (service.ts) → processData (utils.ts) → validate
+/// - testValidation (test_helpers.ts) → validate (directly)
+#[test]
+fn callgraph_trace_to_multi_path() {
+    let mut aft = AftProcess::spawn();
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"trace_to","file":"{}/helpers.ts","symbol":"validate","depth":10}}"#,
+        root
+    ));
+
+    assert_eq!(resp["ok"], true, "trace_to should succeed: {:?}", resp);
+    assert_eq!(resp["target_symbol"], "validate");
+
+    let total_paths = resp["total_paths"].as_u64().unwrap();
+    assert!(
+        total_paths >= 2,
+        "validate should have multiple paths to entry points, got {}",
+        total_paths
+    );
+
+    let entry_points_found = resp["entry_points_found"].as_u64().unwrap();
+    assert!(
+        entry_points_found >= 2,
+        "validate should have multiple distinct entry points, got {}",
+        entry_points_found
+    );
+
+    let paths = resp["paths"].as_array().expect("paths should be array");
+
+    // Collect entry point names (first hop of each path)
+    let entry_names: Vec<&str> = paths
+        .iter()
+        .filter_map(|p| {
+            let hops = p["hops"].as_array()?;
+            hops.first().and_then(|h| h["symbol"].as_str())
+        })
+        .collect();
+
+    // Should include both main and testValidation (or handleRequest) as entry points
+    assert!(
+        entry_names.contains(&"main") || entry_names.contains(&"handleRequest"),
+        "should have main or handleRequest as entry point, got: {:?}",
+        entry_names
+    );
+
+    // Each path should end at validate (the target)
+    for path in paths {
+        let hops = path["hops"].as_array().unwrap();
+        let last = &hops[hops.len() - 1];
+        assert_eq!(
+            last["symbol"], "validate",
+            "every path should end at validate"
+        );
+    }
+
+    aft.shutdown();
+}
+
+/// `trace_to` on an entry point itself returns gracefully (no paths or self-path).
+///
+/// main is an entry point — there's nothing calling it, so trace_to should return
+/// an empty paths array or a minimal self-path.
+#[test]
+fn callgraph_trace_to_no_entry_points() {
+    let mut aft = AftProcess::spawn();
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"trace_to","file":"{}/main.ts","symbol":"main","depth":10}}"#,
+        root
+    ));
+
+    assert_eq!(resp["ok"], true, "trace_to on entry point should succeed: {:?}", resp);
+    assert_eq!(resp["target_symbol"], "main");
+
+    // main IS an entry point, so the result should handle it gracefully.
+    // It may return a self-path (just [main]) or empty paths.
+    let paths = resp["paths"].as_array().expect("paths should be array");
+
+    // If there are paths, each should contain main
+    for path in paths {
+        let hops = path["hops"].as_array().unwrap();
+        let has_main = hops.iter().any(|h| h["symbol"] == "main");
+        assert!(has_main, "any path for main should include main");
+    }
+
+    // Diagnostic fields should be present and valid
+    assert!(resp.get("total_paths").is_some());
+    assert!(resp.get("entry_points_found").is_some());
+    assert!(resp.get("truncated_paths").is_some());
+
+    aft.shutdown();
+}
+
+// ---------------------------------------------------------------------------
 // file watcher invalidation cycle
 // ---------------------------------------------------------------------------
 

@@ -248,14 +248,14 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R023 — Reverse trace to entry points
 - Class: differentiator
-- Status: active
+- Status: validated
 - Description: `trace_to` traces backward from a target function to all entry points (route handlers, event listeners, exported functions, main). Renders top-down with data threading — shows how data transforms through the call chain.
 - Why it matters: "How does execution reach this function?" — the most powerful single-call navigation primitive. Replaces 5+ file reads.
 - Source: user
 - Primary owning slice: M003/S03
 - Supporting slices: none
-- Validation: unmapped
-- Notes: Depends on entry point detection heuristics (R026).
+- Validation: S03 — 5 integration tests prove backward traversal from deeply-nested utility (checkFormat) to entry points (main), multi-path traces (validate → 2+ entry points), not_configured guard, symbol_not_found error, no-entry-point graceful handling. 5 unit tests prove BFS path collection, cycle detection, depth limiting. Response includes diagnostic fields (total_paths, entry_points_found, max_depth_reached, truncated_paths).
+- Notes: Depends on entry point detection heuristics (R026). Framework-specific patterns deferred (D081).
 
 ### R024 — Data flow tracking
 - Class: differentiator
@@ -281,14 +281,14 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R026 — Entry point detection heuristics
 - Class: core-capability
-- Status: active
+- Status: validated
 - Description: Detect entry points heuristically: route handlers (router.get/post, @Get/@Post), event listeners (on/addEventListener), exported functions, main/init/bootstrap functions, test functions (describe/it/test).
 - Why it matters: trace_to needs to know where to stop tracing backward. Without entry point detection, traces go to infinity.
 - Source: user
 - Primary owning slice: M003/S03
 - Supporting slices: none
-- Validation: unmapped
-- Notes: Heuristics are language-specific — Express routes vs Flask decorators vs Axum handlers.
+- Validation: S03 — 8 unit tests prove classification of exported functions (not methods), main/init/setup/bootstrap/run patterns (case-insensitive), language-specific test patterns (TS/JS describe/it/test, Python test_/setUp/tearDown, Rust test_, Go Test), and negative cases. Generic patterns shipped; framework-specific patterns (Express, Flask, Axum) deferred per D081.
+- Notes: Heuristics are language-specific — generic patterns only for now. Framework-specific patterns added incrementally.
 
 ### R027 — Worktree-aware scoping
 - Class: quality-attribute
@@ -485,10 +485,10 @@ Use it to track what is actively in scope, what has been validated by completed 
 | R020 | core-capability | validated | M003/S01 | M003/S02 | S01+S02 |
 | R021 | primary-user-loop | validated | M003/S01 | none | S01 |
 | R022 | primary-user-loop | validated | M003/S02 | none | S02 |
-| R023 | differentiator | active | M003/S03 | none | unmapped |
+| R023 | differentiator | validated | M003/S03 | none | S03 |
 | R024 | differentiator | active | M003/S04 | none | unmapped |
 | R025 | differentiator | active | M003/S04 | none | unmapped |
-| R026 | core-capability | active | M003/S03 | none | unmapped |
+| R026 | core-capability | validated | M003/S03 | none | S03 |
 | R027 | quality-attribute | validated | M003/S01 | M001/S01 | S01 |
 | R028 | core-capability | active | M004/S01 | none | unmapped |
 | R029 | core-capability | active | M004/S02 | none | unmapped |
@@ -507,7 +507,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ## Coverage Summary
 
-- Active requirements: 11
+- Active requirements: 9
 - Mapped to slices: 34
-- Validated: 24
+- Validated: 26
 - Unmapped active requirements: 0

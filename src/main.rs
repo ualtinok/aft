@@ -82,6 +82,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "configure" => aft::commands::configure::handle_configure(&req, ctx),
         "call_tree" => aft::commands::call_tree::handle_call_tree(&req, ctx),
         "callers" => aft::commands::callers::handle_callers(&req, ctx),
+        "trace_to" => aft::commands::trace_to::handle_trace_to(&req, ctx),
         // Test-only: populate the backup store through the protocol (no write/edit_symbol yet)
         "snapshot" => handle_snapshot(&req, ctx),
         _ => {

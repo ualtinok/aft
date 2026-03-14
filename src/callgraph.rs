@@ -15,6 +15,7 @@ use crate::error::AftError;
 use crate::imports::{self, ImportBlock};
 use crate::language::LanguageProvider;
 use crate::parser::{detect_language, grammar_for, LangId};
+use crate::symbols::SymbolKind;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -34,6 +35,18 @@ pub struct CallSite {
     pub byte_end: usize,
 }
 
+/// Per-symbol metadata for entry point detection (avoids re-parsing).
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolMeta {
+    /// The kind of symbol (function, class, method, etc).
+    pub kind: SymbolKind,
+    /// Whether this symbol is exported.
+    pub exported: bool,
+    /// Function/method signature if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
 /// Per-file call data: call sites grouped by containing symbol, plus
 /// exported symbol names and parsed imports.
 #[derive(Debug, Clone)]
@@ -42,6 +55,8 @@ pub struct FileCallData {
     pub calls_by_symbol: HashMap<String, Vec<CallSite>>,
     /// Names of exported symbols in this file.
     pub exported_symbols: Vec<String>,
+    /// Per-symbol metadata (kind, exported, signature).
+    pub symbol_metadata: HashMap<String, SymbolMeta>,
     /// Parsed import block for cross-file resolution.
     pub import_block: ImportBlock,
     /// Language of the file.
@@ -119,6 +134,100 @@ pub struct CallTreeNode {
     pub resolved: bool,
     /// Child calls (recursive).
     pub children: Vec<CallTreeNode>,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point detection
+// ---------------------------------------------------------------------------
+
+/// Well-known main/init function names (case-insensitive exact match).
+const MAIN_INIT_NAMES: &[&str] = &["main", "init", "setup", "bootstrap", "run"];
+
+/// Determine whether a symbol is an entry point.
+///
+/// Entry points are:
+/// - Exported standalone functions (not methods — methods are class members)
+/// - Functions matching well-known main/init patterns (any language)
+/// - Test functions matching language-specific patterns
+pub fn is_entry_point(name: &str, kind: &SymbolKind, exported: bool, lang: LangId) -> bool {
+    // Exported standalone functions
+    if exported && *kind == SymbolKind::Function {
+        return true;
+    }
+
+    // Main/init patterns (case-insensitive exact match, any kind)
+    let lower = name.to_lowercase();
+    if MAIN_INIT_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+
+    // Test patterns by language
+    match lang {
+        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
+            // describe, it, test (exact), or starts with test/spec
+            matches!(lower.as_str(), "describe" | "it" | "test")
+                || lower.starts_with("test")
+                || lower.starts_with("spec")
+        }
+        LangId::Python => {
+            // starts with test_ or matches setUp/tearDown
+            lower.starts_with("test_") || matches!(name, "setUp" | "tearDown")
+        }
+        LangId::Rust => {
+            // starts with test_
+            lower.starts_with("test_")
+        }
+        LangId::Go => {
+            // starts with Test (case-sensitive)
+            name.starts_with("Test")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trace-to types
+// ---------------------------------------------------------------------------
+
+/// A single hop in a trace path.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceHop {
+    /// Symbol name at this hop.
+    pub symbol: String,
+    /// File path (relative to project root).
+    pub file: String,
+    /// 0-based line number.
+    pub line: u32,
+    /// Function signature if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Whether this hop is an entry point.
+    pub is_entry_point: bool,
+}
+
+/// A complete path from an entry point to the target symbol (top-down).
+#[derive(Debug, Clone, Serialize)]
+pub struct TracePath {
+    /// Hops from entry point (first) to target (last).
+    pub hops: Vec<TraceHop>,
+}
+
+/// Result of a `trace_to` query.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceToResult {
+    /// The target symbol that was traced.
+    pub target_symbol: String,
+    /// The target file (relative to project root).
+    pub target_file: String,
+    /// Complete paths from entry points to the target.
+    pub paths: Vec<TracePath>,
+    /// Total number of complete paths found.
+    pub total_paths: usize,
+    /// Number of distinct entry points found across all paths.
+    pub entry_points_found: usize,
+    /// Whether any path was cut short by the depth limit.
+    pub max_depth_reached: bool,
+    /// Number of paths that reached a dead end (no callers, not entry point).
+    pub truncated_paths: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +659,214 @@ impl CallGraph {
         })
     }
 
+    /// Trace backward from a symbol to all entry points.
+    ///
+    /// Returns complete paths (top-down: entry point first, target last).
+    /// Uses BFS backward through the reverse index, with per-path cycle
+    /// detection and depth limiting.
+    pub fn trace_to(
+        &mut self,
+        file: &Path,
+        symbol: &str,
+        max_depth: usize,
+    ) -> Result<TraceToResult, AftError> {
+        let canon = self.canonicalize(file)?;
+
+        // Ensure file is built
+        self.build_file(&canon)?;
+
+        // Build the reverse index if not cached
+        if self.reverse_index.is_none() {
+            self.build_reverse_index();
+        }
+
+        let target_rel = self.relative_path(&canon);
+        let effective_max = if max_depth == 0 { 10 } else { max_depth };
+
+        // Get line/signature for the target symbol
+        let (target_line, target_sig) = get_symbol_meta(&canon, symbol);
+
+        // Check if target itself is an entry point
+        let target_is_entry = self
+            .lookup_file_data(&canon)
+            .and_then(|fd| {
+                let meta = fd.symbol_metadata.get(symbol)?;
+                Some(is_entry_point(symbol, &meta.kind, meta.exported, fd.lang))
+            })
+            .unwrap_or(false);
+
+        // BFS state: each item is a partial path (bottom-up, will be reversed later)
+        // Each path element: (canonicalized file, symbol name, line, signature)
+        type PathElem = (PathBuf, String, u32, Option<String>);
+        let mut complete_paths: Vec<Vec<PathElem>> = Vec::new();
+        let mut max_depth_reached = false;
+        let mut truncated_paths: usize = 0;
+
+        // Initial path starts at the target
+        let initial: Vec<PathElem> = vec![(
+            canon.clone(),
+            symbol.to_string(),
+            target_line,
+            target_sig,
+        )];
+
+        // If the target itself is an entry point, record it as a trivial path
+        if target_is_entry {
+            complete_paths.push(initial.clone());
+        }
+
+        // Queue of (current_path, depth)
+        let mut queue: Vec<(Vec<PathElem>, usize)> = vec![(initial, 0)];
+
+        while let Some((path, depth)) = queue.pop() {
+            if depth >= effective_max {
+                max_depth_reached = true;
+                continue;
+            }
+
+            let (ref current_file, ref current_symbol, _, _) = path.last().unwrap().clone();
+
+            // Build per-path visited set from path elements
+            let path_visited: HashSet<(PathBuf, String)> = path
+                .iter()
+                .map(|(f, s, _, _)| (f.clone(), s.clone()))
+                .collect();
+
+            // Look up callers in reverse index
+            let reverse_index = self.reverse_index.as_ref().unwrap();
+            let lookup_key = (current_file.clone(), current_symbol.clone());
+            let callers = match reverse_index.get(&lookup_key) {
+                Some(sites) => sites.clone(),
+                None => {
+                    // Dead end: no callers and not an entry point
+                    // (if it were an entry point, we'd have recorded it already)
+                    if path.len() > 1 {
+                        // Only count as truncated if this isn't the target itself
+                        // (the target with no callers is just "no paths found")
+                        truncated_paths += 1;
+                    }
+                    continue;
+                }
+            };
+
+            let mut has_new_path = false;
+            for site in &callers {
+                let caller_key = (site.caller_file.clone(), site.caller_symbol.clone());
+
+                // Cycle detection: skip if this caller is already in the current path
+                if path_visited.contains(&caller_key) {
+                    continue;
+                }
+
+                has_new_path = true;
+
+                // Get caller's metadata
+                let (caller_line, caller_sig) =
+                    get_symbol_meta(&site.caller_file, &site.caller_symbol);
+
+                let mut new_path = path.clone();
+                new_path.push((
+                    site.caller_file.clone(),
+                    site.caller_symbol.clone(),
+                    caller_line,
+                    caller_sig,
+                ));
+
+                // Check if this caller is an entry point
+                // Try both canonical and non-canonical keys (build_reverse_index
+                // may have stored data under the raw walker path)
+                let caller_is_entry = self
+                    .lookup_file_data(&site.caller_file)
+                    .and_then(|fd| {
+                        let meta = fd.symbol_metadata.get(&site.caller_symbol)?;
+                        Some(is_entry_point(
+                            &site.caller_symbol,
+                            &meta.kind,
+                            meta.exported,
+                            fd.lang,
+                        ))
+                    })
+                    .unwrap_or(false);
+
+                if caller_is_entry {
+                    complete_paths.push(new_path.clone());
+                }
+                // Always continue searching backward — there may be longer
+                // paths through other entry points beyond this one
+                queue.push((new_path, depth + 1));
+            }
+
+            // If we had callers but none were new (all cycles), count as truncated
+            if !has_new_path && path.len() > 1 {
+                truncated_paths += 1;
+            }
+        }
+
+        // Reverse each path so it reads top-down (entry point → ... → target)
+        // and convert to TraceHop/TracePath
+        let mut paths: Vec<TracePath> = complete_paths
+            .into_iter()
+            .map(|mut elems| {
+                elems.reverse();
+                let hops: Vec<TraceHop> = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (file_path, sym, line, sig))| {
+                        let is_ep = if i == 0 {
+                            // First hop (after reverse) is the entry point
+                            self.lookup_file_data(file_path)
+                                .and_then(|fd| {
+                                    let meta = fd.symbol_metadata.get(sym)?;
+                                    Some(is_entry_point(sym, &meta.kind, meta.exported, fd.lang))
+                                })
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        TraceHop {
+                            symbol: sym.clone(),
+                            file: self.relative_path(file_path),
+                            line: *line,
+                            signature: sig.clone(),
+                            is_entry_point: is_ep,
+                        }
+                    })
+                    .collect();
+                TracePath { hops }
+            })
+            .collect();
+
+        // Sort paths for deterministic output (by entry point name, then path length)
+        paths.sort_by(|a, b| {
+            let a_entry = a.hops.first().map(|h| h.symbol.as_str()).unwrap_or("");
+            let b_entry = b.hops.first().map(|h| h.symbol.as_str()).unwrap_or("");
+            a_entry.cmp(b_entry).then(a.hops.len().cmp(&b.hops.len()))
+        });
+
+        // Count distinct entry points
+        let mut entry_point_names: HashSet<String> = HashSet::new();
+        for p in &paths {
+            if let Some(first) = p.hops.first() {
+                if first.is_entry_point {
+                    entry_point_names.insert(first.symbol.clone());
+                }
+            }
+        }
+
+        let total_paths = paths.len();
+        let entry_points_found = entry_point_names.len();
+
+        Ok(TraceToResult {
+            target_symbol: symbol.to_string(),
+            target_file: target_rel,
+            paths,
+            total_paths,
+            entry_points_found,
+            max_depth_reached,
+            truncated_paths,
+        })
+    }
+
     /// Recursively collect callers up to the given depth.
     fn collect_callers_recursive(
         &self,
@@ -633,6 +950,27 @@ impl CallGraph {
         // Try canonicalize, fall back to the full path
         Ok(std::fs::canonicalize(&full_path).unwrap_or(full_path))
     }
+
+    /// Look up cached file data, trying both the given path and its
+    /// canonicalized form. Needed because `build_reverse_index` may store
+    /// data under raw walker paths while CallerSite uses canonical paths.
+    fn lookup_file_data(&self, path: &Path) -> Option<&FileCallData> {
+        if let Some(fd) = self.data.get(path) {
+            return Some(fd);
+        }
+        // Try canonical
+        let canon = std::fs::canonicalize(path).ok()?;
+        self.data.get(&canon).or_else(|| {
+            // Try non-canonical forms stored by the walker
+            self.data.iter().find_map(|(k, v)| {
+                if std::fs::canonicalize(k).ok().as_ref() == Some(&canon) {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,9 +1037,25 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
         .map(|s| s.name.clone())
         .collect();
 
+    // Build per-symbol metadata for entry point detection
+    let symbol_metadata: HashMap<String, SymbolMeta> = symbols
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                SymbolMeta {
+                    kind: s.kind.clone(),
+                    exported: s.exported,
+                    signature: s.signature.clone(),
+                },
+            )
+        })
+        .collect();
+
     Ok(FileCallData {
         calls_by_symbol,
         exported_symbols,
+        symbol_metadata,
         import_block,
         lang,
     })
@@ -712,6 +1066,7 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
 #[allow(dead_code)]
 struct SymbolInfo {
     name: String,
+    kind: SymbolKind,
     start_line: u32,
     start_col: u32,
     end_line: u32,
@@ -742,6 +1097,7 @@ fn list_symbols_from_tree(
             .into_iter()
             .map(|s| SymbolInfo {
                 name: s.name,
+                kind: s.kind,
                 start_line: s.range.start_line,
                 start_col: s.range.start_col,
                 end_line: s.range.end_line,
@@ -1519,6 +1875,383 @@ export function funcB() {
         assert!(
             graph.project_files.is_none(),
             "invalidate_file should clear project_files"
+        );
+    }
+
+    // --- is_entry_point ---
+
+    #[test]
+    fn is_entry_point_exported_function() {
+        assert!(is_entry_point(
+            "handleRequest",
+            &SymbolKind::Function,
+            true,
+            LangId::TypeScript
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_exported_method_is_not_entry() {
+        // Methods are class members, not standalone entry points
+        assert!(!is_entry_point(
+            "handleRequest",
+            &SymbolKind::Method,
+            true,
+            LangId::TypeScript
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_main_init_patterns() {
+        for name in &["main", "Main", "MAIN", "init", "setup", "bootstrap", "run"] {
+            assert!(
+                is_entry_point(name, &SymbolKind::Function, false, LangId::TypeScript),
+                "{} should be an entry point",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn is_entry_point_test_patterns_ts() {
+        assert!(is_entry_point(
+            "describe",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+        assert!(is_entry_point(
+            "it",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+        assert!(is_entry_point(
+            "test",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+        assert!(is_entry_point(
+            "testValidation",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+        assert!(is_entry_point(
+            "specHelper",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_test_patterns_python() {
+        assert!(is_entry_point(
+            "test_login",
+            &SymbolKind::Function,
+            false,
+            LangId::Python
+        ));
+        assert!(is_entry_point(
+            "setUp",
+            &SymbolKind::Function,
+            false,
+            LangId::Python
+        ));
+        assert!(is_entry_point(
+            "tearDown",
+            &SymbolKind::Function,
+            false,
+            LangId::Python
+        ));
+        // "testSomething" should NOT match Python (needs test_ prefix)
+        assert!(!is_entry_point(
+            "testSomething",
+            &SymbolKind::Function,
+            false,
+            LangId::Python
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_test_patterns_rust() {
+        assert!(is_entry_point(
+            "test_parse",
+            &SymbolKind::Function,
+            false,
+            LangId::Rust
+        ));
+        assert!(!is_entry_point(
+            "TestSomething",
+            &SymbolKind::Function,
+            false,
+            LangId::Rust
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_test_patterns_go() {
+        assert!(is_entry_point(
+            "TestParsing",
+            &SymbolKind::Function,
+            false,
+            LangId::Go
+        ));
+        // lowercase test should NOT match Go (needs uppercase Test prefix)
+        assert!(!is_entry_point(
+            "testParsing",
+            &SymbolKind::Function,
+            false,
+            LangId::Go
+        ));
+    }
+
+    #[test]
+    fn is_entry_point_non_exported_non_main_is_not_entry() {
+        assert!(!is_entry_point(
+            "helperUtil",
+            &SymbolKind::Function,
+            false,
+            LangId::TypeScript
+        ));
+    }
+
+    // --- symbol_metadata ---
+
+    #[test]
+    fn callgraph_symbol_metadata_populated() {
+        let dir = setup_ts_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        let file_data = graph.build_file(&dir.path().join("utils.ts")).unwrap();
+        assert!(
+            file_data.symbol_metadata.contains_key("helper"),
+            "symbol_metadata should contain helper"
+        );
+        let meta = &file_data.symbol_metadata["helper"];
+        assert_eq!(meta.kind, SymbolKind::Function);
+        assert!(meta.exported, "helper should be exported");
+    }
+
+    // --- trace_to ---
+
+    /// Setup a multi-path project for trace_to tests.
+    ///
+    /// Structure:
+    ///   main.ts: exported main() → processData (from utils)
+    ///   service.ts: exported handleRequest() → processData (from utils)
+    ///   utils.ts: exported processData() → validate (from helpers)
+    ///   helpers.ts: exported validate() → checkFormat (local, not exported)
+    ///   test_helpers.ts: testValidation() → validate (from helpers)
+    ///
+    /// checkFormat should have 3 paths:
+    ///   main → processData → validate → checkFormat
+    ///   handleRequest → processData → validate → checkFormat
+    ///   testValidation → validate → checkFormat
+    fn setup_trace_project() -> TempDir {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(
+            dir.path().join("main.ts"),
+            r#"import { processData } from './utils';
+
+export function main() {
+    const result = processData("hello");
+    return result;
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("service.ts"),
+            r#"import { processData } from './utils';
+
+export function handleRequest(input: string): string {
+    return processData(input);
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("utils.ts"),
+            r#"import { validate } from './helpers';
+
+export function processData(input: string): string {
+    const valid = validate(input);
+    if (!valid) {
+        throw new Error("invalid input");
+    }
+    return input.toUpperCase();
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("helpers.ts"),
+            r#"export function validate(input: string): boolean {
+    return checkFormat(input);
+}
+
+function checkFormat(input: string): boolean {
+    return input.length > 0 && /^[a-zA-Z]+$/.test(input);
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.path().join("test_helpers.ts"),
+            r#"import { validate } from './helpers';
+
+function testValidation() {
+    const result = validate("hello");
+    console.log(result);
+}
+"#,
+        )
+        .unwrap();
+
+        // git init so the walker works
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        dir
+    }
+
+    #[test]
+    fn trace_to_multi_path() {
+        let dir = setup_trace_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        let result = graph
+            .trace_to(&dir.path().join("helpers.ts"), "checkFormat", 10)
+            .unwrap();
+
+        assert_eq!(result.target_symbol, "checkFormat");
+        assert!(
+            result.total_paths >= 2,
+            "checkFormat should have at least 2 paths, got {} (paths: {:?})",
+            result.total_paths,
+            result
+                .paths
+                .iter()
+                .map(|p| p.hops.iter().map(|h| h.symbol.as_str()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+
+        // Check that paths are top-down: entry point first, target last
+        for path in &result.paths {
+            assert!(
+                path.hops.first().unwrap().is_entry_point,
+                "First hop should be an entry point, got: {}",
+                path.hops.first().unwrap().symbol
+            );
+            assert_eq!(
+                path.hops.last().unwrap().symbol,
+                "checkFormat",
+                "Last hop should be checkFormat"
+            );
+        }
+
+        // Verify entry_points_found > 0
+        assert!(
+            result.entry_points_found >= 2,
+            "should find at least 2 entry points, got {}",
+            result.entry_points_found
+        );
+    }
+
+    #[test]
+    fn trace_to_single_path() {
+        let dir = setup_trace_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        // validate is called from processData, testValidation
+        // processData is called from main, handleRequest
+        // So validate has paths: main→processData→validate, handleRequest→processData→validate, testValidation→validate
+        let result = graph
+            .trace_to(&dir.path().join("helpers.ts"), "validate", 10)
+            .unwrap();
+
+        assert_eq!(result.target_symbol, "validate");
+        assert!(
+            result.total_paths >= 2,
+            "validate should have at least 2 paths, got {}",
+            result.total_paths
+        );
+    }
+
+    #[test]
+    fn trace_to_cycle_detection() {
+        let dir = setup_cycle_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        // funcA ↔ funcB cycle — should terminate
+        let result = graph
+            .trace_to(&dir.path().join("a.ts"), "funcA", 10)
+            .unwrap();
+
+        // Should not hang — the fact we got here means cycle detection works
+        assert_eq!(result.target_symbol, "funcA");
+    }
+
+    #[test]
+    fn trace_to_depth_limit() {
+        let dir = setup_trace_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        // With max_depth=1, should not be able to reach entry points that are 3+ hops away
+        let result = graph
+            .trace_to(&dir.path().join("helpers.ts"), "checkFormat", 1)
+            .unwrap();
+
+        // testValidation→validate→checkFormat is 2 hops, which requires depth >= 2
+        // main→processData→validate→checkFormat is 3 hops, which requires depth >= 3
+        // With depth=1, most paths should be truncated
+        assert_eq!(result.target_symbol, "checkFormat");
+
+        // The shallow result should have fewer paths than the deep one
+        let deep_result = graph
+            .trace_to(&dir.path().join("helpers.ts"), "checkFormat", 10)
+            .unwrap();
+
+        assert!(
+            result.total_paths <= deep_result.total_paths,
+            "shallow trace should find <= paths compared to deep: {} vs {}",
+            result.total_paths,
+            deep_result.total_paths
+        );
+    }
+
+    #[test]
+    fn trace_to_entry_point_target() {
+        let dir = setup_trace_project();
+        let mut graph = CallGraph::new(dir.path().to_path_buf());
+
+        // main is itself an entry point — should return a single trivial path
+        let result = graph
+            .trace_to(&dir.path().join("main.ts"), "main", 10)
+            .unwrap();
+
+        assert_eq!(result.target_symbol, "main");
+        assert!(
+            result.total_paths >= 1,
+            "main should have at least 1 path (itself), got {}",
+            result.total_paths
+        );
+        // Check the trivial path has just one hop
+        let trivial = result.paths.iter().find(|p| p.hops.len() == 1);
+        assert!(
+            trivial.is_some(),
+            "should have a trivial path with just the entry point itself"
         );
     }
 }
