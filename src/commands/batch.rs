@@ -119,7 +119,7 @@ pub fn handle_batch(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Phase 5: Write, format, and validate via shared pipeline
-    let write_result = match edit::write_format_validate(path, &content, ctx.config(), &req.params) {
+    let write_result = match edit::write_format_validate(path, &content, &ctx.config(), &req.params) {
         Ok(r) => r,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());

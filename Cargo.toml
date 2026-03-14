@@ -23,6 +23,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-go = "0.23"
 similar = "2"
 streaming-iterator = "0.1"
+ignore = "0.4"
 
 [profile.release]
 lto = true

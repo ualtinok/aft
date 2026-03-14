@@ -1,5 +1,6 @@
 mod helpers;
 
+mod callgraph_test;
 mod commands_test;
 mod dryrun_test;
 mod edit_test;

@@ -75,6 +75,8 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "wrap_try_catch" => aft::commands::wrap_try_catch::handle_wrap_try_catch(&req, ctx),
         "remove_import" => aft::commands::remove_import::handle_remove_import(&req, ctx),
         "organize_imports" => aft::commands::organize_imports::handle_organize_imports(&req, ctx),
+        "configure" => aft::commands::configure::handle_configure(&req, ctx),
+        "call_tree" => aft::commands::call_tree::handle_call_tree(&req, ctx),
         // Test-only: populate the backup store through the protocol (no write/edit_symbol yet)
         "snapshot" => handle_snapshot(&req, ctx),
         _ => {

@@ -122,7 +122,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
             }
         };
 
-        match edit::write_format_validate(&op.file, &new_content, ctx.config(), &req.params) {
+        match edit::write_format_validate(&op.file, &new_content, &ctx.config(), &req.params) {
             Ok(wr) => {
                 // Track this file as new if it was created by this operation
                 // (in case earlier ops in the same transaction created it)

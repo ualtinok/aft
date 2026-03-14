@@ -1,14 +1,16 @@
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 
 use crate::backup::BackupStore;
+use crate::callgraph::CallGraph;
 use crate::checkpoint::CheckpointStore;
 use crate::config::Config;
 use crate::language::LanguageProvider;
 
 /// Shared application context threaded through all command handlers.
 ///
-/// Holds the language provider, backup/checkpoint stores, and configuration.
-/// Constructed once at startup and passed by reference to `dispatch`.
+/// Holds the language provider, backup/checkpoint stores, configuration,
+/// and call graph engine. Constructed once at startup and passed by
+/// reference to `dispatch`.
 ///
 /// Stores use `RefCell` for interior mutability — the binary is single-threaded
 /// (one request at a time on the stdin read loop) so runtime borrow checking
@@ -17,7 +19,8 @@ pub struct AppContext {
     provider: Box<dyn LanguageProvider>,
     backup: RefCell<BackupStore>,
     checkpoint: RefCell<CheckpointStore>,
-    config: Config,
+    config: RefCell<Config>,
+    callgraph: RefCell<Option<CallGraph>>,
 }
 
 impl AppContext {
@@ -26,7 +29,8 @@ impl AppContext {
             provider,
             backup: RefCell::new(BackupStore::new()),
             checkpoint: RefCell::new(CheckpointStore::new()),
-            config,
+            config: RefCell::new(config),
+            callgraph: RefCell::new(None),
         }
     }
 
@@ -45,8 +49,18 @@ impl AppContext {
         &self.checkpoint
     }
 
-    /// Access the configuration.
-    pub fn config(&self) -> &Config {
-        &self.config
+    /// Access the configuration (shared borrow).
+    pub fn config(&self) -> Ref<'_, Config> {
+        self.config.borrow()
+    }
+
+    /// Access the configuration (mutable borrow).
+    pub fn config_mut(&self) -> RefMut<'_, Config> {
+        self.config.borrow_mut()
+    }
+
+    /// Access the call graph engine.
+    pub fn callgraph(&self) -> &RefCell<Option<CallGraph>> {
+        &self.callgraph
     }
 }

@@ -221,18 +221,18 @@ Use it to track what is actively in scope, what has been validated by completed 
 - Source: user
 - Primary owning slice: M003/S01
 - Supporting slices: none
-- Validation: unmapped
+- Validation: S01 — Lazy per-file construction with `HashMap<PathBuf, FileCallData>`, cross-file resolution via import chains, worktree-scoped file walking via `ignore` crate. File watcher invalidation deferred to S02.
 - Notes: File watcher runs in the persistent process background. Must exclude node_modules, target/, venv/, etc.
 
 ### R021 — Forward call tree
 - Class: primary-user-loop
-- Status: active
+- Status: validated
 - Description: `call_tree` expands from an entry point showing all called functions recursively with signatures, body lines, and file locations. Depth-limited with truncation indicators.
 - Why it matters: Replaces the file-by-file call tracing workflow (~5000 tokens for 4 files) with a single call (~400 tokens).
 - Source: user
-- Primary owning slice: M003/S02
+- Primary owning slice: M003/S01
 - Supporting slices: none
-- Validation: unmapped
+- Validation: S01 — 7 integration tests prove cross-file call tree (main→processData→validate across 3 files), depth limiting, aliased import resolution, unknown symbol errors, not-configured errors. Plugin tool registration verified by bun tests.
 - Notes: External calls (third-party libraries) shown as leaf nodes with package name.
 
 ### R022 — Reverse caller tree
@@ -292,13 +292,13 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ### R027 — Worktree-aware scoping
 - Class: quality-attribute
-- Status: active
+- Status: validated
 - Description: All operations respect the project root boundary. Call graph, file watcher, and symbol search do not crawl into node_modules, .git, target/, venv/, or other excluded directories.
 - Why it matters: Without scoping, operations on large codebases include irrelevant third-party code, producing noise and performance problems.
 - Source: user
 - Primary owning slice: M003/S01
 - Supporting slices: M001/S01
-- Validation: unmapped
+- Validation: S01 — `walk_project_files()` uses `ignore` crate respecting .gitignore with hardcoded exclusions for node_modules, target, venv, .git. Unit tests prove gitignore exclusion and source-file-only filtering.
 - Notes: Should respect .gitignore patterns by default. Configurable exclusion list.
 
 ### R028 — Move symbol with import rewiring
@@ -482,14 +482,14 @@ Use it to track what is actively in scope, what has been validated by completed 
 | R017 | quality-attribute | validated | M002/S03 | none | S03 |
 | R018 | failure-visibility | validated | M002/S04 | none | S04 |
 | R019 | core-capability | validated | M002/S04 | none | S04 |
-| R020 | core-capability | active | M003/S01 | none | unmapped |
-| R021 | primary-user-loop | active | M003/S02 | none | unmapped |
+| R020 | core-capability | active | M003/S01 | none | S01 (partial) |
+| R021 | primary-user-loop | validated | M003/S01 | none | S01 |
 | R022 | primary-user-loop | active | M003/S02 | none | unmapped |
 | R023 | differentiator | active | M003/S03 | none | unmapped |
 | R024 | differentiator | active | M003/S04 | none | unmapped |
 | R025 | differentiator | active | M003/S05 | none | unmapped |
 | R026 | core-capability | active | M003/S03 | none | unmapped |
-| R027 | quality-attribute | active | M003/S01 | M001/S01 | unmapped |
+| R027 | quality-attribute | validated | M003/S01 | M001/S01 | S01 |
 | R028 | core-capability | active | M004/S01 | none | unmapped |
 | R029 | core-capability | active | M004/S02 | none | unmapped |
 | R030 | core-capability | active | M004/S02 | none | unmapped |
@@ -507,7 +507,7 @@ Use it to track what is actively in scope, what has been validated by completed 
 
 ## Coverage Summary
 
-- Active requirements: 15
+- Active requirements: 13
 - Mapped to slices: 34
-- Validated: 20
+- Validated: 22
 - Unmapped active requirements: 0

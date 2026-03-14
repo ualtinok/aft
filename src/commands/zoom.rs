@@ -241,11 +241,7 @@ fn line_col_to_byte(source: &str, line: u32, col: u32) -> usize {
 
 /// Extract call expression names within a byte range of the AST.
 ///
-/// Walks all nodes in the tree, finds call_expression/call/macro_invocation
-/// nodes whose byte range falls within [byte_start, byte_end], and extracts
-/// the callee name (last segment for member access like `obj.method()`).
-///
-/// Returns (callee_name, line_number) pairs.
+/// Delegates to `crate::calls::extract_calls_in_range`.
 fn extract_calls_in_range(
     source: &str,
     root: tree_sitter::Node,
@@ -253,120 +249,7 @@ fn extract_calls_in_range(
     byte_end: usize,
     lang: LangId,
 ) -> Vec<(String, u32)> {
-    let mut results = Vec::new();
-    let call_kinds = call_node_kinds(lang);
-    walk_for_calls(root, source, byte_start, byte_end, &call_kinds, &mut results);
-    results
-}
-
-/// Returns the tree-sitter node kind strings that represent call expressions
-/// for the given language.
-fn call_node_kinds(lang: LangId) -> Vec<&'static str> {
-    match lang {
-        LangId::TypeScript | LangId::Tsx | LangId::JavaScript | LangId::Go => {
-            vec!["call_expression"]
-        }
-        LangId::Python => vec!["call"],
-        LangId::Rust => vec!["call_expression", "macro_invocation"],
-    }
-}
-
-/// Recursively walk tree nodes looking for call expressions within a byte range.
-fn walk_for_calls(
-    node: tree_sitter::Node,
-    source: &str,
-    byte_start: usize,
-    byte_end: usize,
-    call_kinds: &[&str],
-    results: &mut Vec<(String, u32)>,
-) {
-    let node_start = node.start_byte();
-    let node_end = node.end_byte();
-
-    // Skip nodes entirely outside our range
-    if node_end <= byte_start || node_start >= byte_end {
-        return;
-    }
-
-    if call_kinds.contains(&node.kind()) && node_start >= byte_start && node_end <= byte_end {
-        if let Some(name) = extract_callee_name(&node, source) {
-            results.push((name, node.start_position().row as u32));
-        }
-    }
-
-    // Recurse into children
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            walk_for_calls(cursor.node(), source, byte_start, byte_end, call_kinds, results);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-}
-
-/// Extract the callee name from a call expression node.
-///
-/// For simple calls like `foo()`, returns "foo".
-/// For member access like `this.add()` or `obj.method()`, returns the last
-/// segment ("add" / "method").
-/// For Rust macros like `println!()`, returns "println!".
-fn extract_callee_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let kind = node.kind();
-
-    if kind == "macro_invocation" {
-        // Rust macro: first child is the macro name (e.g. `println!`)
-        let first_child = node.child(0)?;
-        let text = &source[first_child.byte_range()];
-        return Some(format!("{}!", text));
-    }
-
-    // call_expression / call — get the "function" child
-    let func_node = node.child_by_field_name("function")
-        .or_else(|| node.child(0))?;
-
-    let func_kind = func_node.kind();
-    match func_kind {
-        // Simple identifier: foo()
-        "identifier" => {
-            Some(source[func_node.byte_range()].to_string())
-        }
-        // Member access: obj.method() / this.method()
-        "member_expression" | "field_expression" | "attribute" => {
-            // Last child that's a property_identifier, field_identifier, or identifier
-            extract_last_segment(&func_node, source)
-        }
-        _ => {
-            // Fallback: use the full text
-            let text = &source[func_node.byte_range()];
-            // If it contains a dot, take the last segment
-            if text.contains('.') {
-                text.rsplit('.').next().map(|s| s.trim().to_string())
-            } else {
-                Some(text.trim().to_string())
-            }
-        }
-    }
-}
-
-/// Extract the last segment of a member expression (the method/property name).
-fn extract_last_segment(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let child_count = node.child_count();
-    // Walk children from the end looking for an identifier-like node
-    for i in (0..child_count).rev() {
-        if let Some(child) = node.child(i) {
-            match child.kind() {
-                "property_identifier" | "field_identifier" | "identifier" => {
-                    return Some(source[child.byte_range()].to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-    // Fallback: full text, last dot segment
-    let text = &source[node.byte_range()];
-    text.rsplit('.').next().map(|s| s.trim().to_string())
+    crate::calls::extract_calls_in_range(source, root, byte_start, byte_end, lang)
 }
 
 #[cfg(test)]
