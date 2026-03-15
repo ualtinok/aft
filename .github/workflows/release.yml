@@ -245,16 +245,15 @@ jobs:
       # for all 6 packages, then remove NODE_AUTH_TOKEN and keep only --provenance
       - name: Publish platform packages
         run: |
-          npm publish packages/npm/darwin-arm64 --access public --provenance
-          npm publish packages/npm/darwin-x64 --access public --provenance
-          npm publish packages/npm/linux-arm64 --access public --provenance
-          npm publish packages/npm/linux-x64 --access public --provenance
-          npm publish packages/npm/win32-x64 --access public --provenance
+          for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
+            cd packages/npm/$pkg && npm publish --access public --provenance && cd ../../..
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @cortexkit/aft-opencode
-        run: npm publish packages/opencode-plugin --access public --provenance
+        run: npm publish --access public --provenance
+        working-directory: packages/opencode-plugin
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

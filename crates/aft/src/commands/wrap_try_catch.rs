@@ -206,13 +206,17 @@ pub fn handle_wrap_try_catch(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Write, format, and validate ---
-    let write_result =
+    let mut write_result =
         match edit::write_format_validate(path, &new_source, &ctx.config(), &req.params) {
             Ok(r) => r,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());
             }
         };
+
+    if let Ok(final_content) = std::fs::read_to_string(path) {
+        write_result.lsp_diagnostics = ctx.lsp_post_write(path, &final_content, &req.params);
+    }
 
     eprintln!("[aft] wrap_try_catch: {}", file);
 
@@ -242,6 +246,7 @@ pub fn handle_wrap_try_catch(req: &RawRequest, ctx: &AppContext) -> Response {
         result["backup_id"] = serde_json::json!(id);
     }
 
+    write_result.append_lsp_diagnostics_to(&mut result);
     Response::success(&req.id, result)
 }
 

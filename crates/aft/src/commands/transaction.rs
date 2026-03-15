@@ -129,6 +129,10 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
 
         match edit::write_format_validate(&op.file, &new_content, &ctx.config(), &req.params) {
             Ok(wr) => {
+                if let Ok(final_content) = std::fs::read_to_string(&op.file) {
+                    ctx.lsp_notify_file_changed(&op.file, &final_content);
+                }
+
                 // Track this file as new if it was created by this operation
                 // (in case earlier ops in the same transaction created it)
                 if !snapshotted_files.contains(&op.file) && !new_files.contains(&op.file) {

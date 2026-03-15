@@ -1,9 +1,29 @@
 //! Integration tests for the write and edit_symbol commands.
 
 use std::fs;
+use std::path::PathBuf;
 
 use super::helpers::{fixture_path, AftProcess};
 
+fn fake_server_path() -> PathBuf {
+    option_env!("CARGO_BIN_EXE_fake-lsp-server")
+        .or(option_env!("CARGO_BIN_EXE_fake_lsp_server"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake-lsp-server").map(PathBuf::from))
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake_lsp_server").map(PathBuf::from))
+        .or_else(|| {
+            let mut path = std::env::current_exe().ok()?;
+            path.pop();
+            path.pop();
+            path.push("fake-lsp-server");
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .expect("fake-lsp-server binary path")
+}
 // ============================================================================
 // write command tests
 // ============================================================================
@@ -348,6 +368,68 @@ fn edit_match_single_occurrence() {
     );
 
     let _ = fs::remove_file(&target);
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn edit_match_returns_inline_lsp_diagnostics_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = root.join("main.rs");
+    let cargo_toml = root.join("Cargo.toml");
+    fs::write(
+        &cargo_toml,
+        "[package]\nname = \"inline-diag\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &file,
+        "fn main() { let value = 1; println!(\"{}\", value); }\n",
+    )
+    .unwrap();
+
+    let fake_server = fake_server_path();
+    let mut aft = AftProcess::spawn_with_env(&[("AFT_LSP_RUST_BINARY", fake_server.as_os_str())]);
+
+    let configure = aft.send(&format!(
+        r#"{{"id":"cfg-inline","command":"configure","project_root":"{}"}}"#,
+        root.display()
+    ));
+    assert_eq!(configure["ok"], true, "configure failed: {configure:?}");
+
+    let req = serde_json::json!({
+        "id": "em-inline-diag",
+        "command": "edit_match",
+        "file": file.display().to_string(),
+        "match": "let value = 1",
+        "replacement": "let answer = 1",
+        "diagnostics": true,
+    });
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+
+    assert_eq!(resp["ok"], true, "edit_match should succeed: {resp:?}");
+    let diagnostics = resp["lsp_diagnostics"]
+        .as_array()
+        .expect("lsp_diagnostics array");
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected inline diagnostics: {resp:?}"
+    );
+
+    let canonical_file = fs::canonicalize(&file).expect("canonical file");
+    assert_eq!(diagnostics[0]["file"], canonical_file.display().to_string());
+    assert_eq!(diagnostics[0]["line"], 1);
+    assert_eq!(diagnostics[0]["column"], 1);
+    assert_eq!(diagnostics[0]["end_line"], 1);
+    assert_eq!(diagnostics[0]["end_column"], 6);
+    assert_eq!(diagnostics[0]["severity"], "error");
+    assert_eq!(diagnostics[0]["message"], "test diagnostic error");
+    assert_eq!(diagnostics[0]["code"], "E0001");
+    assert_eq!(diagnostics[0]["source"], "fake-lsp");
+    assert_eq!(diagnostics[1]["severity"], "warning");
+
     let status = aft.shutdown();
     assert!(status.success());
 }

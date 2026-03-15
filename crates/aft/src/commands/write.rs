@@ -88,13 +88,17 @@ pub fn handle_write(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Write, format, and validate via shared pipeline
-    let write_result = match edit::write_format_validate(path, content, &ctx.config(), &req.params)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Response::error(&req.id, e.code(), e.to_string());
-        }
-    };
+    let mut write_result =
+        match edit::write_format_validate(path, content, &ctx.config(), &req.params) {
+            Ok(r) => r,
+            Err(e) => {
+                return Response::error(&req.id, e.code(), e.to_string());
+            }
+        };
+
+    if let Ok(final_content) = std::fs::read_to_string(path) {
+        write_result.lsp_diagnostics = ctx.lsp_post_write(path, &final_content, &req.params);
+    }
 
     eprintln!("[aft] write: {}", file);
 
@@ -123,5 +127,6 @@ pub fn handle_write(req: &RawRequest, ctx: &AppContext) -> Response {
         result["backup_id"] = serde_json::json!(id);
     }
 
+    write_result.append_lsp_diagnostics_to(&mut result);
     Response::success(&req.id, result)
 }

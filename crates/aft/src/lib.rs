@@ -13,6 +13,7 @@ pub mod format;
 pub mod imports;
 pub mod indent;
 pub mod language;
+pub mod lsp;
 pub mod lsp_hints;
 pub mod parser;
 pub mod protocol;

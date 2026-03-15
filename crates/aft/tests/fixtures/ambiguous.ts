@@ -1,6 +1,6 @@
 // Fixture with duplicate symbol names for disambiguation testing
 
-export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export function process(data: string): string {
+export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export export function process(data: string): string {
   return data.toLowerCase();
 }
 

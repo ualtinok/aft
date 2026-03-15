@@ -147,6 +147,35 @@ pub struct WriteResult {
     pub validation_errors: Vec<format::ValidationError>,
     /// Why validation was skipped, if it was. Values: "not_found", "timeout", "error", "unsupported_language".
     pub validate_skipped_reason: Option<String>,
+    /// LSP diagnostics for the edited file. Only populated when `diagnostics: true` is
+    /// passed in the edit request AND a language server is available.
+    pub lsp_diagnostics: Vec<crate::lsp::diagnostics::StoredDiagnostic>,
+}
+
+impl WriteResult {
+    /// Append LSP diagnostics to a response JSON object.
+    /// Only adds the field when diagnostics were requested and collected.
+    pub fn append_lsp_diagnostics_to(&self, result: &mut serde_json::Value) {
+        if !self.lsp_diagnostics.is_empty() {
+            result["lsp_diagnostics"] = serde_json::json!(self
+                .lsp_diagnostics
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "file": d.file.display().to_string(),
+                        "line": d.line,
+                        "column": d.column,
+                        "end_line": d.end_line,
+                        "end_column": d.end_column,
+                        "severity": d.severity.as_str(),
+                        "message": d.message,
+                        "code": d.code,
+                        "source": d.source,
+                    })
+                })
+                .collect::<Vec<_>>());
+        }
+    }
 }
 
 /// Write content to disk, auto-format, then validate syntax.
@@ -195,6 +224,7 @@ pub fn write_format_validate(
         validate_requested,
         validation_errors,
         validate_skipped_reason,
+        lsp_diagnostics: Vec::new(),
     })
 }
 

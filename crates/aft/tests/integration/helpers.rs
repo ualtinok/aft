@@ -19,13 +19,23 @@ pub struct AftProcess {
 impl AftProcess {
     /// Spawn the aft binary with piped stdin/stdout/stderr.
     pub fn spawn() -> Self {
+        Self::spawn_with_env(&[])
+    }
+
+    /// Spawn the aft binary with additional environment variables.
+    pub fn spawn_with_env(envs: &[(&str, &std::ffi::OsStr)]) -> Self {
         let binary = env!("CARGO_BIN_EXE_aft");
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn aft binary");
+            .stderr(Stdio::piped());
+
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let mut child = command.spawn().expect("failed to spawn aft binary");
 
         let stdout = child.stdout.take().expect("stdout handle");
         let reader = BufReader::new(stdout);

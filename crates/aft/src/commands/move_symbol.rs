@@ -361,6 +361,10 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     // 1. Write source file (symbol removed)
     match edit::write_format_validate(source_path, &new_source, &ctx.config(), &req.params) {
         Ok(wr) => {
+            if let Ok(final_content) = std::fs::read_to_string(source_path) {
+                ctx.lsp_notify_file_changed(source_path, &final_content);
+            }
+
             written_files.push(source_path.to_path_buf());
             results.push(serde_json::json!({
                 "file": file,
@@ -383,6 +387,10 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     // 2. Write destination file (symbol added)
     match edit::write_format_validate(dest_path, &new_dest, &ctx.config(), &req.params) {
         Ok(wr) => {
+            if let Ok(final_content) = std::fs::read_to_string(dest_path) {
+                ctx.lsp_notify_file_changed(dest_path, &final_content);
+            }
+
             if dest_existed {
                 written_files.push(dest_path.to_path_buf());
             } else {
@@ -412,6 +420,10 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     for (path, _original, new_content) in &consumer_rewrites {
         match edit::write_format_validate(path, new_content, &ctx.config(), &req.params) {
             Ok(wr) => {
+                if let Ok(final_content) = std::fs::read_to_string(path) {
+                    ctx.lsp_notify_file_changed(path, &final_content);
+                }
+
                 written_files.push(path.clone());
                 consumers_updated += 1;
                 results.push(serde_json::json!({

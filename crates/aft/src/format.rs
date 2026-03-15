@@ -1320,7 +1320,7 @@ mod tests {
         };
         let result = detect_type_checker(&path, LangId::Go, &config);
         if tool_available("go") {
-            let (cmd, args) = result.unwrap();
+            let (cmd, _args) = result.unwrap();
             // Could be staticcheck or go vet depending on what's installed
             assert!(cmd == "go" || cmd == "staticcheck");
         } else {

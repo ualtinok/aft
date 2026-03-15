@@ -3,6 +3,7 @@ use std::io::{self, BufRead, BufWriter, Write};
 
 use aft::config::Config;
 use aft::context::AppContext;
+use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, RawRequest, Response};
 
@@ -33,6 +34,7 @@ fn main() {
         let response = match serde_json::from_str::<RawRequest>(trimmed) {
             Ok(req) => {
                 drain_watcher_events(&ctx);
+                drain_lsp_events(&ctx);
                 dispatch(req, &ctx)
             }
             Err(e) => {
@@ -51,6 +53,7 @@ fn main() {
         }
     }
 
+    ctx.lsp().shutdown_all();
     eprintln!("[aft] stdin closed, shutting down");
 }
 
@@ -92,6 +95,18 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "inline_symbol" => aft::commands::inline_symbol::handle_inline_symbol(&req, ctx),
         "ast_search" => aft::commands::ast_search::handle_ast_search(&req, ctx),
         "ast_replace" => aft::commands::ast_replace::handle_ast_replace(&req, ctx),
+        "lsp_diagnostics" => aft::commands::lsp_diagnostics::handle_lsp_diagnostics(&req, ctx),
+        "lsp_hover" => aft::commands::lsp_hover::handle_lsp_hover(&req, ctx),
+        "lsp_goto_definition" => {
+            aft::commands::lsp_goto_definition::handle_lsp_goto_definition(&req, ctx)
+        }
+        "lsp_find_references" => {
+            aft::commands::lsp_find_references::handle_lsp_find_references(&req, ctx)
+        }
+        "lsp_prepare_rename" => {
+            aft::commands::lsp_prepare_rename::handle_lsp_prepare_rename(&req, ctx)
+        }
+        "lsp_rename" => aft::commands::lsp_rename::handle_lsp_rename(&req, ctx),
         // Test-only: populate the backup store through the protocol (no write/edit_symbol yet)
         "snapshot" => handle_snapshot(&req, ctx),
         _ => {
@@ -195,4 +210,48 @@ fn drain_watcher_events(ctx: &AppContext) {
     }
 
     eprintln!("[aft] invalidated {} files", changed.len());
+}
+
+fn drain_lsp_events(ctx: &AppContext) {
+    let events = {
+        let mut lsp = ctx.lsp();
+        lsp.drain_events()
+    };
+    for event in events {
+        match event {
+            LspEvent::Notification {
+                server_kind,
+                root,
+                method,
+                params,
+            } => {
+                eprintln!(
+                    "[aft-lsp] notification {:?} {} {} {}",
+                    server_kind,
+                    root.display(),
+                    method,
+                    params.unwrap_or(serde_json::Value::Null)
+                );
+            }
+            LspEvent::ServerRequest {
+                server_kind,
+                root,
+                id,
+                method,
+                params,
+            } => {
+                eprintln!(
+                    "[aft-lsp] request {:?} {} {:?} {} {}",
+                    server_kind,
+                    root.display(),
+                    id,
+                    method,
+                    params.unwrap_or(serde_json::Value::Null)
+                );
+            }
+            LspEvent::ServerExited { server_kind, root } => {
+                eprintln!("[aft-lsp] exited {:?} {}", server_kind, root.display());
+            }
+        }
+    }
 }
