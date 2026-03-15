@@ -233,11 +233,13 @@ jobs:
       - name: Validate packages
         run: node scripts/validate-packages.mjs
 
-      - name: Install dependencies
+      - name: Install plugin dependencies
         run: bun install
+        working-directory: packages/opencode-plugin
 
       - name: Build plugin
         run: bun run build
+        working-directory: packages/opencode-plugin
 
       # TODO: After first publish, configure Trusted Publishing on npmjs.com
       # for all 6 packages, then remove NODE_AUTH_TOKEN and keep only --provenance
