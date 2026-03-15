@@ -40,6 +40,20 @@ jobs:
       - name: Lint
         run: bun run lint
 
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish --package agent-file-tools
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   build-darwin-arm64:
     name: Build macOS ARM64
     runs-on: macos-latest
