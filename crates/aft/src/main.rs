@@ -64,6 +64,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "echo" => handle_echo(&req),
         "outline" => aft::commands::outline::handle_outline(&req, ctx),
         "zoom" => aft::commands::zoom::handle_zoom(&req, ctx),
+        "read" => aft::commands::read::handle_read(&req, ctx),
         "undo" => aft::commands::undo::handle_undo(&req, ctx),
         "edit_history" => aft::commands::edit_history::handle_edit_history(&req, ctx),
         "checkpoint" => aft::commands::checkpoint::handle_checkpoint(&req, ctx),
@@ -72,6 +73,8 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         }
         "list_checkpoints" => aft::commands::list_checkpoints::handle_list_checkpoints(&req, ctx),
         "write" => aft::commands::write::handle_write(&req, ctx),
+        "delete_file" => aft::commands::delete_file::handle_delete_file(&req, ctx),
+        "move_file" => aft::commands::move_file::handle_move_file(&req, ctx),
         "edit_symbol" => aft::commands::edit_symbol::handle_edit_symbol(&req, ctx),
         "edit_match" => aft::commands::edit_match::handle_edit_match(&req, ctx),
         "batch" => aft::commands::batch::handle_batch(&req, ctx),

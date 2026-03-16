@@ -12,12 +12,23 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
   return {
     aft_refactor: {
       description:
-        "Workspace-wide refactoring operations that update imports and references across files.\n" +
+        "Workspace-wide refactoring operations that update imports and references across files.\n\n" +
         "Ops:\n" +
-        "- 'move': Move a symbol to another file, updating all imports workspace-wide. Needs 'symbol', 'destination'. Creates a checkpoint before mutating.\n" +
-        "- 'extract': Extract a line range into a new function with auto-detected parameters. Needs 'name', 'start_line', 'end_line' (all 1-based). Supports TS/JS/TSX and Python.\n" +
-        "- 'inline': Replace a function call with the function's body, substituting args for params. Needs 'symbol', 'call_site_line' (1-based). Validates single-return constraint.\n" +
-        "All ops need 'file'. Use dry_run to preview.",
+        "- 'move': Move a symbol to another file, updating all imports workspace-wide. Requires 'symbol', 'destination'. Creates a checkpoint before mutating.\n" +
+        "- 'extract': Extract a line range into a new function with auto-detected parameters. Requires 'name', 'start_line', 'end_line' (all 1-based). Supports TS/JS/TSX and Python.\n" +
+        "- 'inline': Replace a function call with the function's body, substituting args for params. Requires 'symbol', 'call_site_line' (1-based). Validates single-return constraint.\n\n" +
+        "Parameters:\n" +
+        "- op (enum, required): 'move' | 'extract' | 'inline'\n" +
+        "- file (string, required): Path to the source file\n" +
+        "- symbol (string, optional): Symbol name — required for 'move' (symbol to move) and 'inline' (function to inline)\n" +
+        "- destination (string, optional): Target file path for 'move' op — created if it doesn't exist\n" +
+        "- scope (string, optional): Disambiguation scope for 'move' when multiple symbols share the same name\n" +
+        "- name (string, optional): New function name for 'extract' op\n" +
+        "- start_line (number, optional): 1-based start line of the range to extract ('extract' op)\n" +
+        "- end_line (number, optional): 1-based end line of the range to extract, exclusive ('extract' op)\n" +
+        "- call_site_line (number, optional): 1-based line where the call expression is located ('inline' op)\n" +
+        "- dry_run (boolean, optional): Preview changes as diff without modifying files\n\n" +
+        "All ops need 'file'. Use dry_run to preview before applying.",
       args: {
         op: z.enum(["move", "extract", "inline"]).describe("Refactoring operation"),
         file: z.string().describe("Path to the source file"),

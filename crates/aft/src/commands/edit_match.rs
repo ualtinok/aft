@@ -290,19 +290,27 @@ fn handle_single_file_edit_match(
         }
     };
 
-    // Find all byte-offset positions of the match string
-    let positions: Vec<usize> = source
-        .match_indices(match_str)
-        .map(|(idx, _)| idx)
-        .collect();
+    // Find all positions using progressive fuzzy matching:
+    // Pass 1: exact, Pass 2: rstrip, Pass 3: trim, Pass 4: normalized Unicode
+    let fuzzy_matches = crate::fuzzy_match::find_all_fuzzy(&source, match_str);
 
-    if positions.is_empty() {
+    if fuzzy_matches.is_empty() {
         return Response::error(
             &req.id,
             "match_not_found",
             format!("edit_match: '{}' not found in {}", match_str, file),
         );
     }
+
+    // Log if fuzzy match was needed (not exact)
+    if fuzzy_matches[0].pass > 1 {
+        eprintln!(
+            "[aft] edit_match: fuzzy match (pass {}) for '{}' in {}",
+            fuzzy_matches[0].pass, match_str, file
+        );
+    }
+
+    let positions: Vec<usize> = fuzzy_matches.iter().map(|m| m.byte_start).collect();
 
     // If occurrence specified but out of range (only relevant when not replace_all)
     if !replace_all {
@@ -367,16 +375,30 @@ fn handle_single_file_edit_match(
         None
     };
 
-    // Apply edit(s)
+    // Apply edit(s) — use fuzzy match byte lengths (may differ from match_str.len())
     let (new_source, count) = if replace_all {
-        let count = positions.len();
-        (source.replace(match_str, replacement), count)
+        let count = fuzzy_matches.len();
+        // Apply replacements in reverse order to preserve byte offsets
+        let mut result = source.clone();
+        for m in fuzzy_matches.iter().rev() {
+            result = edit::replace_byte_range(
+                &result,
+                m.byte_start,
+                m.byte_start + m.byte_len,
+                replacement,
+            );
+        }
+        (result, count)
     } else {
         let target_idx = occurrence.unwrap_or(0);
-        let byte_start = positions[target_idx];
-        let byte_end = byte_start + match_str.len();
+        let m = &fuzzy_matches[target_idx];
         (
-            edit::replace_byte_range(&source, byte_start, byte_end, replacement),
+            edit::replace_byte_range(
+                &source,
+                m.byte_start,
+                m.byte_start + m.byte_len,
+                replacement,
+            ),
             1,
         )
     };

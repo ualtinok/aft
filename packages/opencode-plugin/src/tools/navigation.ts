@@ -11,13 +11,19 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
   return {
     aft_navigate: {
       description:
-        "Navigate code structure across files using call graph analysis.\n" +
+        "Navigate code structure across files using call graph analysis.\n\n" +
         "Modes:\n" +
-        "- 'call_tree': See what a function calls (forward). Use to understand dependencies before modifying a function.\n" +
+        "- 'call_tree': See what a function calls (forward traversal). Use to understand dependencies before modifying a function.\n" +
         "- 'callers': Find all call sites of a symbol. Use before renaming or changing a function's signature.\n" +
         "- 'trace_to': Trace how execution reaches a function from entry points (routes, exports, main). Use to understand context around deeply-nested code.\n" +
         "- 'impact': Analyze what breaks if a symbol changes. Returns affected callers with signatures and entry point status.\n" +
-        "- 'trace_data': Follow a value through variable assignments and function parameters across files. Needs 'expression' arg.",
+        "- 'trace_data': Follow a value through variable assignments and function parameters across files. Requires 'expression' arg.\n\n" +
+        "Parameters:\n" +
+        "- mode (enum, required): 'call_tree' | 'callers' | 'trace_to' | 'impact' | 'trace_data'\n" +
+        "- file (string, required): Path to the source file containing the symbol\n" +
+        "- symbol (string, required): Name of the symbol to analyze\n" +
+        "- depth (number, required): Max traversal depth. Recommended: call_tree=3, callers=2, trace_to=10, impact=3, trace_data=5\n" +
+        "- expression (string, optional): The expression to follow through assignments — required for 'trace_data' mode",
       args: {
         mode: z
           .enum(["call_tree", "callers", "trace_to", "impact", "trace_data"])

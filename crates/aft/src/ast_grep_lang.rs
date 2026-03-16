@@ -94,8 +94,43 @@ impl Language for AstGrepLang {
         builder.build(|src| StrDoc::try_new(src, self.clone()))
     }
 
+    /// Some languages (Python, Rust) don't accept `$` as a valid identifier
+    /// character. We replace `$` with the expando char (`µ`) in meta-variable
+    /// positions so tree-sitter can parse the pattern as valid code.
     fn pre_process_pattern<'q>(&self, query: &'q str) -> Cow<'q, str> {
-        Cow::Borrowed(query)
+        let expando = self.expando_char();
+        if expando == '$' {
+            // TS, JS, Go: $ is valid in identifiers, no preprocessing needed
+            return Cow::Borrowed(query);
+        }
+        // Python, Rust: replace $ with µ in meta-variable positions
+        // Logic from ast-grep's official pre_process_pattern
+        let mut ret = Vec::with_capacity(query.len());
+        let mut dollar_count = 0;
+        for c in query.chars() {
+            if c == '$' {
+                dollar_count += 1;
+                continue;
+            }
+            let need_replace = matches!(c, 'A'..='Z' | '_') || dollar_count == 3;
+            let sigil = if need_replace { expando } else { '$' };
+            ret.extend(std::iter::repeat(sigil).take(dollar_count));
+            dollar_count = 0;
+            ret.push(c);
+        }
+        // trailing anonymous multiple ($$$)
+        let sigil = if dollar_count == 3 { expando } else { '$' };
+        ret.extend(std::iter::repeat(sigil).take(dollar_count));
+        Cow::Owned(ret.into_iter().collect())
+    }
+
+    fn expando_char(&self) -> char {
+        match self {
+            // $ is not a valid identifier char in Python, Rust
+            Self::Python | Self::Rust => '\u{00B5}', // µ
+            // $ is valid in TS, JS, Go identifiers
+            _ => '$',
+        }
     }
 }
 
@@ -140,5 +175,59 @@ mod tests {
         let grep = lang.ast_grep("const x = 1;");
         let root = grep.root();
         assert!(root.find("const $X = $Y").is_some());
+    }
+
+    #[test]
+    fn test_python_function_pattern() {
+        let lang = AstGrepLang::Python;
+        let source = "def add(a, b):\n    return a + b\n";
+        let grep = lang.ast_grep(source);
+        let root = grep.root();
+        // Pattern with meta-variables — $ gets replaced with µ for parsing
+        let found = root.find("def $FUNC($$$):\n    return $X");
+        assert!(found.is_some(), "Python function pattern should match");
+        let node = found.unwrap();
+        assert_eq!(node.text(), "def add(a, b):\n    return a + b");
+    }
+
+    #[test]
+    fn test_python_expression_pattern() {
+        let lang = AstGrepLang::Python;
+        let source = "x = self.value + 1\n";
+        let grep = lang.ast_grep(source);
+        let root = grep.root();
+        let found = root.find("self.$ATTR + $X");
+        assert!(found.is_some(), "Python expression pattern should match");
+    }
+
+    #[test]
+    fn test_rust_function_pattern() {
+        let lang = AstGrepLang::Rust;
+        let source = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        let grep = lang.ast_grep(source);
+        let root = grep.root();
+        let found = root.find("fn $NAME($$$) -> $RET { $$$BODY }");
+        assert!(found.is_some(), "Rust function pattern should match");
+    }
+
+    #[test]
+    fn test_expando_char() {
+        assert_eq!(AstGrepLang::Python.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::Rust.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::TypeScript.expando_char(), '$');
+        assert_eq!(AstGrepLang::JavaScript.expando_char(), '$');
+        assert_eq!(AstGrepLang::Go.expando_char(), '$');
+    }
+
+    #[test]
+    fn test_pre_process_pattern_python() {
+        let lang = AstGrepLang::Python;
+        let result = lang.pre_process_pattern("def $FUNC($$$):");
+        // $ before uppercase or $$$ should be replaced with µ
+        assert!(result.contains('\u{00B5}'), "Should contain µ expando char");
+        assert!(
+            !result.contains('$'),
+            "Should not contain $ after preprocessing"
+        );
     }
 }

@@ -64,6 +64,25 @@ pub struct ResponseError {
     pub data: Option<Value>,
 }
 
+/// Outgoing JSON-RPC response (for responding to server requests).
+#[derive(Debug, Serialize)]
+pub struct OutgoingResponse {
+    pub jsonrpc: &'static str,
+    pub id: RequestId,
+    pub result: Value,
+}
+
+impl OutgoingResponse {
+    /// Create a success response with the given result.
+    pub fn success(id: RequestId, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result,
+        }
+    }
+}
+
 /// Any incoming message from the server.
 #[derive(Debug)]
 pub enum ServerMessage {

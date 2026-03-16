@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { BridgePool } from "../pool.js";
-import { editingTools } from "../tools/editing.js";
+import { aftPrefixedTools } from "../tools/hoisted.js";
 import { readingTools } from "../tools/reading.js";
 import { refactoringTools } from "../tools/refactoring.js";
 import { safetyTools } from "../tools/safety.js";
@@ -105,7 +105,7 @@ describe("Tool round-trips", () => {
 
   test("write tool creates a temp file and returns syntax_valid", async () => {
     createBridge();
-    const tools = editingTools(createPluginContext(pool));
+    const tools = aftPrefixedTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -134,7 +134,7 @@ describe("Tool round-trips", () => {
 
   test("edit_symbol replaces a function and returns backup_id and syntax_valid", async () => {
     createBridge();
-    const tools = editingTools(createPluginContext(pool));
+    const tools = aftPrefixedTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -172,7 +172,7 @@ describe("Tool round-trips", () => {
 
   test("undo restores the file after edit_symbol", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const undoTools = safetyTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -220,7 +220,7 @@ describe("Tool round-trips", () => {
 
   test("write dry_run returns diff without modifying file", async () => {
     createBridge();
-    const tools = editingTools(createPluginContext(pool));
+    const tools = aftPrefixedTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -257,7 +257,7 @@ describe("Tool round-trips", () => {
 
   test("transaction success applies multiple file writes", async () => {
     createBridge();
-    const tools = editingTools(createPluginContext(pool));
+    const tools = aftPrefixedTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -290,7 +290,7 @@ describe("Tool round-trips", () => {
 
   test("transaction rollback on syntax error", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
     sdkCtx = createMockSdkContext(tmpDir);
 

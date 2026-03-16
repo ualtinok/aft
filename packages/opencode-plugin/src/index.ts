@@ -11,6 +11,7 @@ import { readingTools } from "./tools/reading.js";
 import { refactoringTools } from "./tools/refactoring.js";
 import { safetyTools } from "./tools/safety.js";
 import { structureTools } from "./tools/structure.js";
+import { hoistedTools, aftPrefixedTools } from "./tools/hoisted.js";
 import type { PluginContext } from "./types.js";
 
 /**
@@ -21,14 +22,15 @@ import type { PluginContext } from "./types.js";
  * - Project: <project>/.opencode/aft.jsonc (or .json)
  *
  * Tools organized into groups:
- * - Reading: aft_outline, aft_zoom
- * - Editing: aft_edit
+ * - Hoisted (default): read, write, edit, apply_patch, ast_grep_search, ast_grep_replace
+ * - File ops: aft_delete, aft_move
+ * - Reading: aft_outline
  * - Safety: aft_safety
  * - Imports: aft_import
  * - Structure: aft_transform
  * - Navigation: aft_navigate
  * - Refactoring: aft_refactor
- * - AST Search: aft_ast_search, aft_ast_replace\n * - LSP: aft_lsp_diagnostics, aft_lsp_hover, aft_lsp_goto_definition, aft_lsp_find_references, aft_lsp_prepare_rename, aft_lsp_rename
+ * - LSP: aft_lsp_diagnostics (inline diagnostics on edits are automatic)
  */
 const plugin: Plugin = async (input) => {
   const binaryPath = await findBinary();
@@ -50,6 +52,9 @@ const plugin: Plugin = async (input) => {
 
   return {
     tool: {
+      // When hoisting enabled (default): override opencode built-ins (read, write, edit, apply_patch)
+      // When disabled: register with aft_ prefix (aft_read, aft_write, aft_edit, aft_apply_patch)
+      ...(aftConfig.hoist_builtin_tools !== false ? hoistedTools(ctx) : aftPrefixedTools(ctx)),
       ...readingTools(ctx),
       ...editingTools(ctx),
       ...safetyTools(ctx),

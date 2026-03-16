@@ -39,6 +39,12 @@ export const AftConfigSchema = z.object({
   formatter: z.record(z.string(), FormatterEnum).optional(),
   /** Per-language type checker overrides. Keys: "typescript", "python", "rust", "go". */
   checker: z.record(z.string(), CheckerEnum).optional(),
+  /**
+   * Replace opencode's built-in read/write/edit/apply_patch tools with AFT's
+   * faster Rust implementations. Adds backup tracking, auto-formatting,
+   * inline diagnostics, and permission checks. Default: true.
+   */
+  hoist_builtin_tools: z.boolean().optional(),
 });
 
 export type AftConfig = z.infer<typeof AftConfigSchema>;

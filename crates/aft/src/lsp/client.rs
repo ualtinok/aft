@@ -65,7 +65,7 @@ pub struct LspClient {
     root: PathBuf,
     state: ServerState,
     child: Child,
-    writer: BufWriter<std::process::ChildStdin>,
+    writer: Arc<Mutex<BufWriter<std::process::ChildStdin>>>,
     /// Channel kept on the client to reflect the per-server event stream.
     /// Reader threads send into the manager's shared event channel.
     #[allow(dead_code)]
@@ -102,8 +102,10 @@ impl LspClient {
             .take()
             .ok_or_else(|| io::Error::other("language server missing stdin pipe"))?;
 
+        let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
         let pending = Arc::new(Mutex::new(PendingMap::new()));
         let reader_pending = Arc::clone(&pending);
+        let reader_writer = Arc::clone(&writer);
         let reader_kind = kind;
         let reader_root = root.clone();
         let (_client_event_tx, event_rx) = crossbeam_channel::unbounded();
@@ -134,6 +136,19 @@ impl LspClient {
                         });
                     }
                     Ok(Some(ServerMessage::Request { id, method, params })) => {
+                        // Auto-respond to server requests to prevent deadlocks.
+                        // Server requests (like client/registerCapability,
+                        // window/workDoneProgress/create) block the server until
+                        // we respond. If we don't respond, the server won't send
+                        // responses to OUR pending requests → deadlock.
+                        if let Ok(mut w) = reader_writer.lock() {
+                            let response = super::jsonrpc::OutgoingResponse::success(
+                                id.clone(),
+                                serde_json::Value::Null,
+                            );
+                            let _ = transport::write_response(&mut *w, &response);
+                        }
+                        // Also forward as event for any interested handlers
                         let _ = event_tx.send(LspEvent::ServerRequest {
                             server_kind: reader_kind,
                             root: reader_root.clone(),
@@ -161,7 +176,7 @@ impl LspClient {
             root,
             state: ServerState::Starting,
             child,
-            writer: BufWriter::new(stdin),
+            writer,
             event_rx,
             pending,
             next_id: AtomicI64::new(1),
@@ -247,9 +262,15 @@ impl LspClient {
         }
 
         let request = Request::new(id.clone(), R::METHOD, Some(serde_json::to_value(params)?));
-        if let Err(err) = transport::write_request(&mut self.writer, &request) {
-            self.remove_pending(&id);
-            return Err(err.into());
+        {
+            let mut writer = self
+                .writer
+                .lock()
+                .map_err(|_| LspError::ServerNotReady("writer lock poisoned".to_string()))?;
+            if let Err(err) = transport::write_request(&mut *writer, &request) {
+                self.remove_pending(&id);
+                return Err(err.into());
+            }
         }
 
         let response = match rx.recv_timeout(REQUEST_TIMEOUT) {
@@ -290,7 +311,11 @@ impl LspClient {
     {
         self.ensure_can_send()?;
         let notification = Notification::new(N::METHOD, Some(serde_json::to_value(params)?));
-        transport::write_notification(&mut self.writer, &notification)?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| LspError::ServerNotReady("writer lock poisoned".to_string()))?;
+        transport::write_notification(&mut *writer, &notification)?;
         Ok(())
     }
 

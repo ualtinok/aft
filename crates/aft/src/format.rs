@@ -134,10 +134,27 @@ pub fn run_external_tool(
     }
 }
 
-/// Check if a command exists on PATH by attempting to spawn it with `--version`.
+/// Check if a command exists by attempting to spawn it with `--version`.
 ///
-/// Returns true if the binary is found (regardless of exit code).
+/// First checks `<project_root>/node_modules/.bin/<command>` (for locally installed tools
+/// like biome, prettier), then falls back to PATH lookup.
+/// Returns the resolved command path if found.
 fn tool_available(command: &str) -> bool {
+    resolve_tool(command, None).is_some()
+}
+
+/// Like `tool_available` but also checks node_modules/.bin relative to project_root.
+/// Returns the full path to the tool if found, otherwise None.
+fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
+    // 1. Check node_modules/.bin/<command> relative to project root
+    if let Some(root) = project_root {
+        let local_bin = root.join("node_modules").join(".bin").join(command);
+        if local_bin.exists() {
+            return Some(local_bin.to_string_lossy().to_string());
+        }
+    }
+
+    // 2. Fall back to PATH lookup
     match Command::new(command)
         .arg("--version")
         .stdout(Stdio::null())
@@ -146,9 +163,9 @@ fn tool_available(command: &str) -> bool {
     {
         Ok(mut child) => {
             let _ = child.wait();
-            true
+            Some(command.to_string())
         }
-        Err(_) => false,
+        Err(_) => None,
     }
 }
 
@@ -232,16 +249,16 @@ pub fn detect_formatter(
 
     match lang {
         LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
-            // biome.json / biome.jsonc → biome
-            if has_project_config(project_root, &["biome.json", "biome.jsonc"])
-                && tool_available("biome")
-            {
-                return Some((
-                    "biome".to_string(),
-                    vec!["format".to_string(), "--write".to_string(), file_str],
-                ));
+            // biome.json / biome.jsonc → biome (check node_modules/.bin first)
+            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
+                if let Some(biome_cmd) = resolve_tool("biome", project_root) {
+                    return Some((
+                        biome_cmd,
+                        vec!["format".to_string(), "--write".to_string(), file_str],
+                    ));
+                }
             }
-            // .prettierrc / .prettierrc.* / prettier.config.* → prettier
+            // .prettierrc / .prettierrc.* / prettier.config.* → prettier (check node_modules/.bin first)
             if has_project_config(
                 project_root,
                 &[
@@ -257,12 +274,10 @@ pub fn detect_formatter(
                     "prettier.config.cjs",
                     "prettier.config.mjs",
                 ],
-            ) && tool_available("prettier")
-            {
-                return Some((
-                    "prettier".to_string(),
-                    vec!["--write".to_string(), file_str],
-                ));
+            ) {
+                if let Some(prettier_cmd) = resolve_tool("prettier", project_root) {
+                    return Some((prettier_cmd, vec!["--write".to_string(), file_str]));
+                }
             }
             // deno.json / deno.jsonc → deno fmt
             if has_project_config(project_root, &["deno.json", "deno.jsonc"])
@@ -577,28 +592,28 @@ pub fn detect_type_checker(
 
     match lang {
         LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
-            // biome.json → biome check (lint + type errors)
-            if has_project_config(project_root, &["biome.json", "biome.jsonc"])
-                && tool_available("biome")
-            {
-                return Some(("biome".to_string(), vec!["check".to_string(), file_str]));
+            // biome.json → biome check (lint + type errors, check node_modules/.bin first)
+            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
+                if let Some(biome_cmd) = resolve_tool("biome", project_root) {
+                    return Some((biome_cmd, vec!["check".to_string(), file_str]));
+                }
             }
-            // tsconfig.json → tsc
+            // tsconfig.json → tsc (check node_modules/.bin first)
             if has_project_config(project_root, &["tsconfig.json"]) {
-                if tool_available("npx") {
+                if let Some(tsc_cmd) = resolve_tool("tsc", project_root) {
                     return Some((
-                        "npx".to_string(),
+                        tsc_cmd,
                         vec![
-                            "tsc".to_string(),
                             "--noEmit".to_string(),
                             "--pretty".to_string(),
                             "false".to_string(),
                         ],
                     ));
-                } else if tool_available("tsc") {
+                } else if tool_available("npx") {
                     return Some((
-                        "tsc".to_string(),
+                        "npx".to_string(),
                         vec![
+                            "tsc".to_string(),
                             "--noEmit".to_string(),
                             "--pretty".to_string(),
                             "false".to_string(),
@@ -610,14 +625,12 @@ pub fn detect_type_checker(
         }
         LangId::Python => {
             // pyrightconfig.json or pyproject.toml with pyright → pyright
-            if (has_project_config(project_root, &["pyrightconfig.json"])
-                || has_pyproject_tool(project_root, "pyright"))
-                && tool_available("pyright")
+            if has_project_config(project_root, &["pyrightconfig.json"])
+                || has_pyproject_tool(project_root, "pyright")
             {
-                return Some((
-                    "pyright".to_string(),
-                    vec!["--outputjson".to_string(), file_str],
-                ));
+                if let Some(pyright_cmd) = resolve_tool("pyright", project_root) {
+                    return Some((pyright_cmd, vec!["--outputjson".to_string(), file_str]));
+                }
             }
             // ruff.toml or pyproject.toml with ruff → ruff check
             if (has_project_config(project_root, &["ruff.toml", ".ruff.toml"])

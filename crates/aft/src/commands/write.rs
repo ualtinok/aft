@@ -41,7 +41,7 @@ pub fn handle_write(req: &RawRequest, ctx: &AppContext) -> Response {
         .params
         .get("create_dirs")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     let path = Path::new(file);
     let existed = path.exists();

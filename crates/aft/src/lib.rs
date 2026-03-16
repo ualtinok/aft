@@ -10,6 +10,7 @@ pub mod edit;
 pub mod error;
 pub mod extract;
 pub mod format;
+pub mod fuzzy_match;
 pub mod imports;
 pub mod indent;
 pub mod language;

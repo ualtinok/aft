@@ -102,3 +102,14 @@ pub fn write_notification(writer: &mut impl Write, notification: &Notification) 
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     write_message(writer, &json)
 }
+
+/// Write a JSON-RPC response to a writer with Content-Length framing.
+/// Used to respond to server-initiated requests (e.g. client/registerCapability).
+pub fn write_response(
+    writer: &mut impl Write,
+    response: &super::jsonrpc::OutgoingResponse,
+) -> io::Result<()> {
+    let json = serde_json::to_string(response)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    write_message(writer, &json)
+}

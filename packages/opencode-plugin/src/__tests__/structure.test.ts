@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { BridgePool } from "../pool.js";
-import { editingTools } from "../tools/editing.js";
+import { aftPrefixedTools } from "../tools/hoisted.js";
 import { structureTools } from "../tools/structure.js";
 import type { PluginContext } from "../types.js";
 
@@ -128,7 +128,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_member inserts a method into a TypeScript class", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -158,7 +158,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_member with position=first inserts at top of class", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -189,7 +189,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_derive adds a derive to a Rust struct", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -221,7 +221,7 @@ describe("Structure tool round-trips", () => {
 
   test("wrap_try_catch wraps a function body", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -250,7 +250,7 @@ describe("Structure tool round-trips", () => {
 
   test("wrap_try_catch with custom catch_body", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -278,7 +278,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_decorator inserts a Python decorator", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -307,7 +307,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_struct_tags adds a Go struct tag", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -339,7 +339,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_member returns scope_not_found for missing scope", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -371,7 +371,7 @@ describe("Structure tool round-trips", () => {
 
   test("add_derive returns target_not_found for missing struct", async () => {
     createBridge();
-    const editTools = editingTools(createPluginContext(pool));
+    const editTools = aftPrefixedTools(createPluginContext(pool));
     const tools = structureTools(createPluginContext(pool));
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-structure-"));
     sdkCtx = createMockSdkContext(tmpDir);

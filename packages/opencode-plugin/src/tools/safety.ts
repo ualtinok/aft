@@ -12,13 +12,18 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
   return {
     aft_safety: {
       description:
-        "File safety and recovery operations.\n" +
+        "File safety and recovery operations.\n\n" +
         "Ops:\n" +
-        "- 'undo': Undo the last edit to a file. Needs 'file'.\n" +
-        "- 'history': List all edit snapshots for a file. Needs 'file'.\n" +
-        "- 'checkpoint': Save a named snapshot of tracked files. Needs 'name', optional 'files' array.\n" +
-        "- 'restore': Restore files to a checkpoint state. Needs 'name'.\n" +
-        "- 'list': List all available checkpoints.\n" +
+        "- 'undo': Undo the last edit to a file. Requires 'file'.\n" +
+        "- 'history': List all edit snapshots for a file. Requires 'file'.\n" +
+        "- 'checkpoint': Save a named snapshot of tracked files. Requires 'name'. Optional 'files' to snapshot specific files only.\n" +
+        "- 'restore': Restore files to a previously saved checkpoint. Requires 'name'.\n" +
+        "- 'list': List all available named checkpoints. No extra params needed.\n\n" +
+        "Parameters:\n" +
+        "- op (enum, required): 'undo' | 'history' | 'checkpoint' | 'restore' | 'list'\n" +
+        "- file (string, optional): File path — required for 'undo' and 'history' ops\n" +
+        "- name (string, optional): Checkpoint name — required for 'checkpoint' and 'restore' ops\n" +
+        "- files (string[], optional): Specific files to include in checkpoint (defaults to all tracked files)\n\n" +
         "Use checkpoint before risky multi-file changes. Use undo for quick single-file rollback.\n" +
         "Note: backups are in-memory (lost on restart). Per-file undo stack is capped at 20 entries (oldest evicted).",
       args: {
