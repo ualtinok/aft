@@ -12,8 +12,15 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
 import { parsePatch, applyUpdateChunks } from "../patch-parser.js";
+import { storeToolMetadata } from "../metadata-store.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
+
+/** Extract callID from plugin context (exists on object but not in TS type). */
+function getCallID(ctx: unknown): string | undefined {
+  const c = ctx as { callID?: string; callId?: string; call_id?: string };
+  return c.callID ?? c.callId ?? c.call_id;
+}
 
 const z = tool.schema;
 
@@ -115,15 +122,18 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
             ? `${(fileSize / 1024).toFixed(0)}KB`
             : `${fileSize} bytes`;
         const msg = `${label} read successfully`;
-        context.metadata({
-          title: path.relative(context.worktree, filePath),
-          metadata: {
-            preview: msg,
-            filepath: filePath,
-            isImage,
-            isPdf: mime === "application/pdf",
-          },
-        });
+        const imgCallID = getCallID(context);
+        if (imgCallID) {
+          storeToolMetadata(context.sessionID, imgCallID, {
+            title: path.relative(context.worktree, filePath),
+            metadata: {
+              preview: msg,
+              filepath: filePath,
+              isImage,
+              isPdf: mime === "application/pdf",
+            },
+          });
+        }
         return `${msg} (${ext.slice(1).toUpperCase()}, ${sizeStr}). File: ${filePath}`;
       }
 
@@ -143,7 +153,8 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         if (args.context_lines !== undefined) params.context_lines = args.context_lines;
 
         const data = await bridge.send("zoom", params);
-        context.metadata({ title: relPath });
+        const callID = getCallID(context);
+        if (callID) storeToolMetadata(context.sessionID, callID, { title: relPath });
         return JSON.stringify(data);
       }
 
@@ -157,7 +168,8 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         if (args.context_lines !== undefined) params.context_lines = args.context_lines;
 
         const data = await bridge.send("zoom", params);
-        context.metadata({ title: `${relPath}:${args.start_line}-${args.end_line}` });
+        const lineCallID = getCallID(context);
+        if (lineCallID) storeToolMetadata(context.sessionID, lineCallID, { title: `${relPath}:${args.start_line}-${args.end_line}` });
         return JSON.stringify(data);
       }
 
@@ -169,20 +181,22 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
 
       const data = await bridge.send("read", params);
 
+      const readCallID = getCallID(context);
+
       // Directory response
       if (data.entries) {
-        context.metadata({ title: relPath || file });
+        if (readCallID) storeToolMetadata(context.sessionID, readCallID, { title: relPath || file });
         return (data.entries as string[]).join("\n");
       }
 
       // Binary response
       if (data.binary) {
-        context.metadata({ title: relPath || file });
+        if (readCallID) storeToolMetadata(context.sessionID, readCallID, { title: relPath || file });
         return data.message as string;
       }
 
       // File content — already line-numbered from Rust
-      context.metadata({ title: relPath || file });
+      if (readCallID) storeToolMetadata(context.sessionID, readCallID, { title: relPath || file });
       let output = data.content as string;
 
       // Add navigation hint if truncated
@@ -266,25 +280,28 @@ function createWriteTool(ctx: PluginContext): ToolDefinition {
         }
       }
 
-      // Use diff from Rust for UI metadata (no extra file reads needed)
+      // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
       const diff = data.diff as { before?: string; after?: string; additions?: number; deletions?: number } | undefined;
-      context.metadata({
-        title: relPath,
-        metadata: {
-          filePath: relPath,
-          path: relPath,
-          file: relPath,
-          filediff: {
-            file: relPath,
-            path: relPath,
+      const callID = getCallID(context);
+      if (callID) {
+        storeToolMetadata(context.sessionID, callID, {
+          title: relPath,
+          metadata: {
             filePath: relPath,
-            before: diff?.before ?? "",
-            after: diff?.after ?? content,
-            additions: diff?.additions ?? 0,
-            deletions: diff?.deletions ?? 0,
+            path: relPath,
+            file: relPath,
+            filediff: {
+              file: relPath,
+              path: relPath,
+              filePath: relPath,
+              before: diff?.before ?? "",
+              after: diff?.after ?? content,
+              additions: diff?.additions ?? 0,
+              deletions: diff?.deletions ?? 0,
+            },
           },
-        },
-      });
+        });
+      }
 
       return output;
     },
@@ -448,26 +465,29 @@ function createEditTool(ctx: PluginContext): ToolDefinition {
 
       const data = await bridge.send(command, params);
 
-      // Set UI metadata using diff from Rust
+      // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
       if (!args.dry_run && data.ok && data.diff) {
         const diff = data.diff as { before?: string; after?: string; additions?: number; deletions?: number };
-        context.metadata({
-          title: relPath,
-          metadata: {
-            filePath: relPath,
-            path: relPath,
-            file: relPath,
-            filediff: {
-              file: relPath,
-              path: relPath,
+        const callID = getCallID(context);
+        if (callID) {
+          storeToolMetadata(context.sessionID, callID, {
+            title: relPath,
+            metadata: {
               filePath: relPath,
-              before: diff.before ?? "",
-              after: diff.after ?? "",
-              additions: diff.additions ?? 0,
-              deletions: diff.deletions ?? 0,
+              path: relPath,
+              file: relPath,
+              filediff: {
+                file: relPath,
+                path: relPath,
+                filePath: relPath,
+                before: diff.before ?? "",
+                after: diff.after ?? "",
+                additions: diff.additions ?? 0,
+                deletions: diff.deletions ?? 0,
+              },
             },
-          },
-        });
+          });
+        }
       }
 
       return JSON.stringify(data);

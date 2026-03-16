@@ -12,6 +12,7 @@ import { refactoringTools } from "./tools/refactoring.js";
 import { safetyTools } from "./tools/safety.js";
 import { structureTools } from "./tools/structure.js";
 import { hoistedTools, aftPrefixedTools } from "./tools/hoisted.js";
+import { consumeToolMetadata } from "./metadata-store.js";
 import type { PluginContext } from "./types.js";
 
 /**
@@ -64,6 +65,18 @@ const plugin: Plugin = async (input) => {
       ...astTools(ctx),
       ...refactoringTools(ctx),
       ...lspTools(ctx),
+    },
+    // Restore metadata that fromPlugin() overwrites (opencode bug workaround)
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { title: string; output: string; metadata: Record<string, unknown> } | undefined,
+    ) => {
+      if (!output) return;
+      const stored = consumeToolMetadata(input.sessionID, input.callID);
+      if (stored) {
+        if (stored.title) output.title = stored.title;
+        if (stored.metadata) output.metadata = { ...output.metadata, ...stored.metadata };
+      }
     },
     dispose: () => pool.shutdown(),
   };
