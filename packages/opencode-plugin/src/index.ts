@@ -1,9 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { loadAftConfig } from "./config.js";
+import { consumeToolMetadata } from "./metadata-store.js";
 import { BridgePool } from "./pool.js";
 import { findBinary } from "./resolver.js";
 import { astTools } from "./tools/ast.js";
 import { editingTools } from "./tools/editing.js";
+import { aftPrefixedTools, hoistedTools } from "./tools/hoisted.js";
 import { importTools } from "./tools/imports.js";
 import { lspTools } from "./tools/lsp.js";
 import { navigationTools } from "./tools/navigation.js";
@@ -11,8 +13,6 @@ import { readingTools } from "./tools/reading.js";
 import { refactoringTools } from "./tools/refactoring.js";
 import { safetyTools } from "./tools/safety.js";
 import { structureTools } from "./tools/structure.js";
-import { hoistedTools, aftPrefixedTools } from "./tools/hoisted.js";
-import { consumeToolMetadata } from "./metadata-store.js";
 import type { PluginContext } from "./types.js";
 
 /**

@@ -22,9 +22,7 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
     args: {
       file: z.string().optional(),
       directory: z.string().optional(),
-      severity: z
-        .enum(["error", "warning", "information", "hint", "all"])
-        .optional(),
+      severity: z.enum(["error", "warning", "information", "hint", "all"]).optional(),
       wait_ms: z.number().optional(),
     },
     execute: async (args, context): Promise<string> => {

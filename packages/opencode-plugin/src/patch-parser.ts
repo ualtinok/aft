@@ -31,9 +31,7 @@ export interface UpdateHunk {
 export type Hunk = AddHunk | DeleteHunk | UpdateHunk;
 
 function stripHeredoc(input: string): string {
-  const heredocMatch = input.match(
-    /^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/,
-  );
+  const heredocMatch = input.match(/^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/);
   return heredocMatch ? heredocMatch[2] : input;
 }
 
@@ -78,7 +76,7 @@ function parseAddFileContent(
 
   while (i < lines.length && !lines[i].startsWith("***")) {
     if (lines[i].startsWith("+")) {
-      content += lines[i].substring(1) + "\n";
+      content += `${lines[i].substring(1)}\n`;
     }
     i++;
   }
@@ -106,11 +104,7 @@ function parseUpdateFileChunks(
       const newLines: string[] = [];
       let isEndOfFile = false;
 
-      while (
-        i < lines.length &&
-        !lines[i].startsWith("@@") &&
-        !lines[i].startsWith("***")
-      ) {
+      while (i < lines.length && !lines[i].startsWith("@@") && !lines[i].startsWith("***")) {
         const changeLine = lines[i];
 
         if (changeLine === "*** End of File") {
@@ -241,32 +235,24 @@ function tryMatch(
   return -1;
 }
 
-function seekSequence(
-  lines: string[],
-  pattern: string[],
-  startIndex: number,
-  eof = false,
-): number {
+function seekSequence(lines: string[], pattern: string[], startIndex: number, eof = false): number {
   if (pattern.length === 0) return -1;
 
   const exact = tryMatch(lines, pattern, startIndex, (a, b) => a === b, eof);
   if (exact !== -1) return exact;
 
-  const rstrip = tryMatch(
-    lines, pattern, startIndex,
-    (a, b) => a.trimEnd() === b.trimEnd(), eof,
-  );
+  const rstrip = tryMatch(lines, pattern, startIndex, (a, b) => a.trimEnd() === b.trimEnd(), eof);
   if (rstrip !== -1) return rstrip;
 
-  const trim = tryMatch(
-    lines, pattern, startIndex,
-    (a, b) => a.trim() === b.trim(), eof,
-  );
+  const trim = tryMatch(lines, pattern, startIndex, (a, b) => a.trim() === b.trim(), eof);
   if (trim !== -1) return trim;
 
   return tryMatch(
-    lines, pattern, startIndex,
-    (a, b) => normalizeUnicode(a.trim()) === normalizeUnicode(b.trim()), eof,
+    lines,
+    pattern,
+    startIndex,
+    (a, b) => normalizeUnicode(a.trim()) === normalizeUnicode(b.trim()),
+    eof,
   );
 }
 
@@ -279,7 +265,7 @@ export function applyUpdateChunks(
   filePath: string,
   chunks: UpdateFileChunk[],
 ): string {
-  let originalLines = originalContent.split("\n");
+  const originalLines = originalContent.split("\n");
 
   if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
     originalLines.pop();
@@ -290,15 +276,9 @@ export function applyUpdateChunks(
 
   for (const chunk of chunks) {
     if (chunk.change_context) {
-      const contextIdx = seekSequence(
-        originalLines,
-        [chunk.change_context],
-        lineIndex,
-      );
+      const contextIdx = seekSequence(originalLines, [chunk.change_context], lineIndex);
       if (contextIdx === -1) {
-        throw new Error(
-          `Failed to find context '${chunk.change_context}' in ${filePath}`,
-        );
+        throw new Error(`Failed to find context '${chunk.change_context}' in ${filePath}`);
       }
       lineIndex = contextIdx + 1;
     }
@@ -314,18 +294,14 @@ export function applyUpdateChunks(
 
     let pattern = chunk.old_lines;
     let newSlice = chunk.new_lines;
-    let found = seekSequence(
-      originalLines, pattern, lineIndex, chunk.is_end_of_file,
-    );
+    let found = seekSequence(originalLines, pattern, lineIndex, chunk.is_end_of_file);
 
     if (found === -1 && pattern.length > 0 && pattern[pattern.length - 1] === "") {
       pattern = pattern.slice(0, -1);
       if (newSlice.length > 0 && newSlice[newSlice.length - 1] === "") {
         newSlice = newSlice.slice(0, -1);
       }
-      found = seekSequence(
-        originalLines, pattern, lineIndex, chunk.is_end_of_file,
-      );
+      found = seekSequence(originalLines, pattern, lineIndex, chunk.is_end_of_file);
     }
 
     if (found !== -1) {

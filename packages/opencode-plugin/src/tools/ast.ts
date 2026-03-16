@@ -89,10 +89,7 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
         .describe("AST pattern with meta-variables ($VAR, $$$). Must be complete AST node."),
       lang: z.enum(SUPPORTED_LANGS).describe("Target language"),
       paths: z.array(z.string()).optional().describe("Paths to search (default: ['.'])"),
-      globs: z
-        .array(z.string())
-        .optional()
-        .describe("Include/exclude globs (prefix ! to exclude)"),
+      globs: z.array(z.string()).optional().describe("Include/exclude globs (prefix ! to exclude)"),
       context: z.number().optional().describe("Context lines around match"),
     },
     execute: async (args, context): Promise<string> => {

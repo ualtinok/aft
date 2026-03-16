@@ -18,10 +18,7 @@ export interface PendingToolMetadata {
   metadata?: Record<string, unknown>;
 }
 
-const pendingStore = new Map<
-  string,
-  PendingToolMetadata & { storedAt: number }
->();
+const pendingStore = new Map<string, PendingToolMetadata & { storedAt: number }>();
 
 const STALE_TIMEOUT_MS = 15 * 60 * 1000;
 

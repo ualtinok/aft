@@ -183,7 +183,7 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         return `${msg} (${ext.slice(1).toUpperCase()}, ${sizeStr}). File: ${filePath}`;
       }
 
-      const relPath = path.relative(context.worktree, filePath);
+      const _relPath = path.relative(context.worktree, filePath);
 
       // Route: symbol/symbols → zoom command, everything else → read command
       const hasSymbol = typeof args.symbol === "string" && args.symbol.length > 0;
@@ -622,7 +622,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       const patchText = args.patch as string;
 
       // Parse the patch
-      let hunks;
+      let hunks: import("../patch-parser.js").Hunk[];
       try {
         hunks = parsePatch(patchText);
       } catch (e) {
@@ -655,7 +655,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
           case "add": {
             await bridge.send("write", {
               file: filePath,
-              content: hunk.contents.endsWith("\n") ? hunk.contents : hunk.contents + "\n",
+              content: hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`,
               create_dirs: true,
             });
             results.push(`Created ${hunk.path}`);
