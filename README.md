@@ -19,11 +19,16 @@ read an entire file to find one function, construct a diff from memory, apply it
 and hope nothing shifted. Tokens burned on context noise. Edits that break when the file changes.
 Navigation that requires reading three files to answer "what calls this?"
 
-AFT is a set of eight tools built on top of tree-sitter's concrete syntax trees. Every operation
-addresses code by what it *is* — a function, a class, a call site, a symbol — not by where it
-happens to sit in a file right now. Agents can outline a file's structure in one call, zoom into
-a single function, edit it by name, then follow its callers across the workspace. All without
-reading a single line they don't need.
+AFT is a toolkit built on top of tree-sitter's concrete syntax trees. Every operation addresses
+code by what it *is* — a function, a class, a call site, a symbol — not by where it happens to
+sit in a file right now. Agents can outline a file's structure in one call, zoom into a single
+function, edit it by name, then follow its callers across the workspace. All without reading a
+single line they don't need.
+
+Starting with v0.3.0, AFT **hoists** itself into opencode's built-in tool slots. The `read`,
+`write`, `edit`, `apply_patch`, `ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics`
+tools are replaced by AFT-enhanced versions — same names the agent already knows, but now backed
+by the Rust binary for backups, formatting, inline diagnostics, and symbol-aware operations.
 
 The toolkit is a two-component system: a Rust binary that does the heavy lifting (parsing,
 analysis, edits, formatting) and a TypeScript plugin that integrates with OpenCode. The binary
@@ -35,12 +40,12 @@ ceremony required.
 ## How it Helps Agents
 
 **The token problem.** A 500-line file costs ~375 tokens to read. Most of the time, the agent
-needs one function. `aft_zoom` returns that function plus a few lines of context: ~40 tokens.
-Over a multi-step task, the savings compound fast.
+needs one function. `read` with a `symbol` param returns that function plus a few lines of context:
+~40 tokens. Over a multi-step task, the savings compound fast.
 
 **The fragile-edit problem.** Line-number edits break the moment anything above the target moves.
-`aft_edit` in `symbol` mode addresses the function by name. The agent writes the new body; AFT
-finds the symbol, replaces it, validates syntax, and runs the formatter. Nothing to count.
+`edit` in symbol mode addresses the function by name. The agent writes the new body; AFT finds
+the symbol, replaces it, validates syntax, and runs the formatter. Nothing to count.
 
 **The navigation problem.** "Where is this function called?" means grep or reading every importer.
 `aft_navigate` with `callers` mode returns every call site across the workspace in one round trip.
@@ -50,11 +55,13 @@ finds the symbol, replaces it, validates syntax, and runs the formatter. Nothing
 
 ## Features
 
+- **Unified read** — file read, symbol zoom, directory listing, and image/PDF detection in one tool
 - **Semantic outline** — list all symbols in a file (or several files at once) with kind, name, line range, visibility
-- **Symbol zoom** — read a named symbol with call-graph annotations (`calls_out`, `called_by`), or batch multiple symbols in one call
-- **Symbol editing** — replace, delete, insert before/after a named symbol with auto-format and syntax validation
-- **Match editing** — find-and-replace by content when there's no named symbol to target
+- **Symbol editing** — replace a named symbol by name with auto-format and syntax validation
+- **Match editing** — find-and-replace by content with fuzzy fallback (4-pass: exact → trim trailing → trim both → normalize Unicode)
 - **Batch & transaction edits** — atomic multi-edit within a file, or atomic multi-file edits with rollback
+- **Glob replace** — pattern replace across all matching files in one call
+- **Patch apply** — multi-file `*** Begin Patch` format for creates, updates, deletes, and moves
 - **Call tree & callers** — forward call graph and reverse lookup across the workspace
 - **Trace-to & impact analysis** — how does execution reach this function? what breaks if it changes?
 - **Data flow tracing** — follow a value through assignments and parameters across files
@@ -64,6 +71,9 @@ finds the symbol, replaces it, validates syntax, and runs the formatter. Nothing
 - **Workspace-wide refactoring** — move symbols between files (updates all imports), extract functions, inline functions
 - **Safety & recovery** — undo last edit, named checkpoints, restore to any checkpoint
 - **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
+- **Inline diagnostics** — write and edit return LSP errors detected after the change
+- **UI metadata** — the OpenCode desktop shows file paths and diff previews (`+N/-N`) for every edit
+- **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
 
 ---
 
@@ -80,8 +90,12 @@ Add AFT to your OpenCode config:
 }
 ```
 
-That's it. On the next session start, the binary downloads if needed and all eight tools become
-available. Here's a typical agent workflow:
+That's it. On the next session start, the binary downloads if needed and all tools become
+available. AFT replaces opencode's built-in `read`, `write`, `edit`, `apply_patch`,
+`ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` with enhanced versions, plus
+adds the `aft_` family of semantic tools on top.
+
+Here's a typical agent workflow:
 
 **1. Get the file structure:**
 
@@ -104,19 +118,17 @@ available. Here's a typical agent workflow:
 **2. Read the specific function:**
 
 ```json
-// aft_zoom
-{ "file": "src/auth/session.ts", "symbol": "validateToken" }
+// read
+{ "filePath": "src/auth/session.ts", "symbol": "validateToken" }
 ```
 
 **3. Edit it by name:**
 
 ```json
-// aft_edit
+// edit
 {
-  "mode": "symbol",
-  "file": "src/auth/session.ts",
+  "filePath": "src/auth/session.ts",
   "symbol": "validateToken",
-  "operation": "replace",
   "content": "export function validateToken(token: string): boolean {\n  if (!token) return false;\n  return verifyJwt(token);\n}"
 }
 ```
@@ -125,7 +137,7 @@ available. Here's a typical agent workflow:
 
 ```json
 // aft_navigate
-{ "mode": "callers", "file": "src/auth/session.ts", "symbol": "validateToken" }
+{ "mode": "callers", "file": "src/auth/session.ts", "symbol": "validateToken", "depth": 2 }
 ```
 
 ---
@@ -135,18 +147,206 @@ available. Here's a typical agent workflow:
 > **All line numbers are 1-based** (matching editor, git, and compiler conventions).
 > Line 1 is the first line of the file.
 
+### Hoisted tools
+
+These replace opencode's built-ins. Registered under the same names by default. When
+`hoist_builtin_tools: false`, they get the `aft_` prefix instead (e.g. `aft_read`).
+
+| Tool | Replaces | Description | Key Params |
+|------|----------|-------------|------------|
+| `read` | opencode read | File read, symbol zoom, directory listing, image/PDF detection | `filePath`, `symbol`, `symbols[]`, `start_line`, `end_line` |
+| `write` | opencode write | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
+| `edit` | opencode edit | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `match`, `replacement`, `symbol`, `content`, `edits[]` |
+| `apply_patch` | opencode apply_patch | `*** Begin Patch` multi-file patch format | `patch` |
+| `ast_grep_search` | oh-my-opencode ast_grep_search | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
+| `ast_grep_replace` | oh-my-opencode ast_grep_replace | AST pattern replace (dry-run by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
+| `lsp_diagnostics` | oh-my-opencode lsp_diagnostics | Errors/warnings from language server | `file`, `directory`, `severity`, `wait_ms` |
+
+### AFT-only tools
+
+Always registered with `aft_` prefix regardless of hoisting setting.
+
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `aft_outline` | Structural outline of a file (including Markdown headings) | `file`, `files[]` |
-| `aft_zoom` | Deep-inspect a symbol with call-graph info | `file`, `symbol`, `symbols[]`, `start_line`, `end_line` |
-| `aft_edit` | Precision file edits (symbol, match, write, batch, transaction) | `mode`, `file`, `symbol`, `match`, `content`, `edits[]` |
+| `aft_outline` | Structural outline of a file (symbols, Markdown headings) | `file`, `files[]` |
+| `aft_delete` | Delete a file with backup | `file` |
+| `aft_move` | Move or rename a file with backup | `file`, `destination` |
 | `aft_navigate` | Call graph and data-flow navigation | `mode`, `file`, `symbol`, `depth` |
 | `aft_import` | Language-aware import add/remove/organize | `op`, `file`, `module`, `names[]` |
 | `aft_transform` | Structural code transforms (members, derives, decorators) | `op`, `file`, `scope`, `target` |
 | `aft_refactor` | Workspace-wide move, extract, inline | `op`, `file`, `symbol`, `destination` |
 | `aft_safety` | Undo, history, checkpoints, restore | `op`, `file`, `name` |
-| `aft_ast_search` | AST-aware pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
-| `aft_ast_replace` | AST-aware pattern replace (dry-run by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
+
+---
+
+### read
+
+Unified file access. Four modes determined by the parameters you pass:
+
+- **Read file** — `{ "filePath": "src/app.ts" }` — line-numbered content, paginates with `start_line`/`end_line`
+- **Inspect symbol** — `{ "filePath": "src/app.ts", "symbol": "handleRequest" }` — full source + call-graph annotations (`calls_out`, `called_by`)
+- **Inspect multiple symbols** — `{ "filePath": "src/app.ts", "symbols": ["Config", "createApp"] }` — more efficient than separate calls
+- **List directory** — `{ "filePath": "src/" }` — sorted entries, directories get trailing `/`
+
+Binary files are auto-detected and return a size-only message. Image and PDF files return metadata
+suitable for UI preview. Output is capped at 50KB — use `start_line`/`end_line` to page.
+
+For **Markdown**: use the heading text as the symbol name (e.g. `"symbol": "Architecture"`) to
+read the entire section.
+
+---
+
+### write
+
+Write the full content of a file. Creates the file (and any missing parent directories) if it
+doesn't exist. Backs up any existing content before overwriting.
+
+```json
+{ "filePath": "src/config.ts", "content": "export const TIMEOUT = 10000;\n" }
+```
+
+Returns inline LSP diagnostics if type errors are introduced. Auto-formats using the project's
+configured formatter (biome, prettier, etc.).
+
+For partial edits (find/replace), use `edit` instead.
+
+---
+
+### edit
+
+The main editing tool. Mode is determined by which parameters you pass:
+
+**Find and replace** — pass `filePath` + `match` + `replacement`:
+
+```json
+{ "filePath": "src/config.ts", "match": "const TIMEOUT = 5000", "replacement": "const TIMEOUT = 10000" }
+```
+
+Matching uses a 4-pass fuzzy fallback: exact match first, then trailing-whitespace trim, then
+both-ends trim, then Unicode normalization. Returns an error if multiple matches exist — use
+`occurrence: N` (0-indexed) to pick one, or `replace_all: true` to replace all.
+
+**Symbol replace** — pass `filePath` + `symbol` + `content`:
+
+```json
+{
+  "filePath": "src/utils.ts",
+  "symbol": "formatDate",
+  "content": "export function formatDate(d: Date): string {\n  return d.toISOString().split('T')[0];\n}"
+}
+```
+
+Includes decorators, doc comments, and attributes in the replacement range.
+
+**Batch edits** — pass `filePath` + `edits` array. Atomic: all edits apply or none do.
+
+```json
+{
+  "filePath": "src/constants.ts",
+  "edits": [
+    { "match": "VERSION = '1.0'", "replacement": "VERSION = '2.0'" },
+    { "line_start": 5, "line_end": 7, "content": "// updated header\n" }
+  ]
+}
+```
+
+Set `content` to `""` to delete lines. Per-edit `occurrence` is supported.
+
+**Multi-file transaction** — pass `operations` array. Rolls back all files if any operation fails.
+
+```json
+{
+  "operations": [
+    { "file": "a.ts", "command": "write", "content": "..." },
+    { "file": "b.ts", "command": "edit_match", "match": "x", "replacement": "y" }
+  ]
+}
+```
+
+**Glob replace** — use a glob as `filePath` with `replace_all: true`:
+
+```json
+{ "filePath": "src/**/*.ts", "match": "oldName", "replacement": "newName", "replace_all": true }
+```
+
+All modes support `dry_run: true` to preview as a diff without modifying files, and
+`diagnostics: true` to get inline LSP errors after the edit.
+
+---
+
+### apply_patch
+
+Apply a multi-file patch using the `*** Begin Patch` format. Creates, updates, deletes, and
+renames files atomically — if any operation fails, all revert.
+
+```
+*** Begin Patch
+*** Add File: path/to/new-file.ts
++line 1
++line 2
+*** Update File: path/to/existing-file.ts
+@@ context anchor line
+-old line
++new line
+*** Delete File: path/to/obsolete-file.ts
+*** End Patch
+```
+
+Context anchors (`@@`) use fuzzy matching to handle whitespace and Unicode differences.
+
+---
+
+### ast_grep_search
+
+Search for structural code patterns using meta-variables. Patterns must be complete AST nodes.
+
+```json
+{ "pattern": "console.log($MSG)", "lang": "typescript" }
+```
+
+- `$VAR` matches a single AST node
+- `$$$` matches multiple nodes (variadic)
+
+Returns matches with file, line (1-based), column, matched text, and captured variable values.
+Add `context: 3` to include surrounding lines.
+
+```json
+// Find all async functions in JS/TS
+{ "pattern": "async function $NAME($$$) { $$$ }", "lang": "typescript" }
+```
+
+---
+
+### ast_grep_replace
+
+Replace structural code patterns across files. Dry-run by default — set `dryRun: false` to apply.
+
+```json
+{ "pattern": "console.log($MSG)", "rewrite": "logger.info($MSG)", "lang": "typescript" }
+```
+
+Meta-variables captured in `pattern` are available in `rewrite`. Returns unified diffs per file
+in dry-run mode, or writes changes with backups when applied.
+
+---
+
+### lsp_diagnostics
+
+Get errors, warnings, and hints from the language server. Lazily spawns the appropriate server
+(typescript-language-server, pyright, rust-analyzer, gopls) on first use.
+
+```json
+// Check a single file
+{ "file": "src/api.ts", "severity": "error" }
+
+// Check all files in a directory
+{ "directory": "src/", "severity": "all" }
+
+// Wait for fresh diagnostics after an edit
+{ "file": "src/api.ts", "wait_ms": 2000 }
+```
+
+Returns `{ file, line, column, severity, message, code }` per diagnostic.
 
 ---
 
@@ -157,7 +357,7 @@ Returns all top-level symbols in a file with their kind, name, line range, visib
 `files` array to outline multiple files in one call.
 
 For **Markdown** files (`.md`, `.mdx`): returns heading hierarchy with section ranges — each
-heading becomes a symbol you can zoom into by name.
+heading becomes a symbol you can read by name.
 
 ```json
 // Outline two files at once
@@ -166,86 +366,30 @@ heading becomes a symbol you can zoom into by name.
 
 ---
 
-### aft_zoom
+### aft_delete
 
-Deep-inspect a symbol — returns its full source, surrounding context lines, and call-graph
-annotations (`calls_out`, `called_by`). Three access patterns:
+Delete a file with an in-memory backup. The backup survives for the session and can be restored
+via `aft_safety`.
 
-- **Named symbol**: `{ "file": "...", "symbol": "myFunction" }`
-- **Multiple symbols**: `{ "file": "...", "symbols": ["funcA", "funcB"] }`
-- **Line range**: `{ "file": "...", "start_line": 10, "end_line": 25 }`
+```json
+{ "file": "src/deprecated/old-utils.ts" }
+```
 
-For **Markdown**: use the heading text as the symbol name (e.g. `"symbol": "Architecture"`) to
-read the entire section.
-
-Use `scope` to disambiguate symbols with the same name (e.g. `"scope": "MyClass.method"`).
-Use `context_lines` to control how many surrounding lines appear (default: 3).
+Returns `{ file, deleted, backup_id }` on success.
 
 ---
 
-### aft_edit
+### aft_move
 
-The main editing tool. Four modes:
-
-**`symbol`** — preferred for code changes. Edit a named symbol directly.
-
-```json
-{
-  "mode": "symbol",
-  "file": "src/utils.ts",
-  "symbol": "formatDate",
-  "operation": "replace",
-  "content": "export function formatDate(d: Date): string {\n  return d.toISOString().split('T')[0];\n}"
-}
-```
-
-Operations: `replace`, `delete`, `insert_before`, `insert_after`.
-
-**`match`** — find-and-replace by content. Good for config values, strings, unnamed code.
+Move or rename a file. Creates parent directories for the destination automatically. Falls back
+to copy+delete for cross-filesystem moves. Backs up the original before moving.
 
 ```json
-{
-  "mode": "match",
-  "file": "src/config.ts",
-  "match": "const TIMEOUT = 5000",
-  "replacement": "const TIMEOUT = 10000"
-}
+{ "file": "src/helpers.ts", "destination": "src/utils/helpers.ts" }
 ```
 
-Set `replace_all: true` to replace every occurrence. If multiple matches exist without `occurrence`
-or `replace_all`, the response returns `ambiguous_match` with all candidates.
+Returns `{ file, destination, moved, backup_id }` on success.
 
-**`write`** — write the full file content. For new files or complete rewrites.
-**`write`** — write the full file content. For new files or complete rewrites.
-
-**Glob patterns** — use a glob in `file` to replace across multiple files in one call:
-
-```json
-{ "mode": "match", "file": "**/*.ts", "match": "oldName", "replacement": "newName" }
-```
-
-Returns `{ files: [...], total_replacements, total_files }`.
-
-**`batch`** — apply multiple edits atomically to one file. Each edit is either a match/replace
-or a line-range replacement (1-based, inclusive).
-
-```json
-{
-  "mode": "batch",
-  "file": "src/constants.ts",
-  "edits": [
-    { "match": "VERSION = '1.0'", "replacement": "VERSION = '2.0'" },
-    { "line_start": 5, "line_end": 7, "content": "// updated header block\n" }
-  ]
-}
-```
-
-Per-edit `occurrence` is supported for disambiguation. Set `content` to empty string to delete
-lines entirely.
-
-**`transaction`** — atomic edits across multiple files. If any file fails, all revert.
-
-All modes support `dry_run: true` to preview as a diff without modifying files.
 ---
 
 ### aft_navigate
@@ -368,32 +512,6 @@ Backup and recovery for risky edits.
 > **Note:** Backups are held in-memory for the session lifetime (lost on restart). Per-file undo
 > stack is capped at 20 entries — oldest snapshots are evicted when exceeded.
 
-
-### aft_ast_search
-
-Search for AST patterns across your codebase using tree-sitter structural matching. Patterns use meta-variables (`$VAR` for single nodes, `$$$` for multiple nodes) and must be valid code fragments.
-
-```json
-{ "pattern": "console.log($MSG)", "lang": "typescript" }
-```
-
-Returns matches with file, line (1-based), column, matched text, and captured meta-variable values. Add `context: 3` to include surrounding lines.
-
-More pattern examples:
-- `def $FUNC($$$):` — find all Python function definitions
-- `async function $NAME($$$) { $$$ }` — find async functions in JS/TS
-- `if ($COND) { $$$ }` — find all if blocks
-
-### aft_ast_replace
-
-Replace AST patterns across files with structural rewriting. Dry-run by default.
-
-```json
-{ "pattern": "console.log($MSG)", "rewrite": "logger.info($MSG)", "lang": "typescript" }
-```
-
-Meta-variables captured in the pattern are available in the rewrite template. Returns unified diffs per file in dry-run mode, or writes changes with backups.
-
 ---
 
 ## Configuration
@@ -415,7 +533,12 @@ Both files are JSONC (comments allowed).
 
 ```jsonc
 {
-  // Auto-format files after every aft_edit. Default: true
+  // Replace opencode's built-in read/write/edit/apply_patch and oh-my-opencode's
+  // ast_grep_search/ast_grep_replace/lsp_diagnostics with AFT-enhanced versions.
+  // Default: true. Set to false to use aft_ prefix on all tools instead.
+  "hoist_builtin_tools": true,
+
+  // Auto-format files after every edit. Default: true
   "format_on_edit": true,
 
   // Auto-validate after edits: "syntax" (tree-sitter, fast) or "full" (runs type checker)
@@ -440,8 +563,9 @@ Both files are JSONC (comments allowed).
 
 AFT auto-detects the formatter and checker from project config files (`biome.json` → biome,
 `.prettierrc` → prettier, `Cargo.toml` → rustfmt, `pyproject.toml` → ruff/black, `go.mod` →
-goimports). You only need per-language overrides if auto-detection picks the wrong tool or if
-you want to pin a specific formatter for a language.
+goimports). Local tool binaries (biome, prettier, tsc, pyright) are discovered in
+`node_modules/.bin` before falling back to the system PATH. You only need per-language overrides
+if auto-detection picks the wrong tool or you want to pin a specific formatter.
 
 ---
 
@@ -455,7 +579,8 @@ OpenCode agent
      | tool calls
      v
 @cortexkit/aft-opencode (TypeScript plugin)
-  - Registers 8 tools with OpenCode SDK
+  - Hoists enhanced read/write/edit/apply_patch/ast_grep_*/lsp_diagnostics
+  - Registers aft_outline/navigate/import/transform/refactor/safety/delete/move
   - Manages a BridgePool (one aft process per project directory)
   - Resolves the binary path (cache → npm → PATH → cargo → download)
      |
