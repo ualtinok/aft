@@ -676,22 +676,35 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         }
       }
 
-      // Store metadata for tool.execute.after hook
+      // Store metadata for tool.execute.after hook (match opencode built-in format)
       const callID = getCallID(context);
       if (callID) {
-        const title = allPaths.length === 1
-          ? path.relative(context.worktree, path.resolve(context.directory, hunks[0].path))
-          : `${allPaths.length} files`;
+        // Build per-file metadata matching opencode's files array
+        const files = hunks.map((h) => {
+          const relPath = path.relative(context.worktree, path.resolve(context.directory, h.path));
+          return {
+            filePath: path.resolve(context.directory, h.path),
+            relativePath: relPath,
+            type: h.type,
+          };
+        });
+
+        // Build title matching built-in: "Success. Updated the following files:\nM path/to/file.ts"
+        const fileList = files.map((f) => {
+          const prefix = f.type === "add" ? "A" : f.type === "delete" ? "D" : "M";
+          return `${prefix} ${f.relativePath}`;
+        }).join("\n");
+        const title = `Success. Updated the following files:\n${fileList}`;
+
         storeToolMetadata(context.sessionID, callID, {
           title,
           metadata: {
-            filediff: {
-              file: allPaths.join(", "),
-              before: combinedBefore,
-              after: combinedAfter,
-              additions: totalAdditions,
-              deletions: totalDeletions,
-            },
+            diff: buildUnifiedDiff(
+              files.length === 1 ? files[0].filePath : "patch",
+              combinedBefore,
+              combinedAfter,
+            ),
+            files,
           },
         });
       }
