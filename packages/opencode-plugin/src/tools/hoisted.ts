@@ -473,7 +473,7 @@ function createEditTool(ctx: PluginContext): ToolDefinition {
       }
 
       if (args.dry_run) params.dry_run = true;
-      if (args.diagnostics) params.diagnostics = true;
+      if (!args.dry_run) params.diagnostics = true;
       // Request diff from Rust for UI metadata (avoids extra file reads in TS)
       if (!args.dry_run) params.include_diff = true;
 
@@ -506,6 +506,18 @@ function createEditTool(ctx: PluginContext): ToolDefinition {
               diagnostics: {},
             },
           });
+        }
+      }
+
+      // Append inline diagnostics to output (matching write tool and opencode built-in behavior)
+      if (!args.dry_run) {
+        const diags = data.lsp_diagnostics as Array<Record<string, unknown>> | undefined;
+        if (diags && diags.length > 0) {
+          const errors = diags.filter((d) => d.severity === "error");
+          if (errors.length > 0) {
+            const diagLines = errors.map((d) => `  Line ${d.line}: ${d.message}`).join("\n");
+            data.diagnostics_summary = `\n\nLSP errors detected, please fix:\n${diagLines}`;
+          }
         }
       }
 
@@ -610,6 +622,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               file: filePath,
               content: hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`,
               create_dirs: true,
+              diagnostics: true,
             });
             const lines = hunk.contents.split("\n").length;
             totalAdditions += lines;
@@ -641,11 +654,23 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               ? path.resolve(context.directory, hunk.move_path)
               : filePath;
 
-            await bridge.send("write", {
+            const writeResult = await bridge.send("write", {
               file: targetPath,
               content: newContent,
               create_dirs: true,
+              diagnostics: true,
             });
+
+            // Collect diagnostics from this file
+            const diags = writeResult.lsp_diagnostics as Array<Record<string, unknown>> | undefined;
+            if (diags && diags.length > 0) {
+              const errors = diags.filter((d) => d.severity === "error");
+              if (errors.length > 0) {
+                const relPath = path.relative(context.worktree, targetPath);
+                const diagLines = errors.map((d) => `  Line ${d.line}: ${d.message}`).join("\n");
+                results.push(`\nLSP errors detected in ${relPath}, please fix:\n${diagLines}`);
+              }
+            }
 
             // Track diff
             combinedBefore += original;
