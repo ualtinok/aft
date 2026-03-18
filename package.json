@@ -1,6 +1,8 @@
 {
   "private": true,
   "workspaces": ["packages/*", "benchmarks"],
+  "author": "ualtinok",
+  "license": "SUL-1.0",
   "scripts": {
     "build": "bun run --filter '*' build",
     "build:rust": "cargo build --release",

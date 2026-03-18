@@ -2143,7 +2143,7 @@ fn extract_callee_names(node: tree_sitter::Node, source: &str) -> (Option<String
 /// Resolve a module path (e.g. './utils') relative to a directory.
 ///
 /// Tries common file extensions for TypeScript/JavaScript projects.
-fn resolve_module_path(from_dir: &Path, module_path: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_module_path(from_dir: &Path, module_path: &str) -> Option<PathBuf> {
     // Only handle relative imports
     if !module_path.starts_with('.') {
         return None;

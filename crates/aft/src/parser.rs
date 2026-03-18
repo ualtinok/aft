@@ -1,13 +1,16 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, Tree};
 
+use crate::callgraph::resolve_module_path;
 use crate::error::AftError;
 use crate::symbols::{Range, Symbol, SymbolKind, SymbolMatch};
+
+const MAX_REEXPORT_DEPTH: usize = 10;
 
 // --- Query patterns embedded at compile time ---
 
@@ -269,6 +272,11 @@ impl FileParser {
         Ok((&cached.tree, lang))
     }
 
+    pub fn parse_cloned(&mut self, path: &Path) -> Result<(Tree, LangId), AftError> {
+        let (tree, lang) = self.parse(path)?;
+        Ok((tree.clone(), lang))
+    }
+
     /// Extract symbols from a file using language-specific query patterns.
     pub fn extract_symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, AftError> {
         let source = std::fs::read_to_string(path).map_err(|e| AftError::FileNotFound {
@@ -392,6 +400,33 @@ fn is_adjacent_line(upper: &Node, lower: &Node, source: &str) -> bool {
 /// Extract the text of a node from source.
 pub(crate) fn node_text<'a>(source: &'a str, node: &Node) -> &'a str {
     &source[node.byte_range()]
+}
+
+fn lexical_declaration_has_function_value(node: &Node) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+
+    loop {
+        let child = cursor.node();
+        if matches!(
+            child.kind(),
+            "arrow_function" | "function_expression" | "generator_function"
+        ) {
+            return true;
+        }
+
+        if lexical_declaration_has_function_value(&child) {
+            return true;
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    false
 }
 
 /// Collect byte ranges of all export_statement nodes from query matches.
@@ -600,9 +635,10 @@ fn extract_ts_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Sy
                 .parent()
                 .map(|p| p.kind() == "program" || p.kind() == "export_statement")
                 .unwrap_or(false);
+            let is_function_like = lexical_declaration_has_function_value(&def_node);
             let name = node_text(source, &name_node).to_string();
             let already_captured = symbols.iter().any(|s| s.name == name);
-            if is_top_level && !already_captured {
+            if is_top_level && !is_function_like && !already_captured {
                 symbols.push(Symbol {
                     name,
                     kind: SymbolKind::Variable,
@@ -1380,26 +1416,406 @@ pub struct TreeSitterProvider {
     parser: RefCell<FileParser>,
 }
 
+#[derive(Debug, Clone)]
+struct ReExportTarget {
+    file: PathBuf,
+    symbol_name: String,
+}
+
 impl TreeSitterProvider {
     pub fn new() -> Self {
         Self {
             parser: RefCell::new(FileParser::new()),
         }
     }
+
+    fn resolve_symbol_inner(
+        &self,
+        file: &Path,
+        name: &str,
+        depth: usize,
+        visited: &mut HashSet<(PathBuf, String)>,
+    ) -> Result<Vec<SymbolMatch>, AftError> {
+        if depth > MAX_REEXPORT_DEPTH {
+            return Ok(Vec::new());
+        }
+
+        let canonical_file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        if !visited.insert((canonical_file, name.to_string())) {
+            return Ok(Vec::new());
+        }
+
+        let symbols = self.parser.borrow_mut().extract_symbols(file)?;
+        let local_matches = symbol_matches_in_file(file, &symbols, name);
+        if !local_matches.is_empty() {
+            return Ok(local_matches);
+        }
+
+        if name == "default" {
+            let default_matches = self.resolve_local_default_export(file, &symbols)?;
+            if !default_matches.is_empty() {
+                return Ok(default_matches);
+            }
+        }
+
+        let reexport_targets = self.collect_reexport_targets(file, name)?;
+        let mut matches = Vec::new();
+        let mut seen = HashSet::new();
+        for target in reexport_targets {
+            for resolved in
+                self.resolve_symbol_inner(&target.file, &target.symbol_name, depth + 1, visited)?
+            {
+                let key = format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    resolved.file,
+                    resolved.symbol.name,
+                    resolved.symbol.range.start_line,
+                    resolved.symbol.range.start_col,
+                    resolved.symbol.range.end_line,
+                    resolved.symbol.range.end_col
+                );
+                if seen.insert(key) {
+                    matches.push(resolved);
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
+    fn collect_reexport_targets(
+        &self,
+        file: &Path,
+        requested_name: &str,
+    ) -> Result<Vec<ReExportTarget>, AftError> {
+        let (source, tree, lang) = self.read_parsed_file(file)?;
+        if !matches!(lang, LangId::TypeScript | LangId::Tsx | LangId::JavaScript) {
+            return Ok(Vec::new());
+        }
+
+        let mut targets = Vec::new();
+        let root = tree.root_node();
+        let from_dir = file.parent().unwrap_or_else(|| Path::new("."));
+
+        let mut cursor = root.walk();
+        if !cursor.goto_first_child() {
+            return Ok(targets);
+        }
+
+        loop {
+            let node = cursor.node();
+            if node.kind() == "export_statement" {
+                let Some(source_node) = node.child_by_field_name("source") else {
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                    continue;
+                };
+
+                let Some(module_path) = string_content(&source, &source_node) else {
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                    continue;
+                };
+
+                let Some(target_file) = resolve_module_path(from_dir, &module_path) else {
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                    continue;
+                };
+
+                if let Some(export_clause) = find_child_by_kind(node, "export_clause") {
+                    if let Some(symbol_name) =
+                        resolve_export_clause_name(&source, &export_clause, requested_name)
+                    {
+                        targets.push(ReExportTarget {
+                            file: target_file,
+                            symbol_name,
+                        });
+                    }
+                } else if export_statement_has_wildcard(&source, &node) {
+                    targets.push(ReExportTarget {
+                        file: target_file,
+                        symbol_name: requested_name.to_string(),
+                    });
+                }
+            }
+
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+
+        Ok(targets)
+    }
+
+    fn resolve_local_default_export(
+        &self,
+        file: &Path,
+        symbols: &[Symbol],
+    ) -> Result<Vec<SymbolMatch>, AftError> {
+        let (source, tree, lang) = self.read_parsed_file(file)?;
+        if !matches!(lang, LangId::TypeScript | LangId::Tsx | LangId::JavaScript) {
+            return Ok(Vec::new());
+        }
+
+        let root = tree.root_node();
+        let mut matches = Vec::new();
+        let mut seen = HashSet::new();
+
+        let mut cursor = root.walk();
+        if !cursor.goto_first_child() {
+            return Ok(matches);
+        }
+
+        loop {
+            let node = cursor.node();
+            if node.kind() == "export_statement"
+                && node.child_by_field_name("source").is_none()
+                && node_contains_token(&source, &node, "default")
+            {
+                if let Some(target_name) = default_export_target_name(&source, &node) {
+                    for symbol_match in symbol_matches_in_file(file, symbols, &target_name) {
+                        let key = format!(
+                            "{}:{}:{}:{}:{}:{}",
+                            symbol_match.file,
+                            symbol_match.symbol.name,
+                            symbol_match.symbol.range.start_line,
+                            symbol_match.symbol.range.start_col,
+                            symbol_match.symbol.range.end_line,
+                            symbol_match.symbol.range.end_col
+                        );
+                        if seen.insert(key) {
+                            matches.push(symbol_match);
+                        }
+                    }
+                }
+            }
+
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+
+        Ok(matches)
+    }
+
+    fn read_parsed_file(&self, file: &Path) -> Result<(String, Tree, LangId), AftError> {
+        let source = std::fs::read_to_string(file).map_err(|e| AftError::FileNotFound {
+            path: format!("{}: {}", file.display(), e),
+        })?;
+        let (tree, lang) = {
+            let mut parser = self.parser.borrow_mut();
+            parser.parse_cloned(file)?
+        };
+        Ok((source, tree, lang))
+    }
+}
+
+fn symbol_matches_in_file(file: &Path, symbols: &[Symbol], name: &str) -> Vec<SymbolMatch> {
+    symbols
+        .iter()
+        .filter(|symbol| symbol.name == name)
+        .cloned()
+        .map(|symbol| SymbolMatch {
+            file: file.display().to_string(),
+            symbol,
+        })
+        .collect()
+}
+
+fn string_content(source: &str, node: &Node) -> Option<String> {
+    let text = node_text(source, node);
+    if text.len() < 2 {
+        return None;
+    }
+
+    Some(
+        text.trim_start_matches(|c| c == '\'' || c == '"')
+            .trim_end_matches(|c| c == '\'' || c == '"')
+            .to_string(),
+    )
+}
+
+fn find_child_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        let child = cursor.node();
+        if child.kind() == kind {
+            return Some(child);
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn resolve_export_clause_name(
+    source: &str,
+    export_clause: &Node,
+    requested_name: &str,
+) -> Option<String> {
+    let mut cursor = export_clause.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        let child = cursor.node();
+        if child.kind() == "export_specifier" {
+            let (source_name, exported_name) = export_specifier_names(source, &child)?;
+            if exported_name == requested_name {
+                return Some(source_name);
+            }
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn export_specifier_names(source: &str, specifier: &Node) -> Option<(String, String)> {
+    let source_name = specifier
+        .child_by_field_name("name")
+        .map(|node| node_text(source, &node).to_string());
+    let alias_name = specifier
+        .child_by_field_name("alias")
+        .map(|node| node_text(source, &node).to_string());
+
+    if let Some(source_name) = source_name {
+        let exported_name = alias_name.unwrap_or_else(|| source_name.clone());
+        return Some((source_name, exported_name));
+    }
+
+    let mut names = Vec::new();
+    let mut cursor = specifier.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            let child_text = node_text(source, &child).trim();
+            if matches!(
+                child.kind(),
+                "identifier" | "type_identifier" | "property_identifier"
+            ) || child_text == "default"
+            {
+                names.push(child_text.to_string());
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    match names.as_slice() {
+        [name] => Some((name.clone(), name.clone())),
+        [source_name, exported_name, ..] => Some((source_name.clone(), exported_name.clone())),
+        _ => None,
+    }
+}
+
+fn export_statement_has_wildcard(source: &str, node: &Node) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+
+    loop {
+        if node_text(source, &cursor.node()).trim() == "*" {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    false
+}
+
+fn node_contains_token(source: &str, node: &Node, token: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+
+    loop {
+        if node_text(source, &cursor.node()).trim() == token {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    false
+}
+
+fn default_export_target_name(source: &str, export_stmt: &Node) -> Option<String> {
+    let mut cursor = export_stmt.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "function_declaration"
+            | "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "type_alias_declaration"
+            | "lexical_declaration" => {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    return Some(node_text(source, &name_node).to_string());
+                }
+
+                if child.kind() == "lexical_declaration" {
+                    let mut child_cursor = child.walk();
+                    if child_cursor.goto_first_child() {
+                        loop {
+                            let nested = child_cursor.node();
+                            if nested.kind() == "variable_declarator" {
+                                if let Some(name_node) = nested.child_by_field_name("name") {
+                                    return Some(node_text(source, &name_node).to_string());
+                                }
+                            }
+                            if !child_cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            "identifier" | "type_identifier" => {
+                let text = node_text(source, &child);
+                if text != "export" && text != "default" {
+                    return Some(text.to_string());
+                }
+            }
+            _ => {}
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
 }
 
 impl crate::language::LanguageProvider for TreeSitterProvider {
     fn resolve_symbol(&self, file: &Path, name: &str) -> Result<Vec<SymbolMatch>, AftError> {
-        let symbols = self.parser.borrow_mut().extract_symbols(file)?;
-
-        let matches: Vec<SymbolMatch> = symbols
-            .into_iter()
-            .filter(|s| s.name == name)
-            .map(|s| SymbolMatch {
-                file: file.display().to_string(),
-                symbol: s,
-            })
-            .collect();
+        let matches = self.resolve_symbol_inner(file, name, 0, &mut HashSet::new())?;
 
         if matches.is_empty() {
             Err(AftError::SymbolNotFound {
@@ -1775,6 +2191,70 @@ mod tests {
         let provider = TreeSitterProvider::new();
         let result = provider.resolve_symbol(&fixture_path("sample.ts"), "nonexistent");
         assert!(matches!(result, Err(AftError::SymbolNotFound { .. })));
+    }
+
+    #[test]
+    fn resolve_symbol_follows_reexport_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.ts");
+        let barrel1 = dir.path().join("barrel1.ts");
+        let barrel2 = dir.path().join("barrel2.ts");
+        let barrel3 = dir.path().join("barrel3.ts");
+        let index = dir.path().join("index.ts");
+
+        std::fs::write(
+            &config,
+            "export class Config {}\nexport default class DefaultConfig {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &barrel1,
+            "export { Config } from './config';\nexport { default as NamedDefault } from './config';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &barrel2,
+            "export { Config as RenamedConfig } from './barrel1';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &barrel3,
+            "export * from './barrel2';\nexport * from './barrel1';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &index,
+            "export class Config {}\nexport { RenamedConfig as FinalConfig } from './barrel3';\nexport * from './barrel3';\n",
+        )
+        .unwrap();
+
+        let provider = TreeSitterProvider::new();
+        let config_canon = std::fs::canonicalize(&config).unwrap();
+
+        let direct = provider.resolve_symbol(&barrel1, "Config").unwrap();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].symbol.name, "Config");
+        assert_eq!(direct[0].file, config_canon.display().to_string());
+
+        let renamed = provider.resolve_symbol(&barrel2, "RenamedConfig").unwrap();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].symbol.name, "Config");
+        assert_eq!(renamed[0].file, config_canon.display().to_string());
+
+        let wildcard_chain = provider.resolve_symbol(&index, "FinalConfig").unwrap();
+        assert_eq!(wildcard_chain.len(), 1);
+        assert_eq!(wildcard_chain[0].symbol.name, "Config");
+        assert_eq!(wildcard_chain[0].file, config_canon.display().to_string());
+
+        let wildcard_default = provider.resolve_symbol(&index, "NamedDefault").unwrap();
+        assert_eq!(wildcard_default.len(), 1);
+        assert_eq!(wildcard_default[0].symbol.name, "DefaultConfig");
+        assert_eq!(wildcard_default[0].file, config_canon.display().to_string());
+
+        let local = provider.resolve_symbol(&index, "Config").unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].symbol.name, "Config");
+        assert_eq!(local[0].file, index.display().to_string());
     }
 
     // --- Parse tree caching ---
