@@ -13,11 +13,6 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
       "Get errors, warnings, hints from language server. " +
       "Returns diagnostics from LSP servers (typescript-language-server, pyright, rust-analyzer, gopls). " +
       "Lazily spawns the appropriate server on first use.\n\n" +
-      "Parameters:\n" +
-      "- file (string, optional): Path to file to get diagnostics for.\n" +
-      "- directory (string, optional): Path to directory to get diagnostics for all files under it.\n" +
-      "- severity (enum, optional): Filter by severity — 'error', 'warning', 'information', 'hint', 'all' (default: 'all').\n" +
-      "- waitMs (number, optional): Wait N ms for fresh diagnostics before returning (max 10000, default: 0). Use after edits to let the server re-analyze.\n\n" +
       "Returns: { diagnostics: Array<{ file, line, column, end_line, end_column, severity, message, code }>, total: number, files_with_errors: number }.",
     args: {
       file: z.string().optional(),

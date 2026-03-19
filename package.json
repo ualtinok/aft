@@ -6,6 +6,7 @@
   "scripts": {
     "build": "bun run --filter '*' build",
     "build:rust": "cargo build --release",
+    "build:all": "bun run --filter '*' build && cargo build --release",
     "typecheck": "bun run --filter '*' typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

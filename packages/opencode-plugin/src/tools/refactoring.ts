@@ -22,52 +22,37 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
       description:
         "Workspace-wide refactoring operations that update imports and references across files.\n\n" +
         "Ops:\n" +
-        "- 'move': Move a symbol to another file, updating all imports workspace-wide. Requires 'symbol', 'destination'. Creates a checkpoint before mutating.\n" +
+        "- 'move': Move a top-level symbol to another file, updating all imports workspace-wide. Requires 'symbol', 'destination'. Creates a checkpoint before mutating. Only works on top-level exports (not nested functions or class methods).\n" +
+        "   Note: This moves code symbols between files. To rename/move an entire file, use aft_move instead.\n" +
         "- 'extract': Extract a line range into a new function with auto-detected parameters. Requires 'name', 'startLine', 'endLine' (1-based, endLine is exclusive). Supports TS/JS/TSX and Python.\n" +
         "- 'inline': Replace a function call with the function's body, substituting args for params. Requires 'symbol', 'callSiteLine' (1-based). Validates single-return constraint.\n\n" +
-        "Parameters:\n" +
-        "- op (enum, required): 'move' | 'extract' | 'inline'\n" +
-        "- file (string, required): Path to the source file\n" +
-        "- symbol (string, optional): Symbol name — required for 'move' (symbol to move) and 'inline' (function to inline)\n" +
-        "- destination (string, optional): Target file path for 'move' op — created if it doesn't exist\n" +
-        "- scope (string, optional): Disambiguation scope for 'move' when multiple symbols share the same name\n" +
-        "- name (string, optional): New function name for 'extract' op\n" +
-        "- startLine (number, optional): 1-based start line of the range to extract ('extract' op)\n" +
-        "- endLine (number, optional): 1-based end line of the range to extract, exclusive ('extract' op)\n" +
-        "- callSiteLine (number, optional): 1-based line where the call expression is located ('inline' op)\n" +
-        "- dryRun (boolean, optional): Preview changes as diff without modifying files\n\n" +
-        "All ops need 'file'. Use dryRun to preview before applying.",
+        "All ops need 'file'. Use dryRun to preview before applying.\n\n" +
+        "Returns: move dry-run { ok, dry_run, diffs }; move apply { ok, files_modified, consumers_updated, checkpoint_name, results }. extract returns { file, name, parameters, return_type, syntax_valid, formatted, ... }. inline returns { file, symbol, call_context, substitutions, conflicts, syntax_valid, formatted, ... }.",
       args: {
         op: z.enum(["move", "extract", "inline"]).describe("Refactoring operation"),
         file: z.string().describe("Path to the source file"),
         symbol: z
           .string()
           .optional()
-          .describe("Symbol name (move: symbol to move, inline: function to inline)"),
+          .describe("Symbol name — required for 'move' and 'inline' ops"),
         // move
-        destination: z
-          .string()
-          .optional()
-          .describe("Destination file path (move op — will be created if needed)"),
+        destination: z.string().optional().describe("Target file path — required for 'move' op"),
         scope: z
           .string()
           .optional()
           .describe("Disambiguation scope when multiple symbols share the same name (move op)"),
         // extract
-        name: z.string().optional().describe("Name for the new extracted function (extract op)"),
-        startLine: z
-          .number()
-          .optional()
-          .describe("First line of range to extract, 1-based (extract op)"),
+        name: z.string().optional().describe("New function name — required for 'extract' op"),
+        startLine: z.number().optional().describe("1-based start line — required for 'extract' op"),
         endLine: z
           .number()
           .optional()
-          .describe("Last line of range, exclusive, 1-based (extract op)"),
+          .describe("1-based end line (exclusive) — required for 'extract' op"),
         // inline
         callSiteLine: z
           .number()
           .optional()
-          .describe("Line where the call expression is located, 1-based (inline op)"),
+          .describe("1-based call site line — required for 'inline' op"),
         // common
         dryRun: z.boolean().optional().describe("Preview as diff without modifying files"),
       },

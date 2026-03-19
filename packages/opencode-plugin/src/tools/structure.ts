@@ -25,21 +25,6 @@ export function structureTools(ctx: PluginContext): Record<string, ToolDefinitio
         "- 'wrap_try_catch': Wrap a TS/JS function body in try/catch. Requires 'target' (function name). Optional 'catchBody'.\n" +
         "- 'add_decorator': Add Python decorator to function/class. Requires 'target' and 'decorator' (without @). Optional 'position'.\n" +
         "- 'add_struct_tags': Add/update Go struct field tags. Requires 'target' (struct name), 'field', 'tag', 'value'.\n\n" +
-        "Parameters:\n" +
-        "- op (enum, required): 'add_member' | 'add_derive' | 'wrap_try_catch' | 'add_decorator' | 'add_struct_tags'\n" +
-        "- file (string, required): Path to the source file\n" +
-        "- scope (string, optional): Container name for add_member — the class, struct, or impl block to insert into\n" +
-        "- code (string, optional): Member code to insert for add_member\n" +
-        "- position (string, optional): Insertion point for add_member/add_decorator — 'first', 'last' (default), 'before:name', 'after:name'\n" +
-        "- target (string, optional): Target symbol name — for add_derive (struct/enum), wrap_try_catch (function), add_decorator (function/class), add_struct_tags (struct)\n" +
-        "- derives (string[], optional): Derive macro names for add_derive (e.g. ['Debug', 'Clone'])\n" +
-        "- catchBody (string, optional): Custom catch block body for wrap_try_catch (default: 'throw error;')\n" +
-        "- decorator (string, optional): Decorator name without @ for add_decorator (e.g. 'staticmethod', 'property')\n" +
-        "- field (string, optional): Struct field name for add_struct_tags\n" +
-        "- tag (string, optional): Tag key for add_struct_tags (e.g. 'json', 'yaml', 'db')\n" +
-        "- value (string, optional): Tag value for add_struct_tags (e.g. 'user_name,omitempty')\n" +
-        "- dryRun (boolean, optional): Preview changes without modifying the file\n" +
-        "- validate (enum, optional): Validation level — 'syntax' (default) or 'full'\n\n" +
         "Returns: { formatted (string), validation_errors (string[]) }",
       args: {
         op: z
@@ -56,7 +41,7 @@ export function structureTools(ctx: PluginContext): Record<string, ToolDefinitio
           .string()
           .optional()
           .describe(
-            "Insert position: 'first', 'last' (default), 'before:name', 'after:name' (add_member, add_decorator)",
+            "For add_member: 'first', 'last' (default), 'before:name', 'after:name'. For add_decorator: 'first' (default) or 'last' only.",
           ),
         // add_derive, wrap_try_catch, add_decorator, add_struct_tags
         target: z

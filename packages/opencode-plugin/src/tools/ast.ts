@@ -56,13 +56,8 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       "Use meta-variables: $VAR matches a single AST node, $$$ matches multiple nodes (variadic).\n" +
       "IMPORTANT: Patterns must be complete AST nodes (valid code fragments).\n" +
       "For functions, include params and body: 'export async function $NAME($$$) { $$$ }' not just 'export async function $NAME'.\n\n" +
-      "Parameters:\n" +
-      "- pattern (string, required): AST pattern with meta-variables. Must be a complete AST node.\n" +
-      "- lang (enum, required): Target language — typescript, tsx, javascript, python, rust, go\n" +
-      "- paths (string[], optional): Directories or files to search (default: project root)\n" +
-      "- globs (string[], optional): Include/exclude glob patterns — prefix '!' to exclude (e.g. ['src/**', '!node_modules'])\n" +
-      "- context (number, optional): Number of context lines to show around each match\n\n" +
-      "Examples: pattern='console.log($MSG)' lang='typescript', pattern='async function $NAME($$$) { $$$ }' lang='javascript', pattern='def $FUNC($$$): $$$' lang='python'",
+      "Examples: pattern='console.log($MSG)' lang='typescript', pattern='async function $NAME($$$) { $$$ }' lang='javascript', pattern='def $FUNC($$$): $$$' lang='python'\n\n" +
+      "Returns: { matches: [{ file, line, column, text, meta_variables, context? }], total_matches, files_searched }",
     args: {
       pattern: z
         .string()
@@ -137,14 +132,8 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
     description:
       "Replace code patterns across filesystem with AST-aware rewriting. Dry-run by default — set dryRun=false to apply.\n\n" +
       "Use meta-variables in the rewrite pattern to preserve matched content from the pattern.\n\n" +
-      "Parameters:\n" +
-      "- pattern (string, required): AST pattern to match (same syntax as ast_grep_search)\n" +
-      "- rewrite (string, required): Replacement pattern — use $VAR from the match pattern to preserve captured content\n" +
-      "- lang (enum, required): Target language — typescript, tsx, javascript, python, rust, go\n" +
-      "- paths (string[], optional): Directories or files to search (default: project root)\n" +
-      "- globs (string[], optional): Include/exclude glob patterns — prefix '!' to exclude\n" +
-      "- dryRun (boolean, optional, default: true): Preview changes without applying. Set to false to apply.\n\n" +
-      "Example: pattern='console.log($MSG)' rewrite='logger.info($MSG)' lang='typescript' — replaces all console.log calls with logger.info across TypeScript files.",
+      "Example: pattern='console.log($MSG)' rewrite='logger.info($MSG)' lang='typescript' — replaces all console.log calls with logger.info across TypeScript files.\n\n" +
+      "Returns: Dry run { files: [{ file, diff, replacements }], total_replacements, total_files, dry_run }. Apply { files: [{ file, replacements, backup_id? }], total_replacements, total_files, dry_run: false }.",
     args: {
       pattern: z.string().describe("AST pattern to match"),
       rewrite: z.string().describe("Replacement pattern (can use $VAR from pattern)"),

@@ -18,12 +18,7 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
         "- 'trace_to': Trace how execution reaches a function from entry points (routes, exports, main). Use to understand context around deeply-nested code.\n" +
         "- 'impact': Analyze what breaks if a symbol changes. Returns affected callers with signatures and entry point status.\n" +
         "- 'trace_data': Follow a value through variable assignments and function parameters across files. Requires 'expression' arg.\n\n" +
-        "Parameters:\n" +
-        "- op (enum, required): 'call_tree' | 'callers' | 'trace_to' | 'impact' | 'trace_data'\n" +
-        "- file (string, required): Path to the source file containing the symbol\n" +
-        "- symbol (string, required): Name of the symbol to analyze\n" +
-        "- depth (number, optional): Max traversal depth. Defaults per op: call_tree=5, callers=1, trace_to=10, impact=5, trace_data=5\n" +
-        "- expression (string, optional): The expression to follow through assignments — required for 'trace_data' op",
+        "Returns: call_tree { name, file, line, signature, resolved, children }. callers { symbol, file, callers, total_callers, scanned_files }. trace_to { target_symbol, target_file, paths, total_paths, entry_points_found, max_depth_reached, truncated_paths }. impact { symbol, file, signature, parameters, total_affected, affected_files, callers }. trace_data { expression, origin_file, origin_symbol, hops, depth_limited }.",
       args: {
         op: z
           .enum(["call_tree", "callers", "trace_to", "impact", "trace_data"])

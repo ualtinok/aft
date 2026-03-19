@@ -22,16 +22,6 @@ export function importTools(ctx: PluginContext): Record<string, ToolDefinition> 
         "- 'add': Add an import. Auto-detects group (stdlib/external/internal), deduplicates. Requires 'module'. Optional 'names', 'defaultImport', 'typeOnly'.\n" +
         "- 'remove': Remove an import or a specific named import. Requires 'module'. Provide 'name' to remove a single named import; omit to remove the entire import.\n" +
         "- 'organize': Re-sort and re-group all imports by language convention, deduplicate. Requires only 'file'.\n\n" +
-        "Parameters:\n" +
-        "- op (enum, required): 'add' | 'remove' | 'organize'\n" +
-        "- file (string, required): Path to the source file\n" +
-        "- module (string, optional): Module path — required for 'add' and 'remove' (e.g. 'react', './utils', 'std::fmt')\n" +
-        "- names (string[], optional): Named imports to add for 'add' op (e.g. ['useState', 'useEffect'])\n" +
-        "- defaultImport (string, optional): Default import name for 'add' op (e.g. 'React')\n" +
-        "- name (string, optional): Specific named import to remove for 'remove' op; omit to remove entire import\n" +
-        "- typeOnly (boolean, optional): Import as type-only — TypeScript 'import type' syntax\n" +
-        "- dryRun (boolean, optional): Preview changes without modifying the file\n" +
-        "- validate (enum, optional): Validation level — 'syntax' (default) or 'full'\n\n" +
         "Returns: { formatted (string), validation_errors (string[]) }",
       args: {
         op: z.enum(["add", "remove", "organize"]).describe("Import operation"),

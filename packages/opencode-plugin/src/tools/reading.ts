@@ -51,15 +51,12 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
   return {
     aft_outline: {
       description:
-        "Get a structural outline of a source file — lists all top-level symbols with their kind, name, line range, and visibility. Use this to understand file structure before editing. " +
-        "Supports single file (via 'file'), multiple files in one call (via 'files' array), or an entire directory (via 'directory').\n" +
+        "Get a structural outline of a source file, multiple files, or an entire directory — lists all top-level symbols with their kind, name, line range, and visibility. Use this to understand file structure before editing.\n" +
         "Each entry includes 'name', 'kind' (function/class/struct/heading/etc), 'range', 'signature', and 'members' (nested children like methods in classes or sub-headings in markdown).\n" +
         "For Markdown files (.md, .mdx): returns heading hierarchy — h1/h2/h3 as nested symbols with section ranges covering all content until the next same-level heading.\n\n" +
-        "Parameters:\n" +
-        "- file (string, optional): Path to a single file to outline (relative to project root or absolute)\n" +
-        "- files (string[], optional): Array of file paths to outline in one call — returns per-file results\n" +
-        "- directory (string, optional): Path to a directory — outlines all source files under it recursively\n\n" +
-        "Provide either 'file', 'files', or 'directory', not both. Use 'files' to batch multiple outlines in one tool call.",
+        "Provide either 'file', 'files', or 'directory', not both. Use 'files' to batch multiple outlines in one tool call.\n" +
+        "Supported languages: TypeScript, JavaScript, TSX, Python, Rust, Go, Ruby, C, C++, C#, Java, Kotlin, Scala, Swift, Lua, Elixir, Haskell, Solidity, Nix, Markdown, CSS, HTML, JSON, YAML, Bash.\n\n" +
+        "Returns: Single file { entries: [{ name, kind, range, signature?, exported, members }] }. Multi-file/directory { results: [{ file, ok, entries? }] }.",
       args: {
         file: z
           .string()
@@ -121,15 +118,9 @@ Use this when you need to understand a specific function, class, or type in deta
    Returns lines with context_before and context_after.
    Example: { "filePath": "src/app.ts", "startLine": 50, "endLine": 100 }
 
-Parameters:
-- filePath (string, required): Path to file
-- symbol (string): Name of a single symbol to inspect
-- symbols (string[]): Array of symbol names to inspect in one call
-- startLine (number): 1-based start line for line-range mode
-- endLine (number): 1-based end line for line-range mode (required with startLine)
-- contextLines (number): Lines of context around symbols (default: 3)
+For Markdown files, use heading text as symbol name (e.g., symbol: "Architecture").
 
-For Markdown files, use heading text as symbol name (e.g., symbol: "Architecture").`,
+Returns: Symbol mode { name, kind, range, content, context_before, context_after, annotations: { calls_out, called_by } }. Multi-symbol mode returns an array of these.`,
       args: {
         filePath: z.string(),
         symbol: z.string().optional(),

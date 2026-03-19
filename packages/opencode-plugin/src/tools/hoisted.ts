@@ -62,18 +62,11 @@ function buildUnifiedDiff(fp: string, before: string, after: string): string {
 const z = tool.schema;
 
 // ---------------------------------------------------------------------------
-// Descriptions — verbose because .describe() on Zod args does NOT reach the agent.
-// The description string is the ONLY documentation the LLM sees.
+// Tool descriptions focus on behavior, modes, and return values.
+// Parameter docs live in Zod .describe() and reach the LLM via JSON Schema.
 // ---------------------------------------------------------------------------
 
 const READ_DESCRIPTION = `Read file contents or list directory entries.
-
-Parameters:
-- filePath (string, required): Path to file or directory (absolute or relative to project root)
-- startLine (number): 1-based line to start reading from
-- endLine (number): 1-based line to stop reading at (inclusive)
-- offset (number): Line number to start reading from (use with limit)
-- limit (number): Max lines to return (default: 2000)
 
 Use either startLine/endLine OR offset/limit to read a section of a file.
 
@@ -88,7 +81,9 @@ Examples:
   Read full file: { "filePath": "src/app.ts" }
   Read lines 50-100: { "filePath": "src/app.ts", "startLine": 50, "endLine": 100 }
   Read 30 lines from line 200: { "filePath": "src/app.ts", "offset": 200, "limit": 30 }
-  List directory: { "filePath": "src/" }`;
+  List directory: { "filePath": "src/" }
+
+Returns: Line-numbered file content string. For directories: newline-joined sorted entries. For binary files: size/message string.`;
 
 /**
  * Creates the simple read tool. Registers as "read" when hoisted, "aft_read" when not.
@@ -233,17 +228,15 @@ Automatically creates parent directories. Backs up existing files before overwri
 If the project has a formatter configured (biome, prettier, rustfmt, etc.), the file
 is auto-formatted after writing. Returns inline LSP diagnostics when available.
 
-**Parameters:**
-- \`filePath\` (string, required): Path to the file to write (absolute or relative to project root)
-- \`content\` (string, required): The full content to write to the file
-
 **Behavior:**
 - Creates parent directories automatically (no need to mkdir first)
 - Existing files are backed up before overwriting (recoverable via aft_safety undo)
 - Auto-formats using project formatter if configured (biome.json, .prettierrc, etc.)
 - Returns LSP diagnostics inline if type errors are introduced
 - Use this for creating new files or completely replacing file contents
-- For partial edits (find/replace), use the \`edit\` tool instead`;
+- For partial edits (find/replace), use the \`edit\` tool instead
+
+Returns: Status message string (for example: "Created new file. Auto-formatted.") with optional inline LSP error lines.`;
 
 function createWriteTool(ctx: PluginContext): ToolDefinition {
   return {
@@ -356,26 +349,20 @@ const EDIT_DESCRIPTION = `Edit a file by finding and replacing text, or by targe
    Set content to empty string to delete lines.
 
 6. **Multi-file transaction** — pass \`operations\` array
-   Atomic edits across multiple files with rollback on failure.
-
-**Parameters:**
-- \`filePath\` (string): Path to file, or glob pattern for multi-file operations
-- \`oldString\` (string): Text to find (exact match, with fuzzy fallback)
-- \`newString\` (string): Text to replace with
-- \`replaceAll\` (boolean): Replace all occurrences
-- \`occurrence\` (number): 0-indexed occurrence to replace when multiple matches exist
-- \`symbol\` (string): Named symbol to replace (function, class, type)
-- \`content\` (string): New content for symbol replace or file write
-- \`edits\` (array): Batch edits — array of { oldString, newString } or { line_start, line_end, content }
-- \`operations\` (array): Transaction — array of { file, command, ... } for atomic multi-file edits
-- \`dryRun\` (boolean): Preview changes without applying (returns diff)
-- \`diagnostics\` (boolean): Return inline LSP diagnostics after the edit
+   Edits across multiple files with checkpoint-based rollback on failure.
+   Each operation: \`{ "file": "path", "command": "edit_match"|"write", ... }\`.
+   For edit_match: include \`match\`, \`replacement\`. For write: include \`content\`.
+   Example: \`{ "operations": [{ "file": "a.ts", "command": "edit_match", "match": "old", "replacement": "new" }, { "file": "b.ts", "command": "write", "content": "..." }] }\`
 
 **Behavior:**
 - Backs up files before editing (recoverable via aft_safety undo)
 - Auto-formats using project formatter if configured
 - Tree-sitter syntax validation on all edits
-- Symbol replace includes decorators, attributes, and doc comments in range`;
+- Symbol replace includes decorators, attributes, and doc comments in range
+- LSP diagnostics are returned automatically after non-dry-run edits
+- Mode priority: operations > edits > symbol (without oldString) > oldString (find/replace) > content-only (write)
+
+Returns: JSON string for the selected edit mode. Dry runs return diff data; non-dry-run edits may append inline LSP error lines.`;
 
 function createEditTool(ctx: PluginContext): ToolDefinition {
   return {
@@ -391,8 +378,6 @@ function createEditTool(ctx: PluginContext): ToolDefinition {
       edits: z.array(z.record(z.string(), z.unknown())).optional(),
       operations: z.array(z.record(z.string(), z.unknown())).optional(),
       dryRun: z.boolean().optional(),
-      diagnostics: z.boolean().optional(),
-      createFile: z.boolean().optional(),
     },
     execute: async (args, context): Promise<string> => {
       const bridge = ctx.pool.getBridge(context.directory);
@@ -463,10 +448,10 @@ function createEditTool(ctx: PluginContext): ToolDefinition {
         params.replacement = args.newString ?? "";
         if (args.replaceAll !== undefined) params.replace_all = args.replaceAll;
         if (args.occurrence !== undefined) params.occurrence = args.occurrence;
-      } else if (typeof args.content === "string" || args.createFile) {
+      } else if (typeof args.content === "string") {
         // Write mode
         command = "write";
-        params.content = args.content ?? "";
+        params.content = args.content;
         params.create_dirs = true;
       } else {
         throw new Error(
@@ -563,14 +548,13 @@ Uses the opencode patch format with \`*** Begin Patch\` / \`*** End Patch\` mark
 - \`+line\` — Add this line
 - \` line\` — Context line (space prefix), appears in both old and new
 
-**Parameters:**
-- \`patch\` (string, required): The full patch text including Begin/End markers
-
 **Behavior:**
-- All file changes are applied atomically — if any file fails, all changes are rolled back
+- All file changes are applied with checkpoint-based rollback — if any file fails, previous changes are rolled back (best-effort)
 - Files are backed up before modification
 - Parent directories are created automatically for new files
-- Fuzzy matching for context anchors (handles whitespace and Unicode differences)`;
+- Fuzzy matching for context anchors (handles whitespace and Unicode differences)
+
+Returns: Status message string listing created, updated, moved, deleted, or failed file operations.`;
 
 function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
   return {
@@ -760,8 +744,6 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
 
 const DELETE_DESCRIPTION =
   "Delete a file with backup (recoverable via aft_safety undo).\n\n" +
-  "Parameters:\n" +
-  "- file (string, required): Path to file to delete. Relative paths resolved from project root.\n\n" +
   "Returns: { file, deleted, backup_id } on success.\n" +
   "The file content is backed up before deletion — use aft_safety undo to recover if needed.";
 
@@ -796,12 +778,10 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
 
 const MOVE_DESCRIPTION =
   "Move or rename a file with backup (recoverable via aft_safety undo).\n\n" +
-  "Parameters:\n" +
-  "- file (string, required): Source file path to move.\n" +
-  "- destination (string, required): Destination file path.\n\n" +
   "Creates parent directories for destination automatically.\n" +
   "Falls back to copy+delete for cross-filesystem moves.\n" +
-  "Returns: { file, destination, moved, backup_id } on success.";
+  "Returns: { file, destination, moved, backup_id } on success.\n\n" +
+  "Note: This moves/renames files at the OS level. To move a code symbol (function, class) to another file while updating all imports, use aft_refactor with op='move' instead.";
 
 function createMoveTool(ctx: PluginContext): ToolDefinition {
   return {
