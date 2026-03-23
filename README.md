@@ -106,7 +106,7 @@ Here's a typical agent workflow:
 
 ```json
 // aft_outline
-{ "file": "src/auth/session.ts" }
+{ "filePath": "src/auth/session.ts" }
 ```
 
 ```json
@@ -142,7 +142,7 @@ Here's a typical agent workflow:
 
 ```json
 // aft_navigate
-{ "op": "callers", "file": "src/auth/session.ts", "symbol": "validateToken", "depth": 2 }
+{ "op": "callers", "filePath": "src/auth/session.ts", "symbol": "validateToken", "depth": 2 }
 ```
 
 ---
@@ -162,10 +162,10 @@ These replace opencode's built-ins. Registered under the same names by default. 
 | `read` | opencode read | File read, directory listing, image/PDF detection | `filePath`, `startLine`, `endLine`, `offset`, `limit` |
 | `write` | opencode write | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
 | `edit` | opencode edit | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
-| `apply_patch` | opencode apply_patch | `*** Begin Patch` multi-file patch format | `patch` |
+| `apply_patch` | opencode apply_patch | `*** Begin Patch` multi-file patch format | `patchText` |
 | `ast_grep_search` | opencode ast_grep_search | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
-| `ast_grep_replace` | opencode ast_grep_replace | AST pattern replace (dry-run by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
-| `lsp_diagnostics` | opencode lsp_diagnostics | Errors/warnings from language server | `file`, `directory`, `severity`, `waitMs` |
+| `ast_grep_replace` | opencode ast_grep_replace | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
+| `lsp_diagnostics` | opencode lsp_diagnostics | Errors/warnings from language server | `filePath`, `directory`, `severity`, `waitMs` |
 
 ### AFT-only tools
 
@@ -173,15 +173,15 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `aft_outline` | Structural outline of a file, files, or directory | `file`, `files[]`, `directory` |
+| `aft_outline` | Structural outline of a file, files, or directory | `filePath`, `files[]`, `directory` |
 | `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]`, `startLine`, `endLine` |
-| `aft_delete` | Delete a file with backup | `file` |
-| `aft_move` | Move or rename a file with backup | `file`, `destination` |
-| `aft_navigate` | Call graph and data-flow navigation | `op`, `file`, `symbol`, `depth` |
-| `aft_import` | Language-aware import add/remove/organize | `op`, `file`, `module`, `names[]` |
-| `aft_transform` | Structural code transforms (members, derives, decorators) | `op`, `file`, `scope`, `target` |
-| `aft_refactor` | Workspace-wide move, extract, inline | `op`, `file`, `symbol`, `destination` |
-| `aft_safety` | Undo, history, checkpoints, restore | `op`, `file`, `name` |
+| `aft_delete` | Delete a file with backup | `filePath` |
+| `aft_move` | Move or rename a file with backup | `filePath`, `destination` |
+| `aft_navigate` | Call graph and data-flow navigation | `op`, `filePath`, `symbol`, `depth` |
+| `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
+| `aft_transform` | Structural code transforms (members, derives, decorators) | `op`, `filePath`, `container`, `target` |
+| `aft_refactor` | Workspace-wide move, extract, inline | `op`, `filePath`, `symbol`, `destination` |
+| `aft_safety` | Undo, history, checkpoints, restore | `op`, `filePath`, `name` |
 
 ---
 
@@ -337,7 +337,7 @@ Add `context: 3` to include surrounding lines.
 
 ### ast_grep_replace
 
-Replace structural code patterns across files. Dry-run by default — set `dryRun: false` to apply.
+Replace structural code patterns across files. Applies changes by default — set `dryRun: true` to preview.
 
 ```json
 { "pattern": "console.log($MSG)", "rewrite": "logger.info($MSG)", "lang": "typescript" }
@@ -355,13 +355,13 @@ Get errors, warnings, and hints from the language server. Lazily spawns the appr
 
 ```json
 // Check a single file
-{ "file": "src/api.ts", "severity": "error" }
+{ "filePath": "src/api.ts", "severity": "error" }
 
 // Check all files in a directory
 { "directory": "src/", "severity": "all" }
 
 // Wait for fresh diagnostics after an edit
-{ "file": "src/api.ts", "waitMs": 2000 }
+{ "filePath": "src/api.ts", "waitMs": 2000 }
 ```
 
 Returns `{ file, line, column, severity, message, code }` per diagnostic.
@@ -371,7 +371,7 @@ Returns `{ file, line, column, severity, message, code }` per diagnostic.
 ### aft_outline
 
 Returns all top-level symbols in a file with their kind, name, line range, visibility, and nested
-`members` (methods in classes, sub-headings in Markdown). Accepts a single `file`, a `files`
+`members` (methods in classes, sub-headings in Markdown). Accepts a single `filePath`, a `files`
 array, or a `directory` to outline all source files recursively.
 
 For **Markdown** files (`.md`, `.mdx`): returns heading hierarchy with section ranges — each
@@ -416,7 +416,7 @@ Delete a file with an in-memory backup. The backup survives for the session and 
 via `aft_safety`.
 
 ```json
-{ "file": "src/deprecated/old-utils.ts" }
+{ "filePath": "src/deprecated/old-utils.ts" }
 ```
 
 Returns `{ file, deleted, backup_id }` on success.
@@ -429,7 +429,7 @@ Move or rename a file. Creates parent directories for the destination automatica
 to copy+delete for cross-filesystem moves. Backs up the original before moving.
 
 ```json
-{ "file": "src/helpers.ts", "destination": "src/utils/helpers.ts" }
+{ "filePath": "src/helpers.ts", "destination": "src/utils/helpers.ts" }
 ```
 
 Returns `{ file, destination, moved, backup_id }` on success.
@@ -452,7 +452,7 @@ Call graph and data-flow analysis across the workspace.
 // Find everything that would break if processPayment changes
 {
   "op": "impact",
-  "file": "src/payments/processor.ts",
+  "filePath": "src/payments/processor.ts",
   "symbol": "processPayment",
   "depth": 3
 }
@@ -468,16 +468,16 @@ Language-aware import management for TS, JS, TSX, Python, Rust, and Go.
 // Add named imports with auto-grouping and deduplication
 {
   "op": "add",
-  "file": "src/api.ts",
+  "filePath": "src/api.ts",
   "module": "react",
   "names": ["useState", "useEffect"]
 }
 
 // Remove a single named import
-{ "op": "remove", "file": "src/api.ts", "module": "react", "name": "useEffect" }
+{ "op": "remove", "filePath": "src/api.ts", "module": "react", "name": "useEffect" }
 
 // Re-sort and deduplicate all imports by language convention
-{ "op": "organize", "file": "src/api.ts" }
+{ "op": "organize", "filePath": "src/api.ts" }
 ```
 
 ---
@@ -498,8 +498,8 @@ Scope-aware structural transformations that handle indentation correctly.
 // Add a method to a TypeScript class
 {
   "op": "add_member",
-  "file": "src/user.ts",
-  "scope": "UserService",
+  "filePath": "src/user.ts",
+  "container": "UserService",
   "code": "async deleteUser(id: string): Promise<void> {\n  await this.db.users.delete(id);\n}",
   "position": "last"
 }
@@ -523,7 +523,7 @@ Workspace-wide refactoring that updates imports and references across all files.
 // Move a utility function to a shared module
 {
   "op": "move",
-  "file": "src/pages/home.ts",
+  "filePath": "src/pages/home.ts",
   "symbol": "formatCurrency",
   "destination": "src/utils/format.ts"
 }
