@@ -1,6 +1,6 @@
 {
   "name": "@cortexkit/aft-linux-x64",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "AFT binary for Linux x64",
   "os": [
     "linux"
