@@ -649,6 +649,53 @@ fn batch_rollback_on_failure() {
 }
 
 #[test]
+fn batch_fuzzy_match() {
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_edit_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("batch_fuzzy.ts");
+
+    // Source has specific whitespace; edits use slightly different whitespace
+    let content = "function greet() {\n    console.log(\"hello\");  \n    return true;\n}\n";
+    fs::write(&target, content).unwrap();
+
+    let req = serde_json::json!({
+        "id": "b-fuzzy",
+        "command": "batch",
+        "file": target.display().to_string(),
+        "edits": [
+            // Trailing whitespace mismatch: source line has trailing spaces, match text doesn't
+            { "match": "    console.log(\"hello\");", "replacement": "    console.log(\"hi\");" },
+        ]
+    });
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+
+    assert_eq!(
+        resp["success"], true,
+        "batch fuzzy should succeed: {:?}",
+        resp
+    );
+    assert_eq!(resp["edits_applied"], 1);
+
+    let result = fs::read_to_string(&target).unwrap();
+    assert!(
+        result.contains("\"hi\""),
+        "fuzzy edit should apply: {}",
+        result
+    );
+    // Trailing spaces from the original line should be replaced (not left behind)
+    assert!(
+        !result.contains("\"hello\""),
+        "old text should be gone: {}",
+        result
+    );
+
+    let _ = fs::remove_file(&target);
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn batch_line_range_edit() {
     let mut aft = AftProcess::spawn();
     let dir = std::env::temp_dir().join("aft_edit_tests");

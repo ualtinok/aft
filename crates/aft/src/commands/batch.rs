@@ -180,18 +180,15 @@ fn resolve_edit(
         .and_then(|v| v.as_str());
 
     if let Some(match_str) = match_str {
-        // String match-replace
+        // String match-replace with progressive fuzzy matching (same as edit_match)
         let replacement = edit_val
             .get("replacement")
             .or_else(|| edit_val.get("newString"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let positions: Vec<usize> = source
-            .match_indices(match_str)
-            .map(|(idx, _)| idx)
-            .collect();
+        let fuzzy_matches = crate::fuzzy_match::find_all_fuzzy(source, match_str);
 
-        if positions.is_empty() {
+        if fuzzy_matches.is_empty() {
             return Err(Response::error(
                 req_id,
                 "batch_edit_failed",
@@ -202,11 +199,20 @@ fn resolve_edit(
             ));
         }
 
-        if positions.len() > 1 {
+        if fuzzy_matches[0].pass > 1 {
+            log::debug!(
+                "[aft] batch: edit[{}] fuzzy match (pass {}) for '{}'",
+                index,
+                fuzzy_matches[0].pass,
+                match_str
+            );
+        }
+
+        if fuzzy_matches.len() > 1 {
             // Check if an occurrence index is specified to disambiguate
             if let Some(occ) = edit_val.get("occurrence").and_then(|v| v.as_u64()) {
                 let occ = occ as usize;
-                if occ >= positions.len() {
+                if occ >= fuzzy_matches.len() {
                     return Err(Response::error(
                         req_id,
                         "batch_edit_failed",
@@ -214,15 +220,14 @@ fn resolve_edit(
                             "batch: edit[{}] occurrence {} out of range (found {} occurrences)",
                             index,
                             occ,
-                            positions.len()
+                            fuzzy_matches.len()
                         ),
                     ));
                 }
-                let byte_start = positions[occ];
-                let byte_end = byte_start + match_str.len();
+                let m = &fuzzy_matches[occ];
                 return Ok(ResolvedEdit {
-                    byte_start,
-                    byte_end,
+                    byte_start: m.byte_start,
+                    byte_end: m.byte_start + m.byte_len,
                     replacement: replacement.to_string(),
                 });
             }
@@ -233,17 +238,15 @@ fn resolve_edit(
                     "batch: edit[{}] match '{}' is ambiguous ({} occurrences, expected 1). Use 'occurrence' field (0-indexed) to select which one.",
                     index,
                     match_str,
-                    positions.len()
+                    fuzzy_matches.len()
                 ),
             ));
         }
 
-        let byte_start = positions[0];
-        let byte_end = byte_start + match_str.len();
-
+        let m = &fuzzy_matches[0];
         Ok(ResolvedEdit {
-            byte_start,
-            byte_end,
+            byte_start: m.byte_start,
+            byte_end: m.byte_start + m.byte_len,
             replacement: replacement.to_string(),
         })
     } else if edit_val.get("line_start").is_some() {

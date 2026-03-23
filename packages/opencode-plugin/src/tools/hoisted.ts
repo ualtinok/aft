@@ -482,8 +482,8 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         params.edits = (args.edits as Array<Record<string, unknown>>).map((edit) => {
           const translated: Record<string, unknown> = {};
           for (const [key, value] of Object.entries(edit)) {
-            if (key === "oldString") translated.old_string = value;
-            else if (key === "newString") translated.new_string = value;
+            if (key === "oldString") translated.match = value;
+            else if (key === "newString") translated.replacement = value;
             else if (key === "startLine") translated.line_start = value;
             else if (key === "endLine") translated.line_end = value;
             else translated[key] = value;
