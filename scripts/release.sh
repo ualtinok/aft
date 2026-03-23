@@ -83,7 +83,7 @@ echo "  bun typecheck..."
 bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 
 echo "  bun test..."
-bun test 2>&1 || { echo "Error: Plugin tests failed"; exit 1; }
+bun run test 2>&1 || { echo "Error: Plugin tests failed"; exit 1; }
 
 echo "  ✓ All checks passed"
 echo ""
