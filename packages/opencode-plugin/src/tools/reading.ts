@@ -97,14 +97,23 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             });
           }
           const response = await bridge.send("outline", { files });
+          if (response.success === false) {
+            throw new Error((response.message as string) || "outline failed");
+          }
           return JSON.stringify(response);
         }
 
         if (Array.isArray(args.files) && args.files.length > 0) {
           const response = await bridge.send("outline", { files: args.files });
+          if (response.success === false) {
+            throw new Error((response.message as string) || "outline failed");
+          }
           return JSON.stringify(response);
         }
         const response = await bridge.send("outline", { file: args.filePath });
+        if (response.success === false) {
+          throw new Error((response.message as string) || "outline failed");
+        }
         return JSON.stringify(response);
       },
     },
@@ -161,6 +170,9 @@ Mode priority: symbols array > single symbol.`,
         if (args.contextLines !== undefined) params.context_lines = args.contextLines;
 
         const data = await bridge.send("zoom", params);
+        if (data.success === false) {
+          throw new Error((data.message as string) || "zoom failed");
+        }
         return JSON.stringify(data);
       },
     },

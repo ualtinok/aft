@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ensureBinary, getCachedBinaryPath } from "./downloader.js";
+import { log } from "./logger.js";
 import { PLATFORM_ARCH_MAP } from "./platform.js";
 
 /**
@@ -102,7 +103,7 @@ export async function findBinary(): Promise<string> {
   if (syncResult) return syncResult;
 
   // 5. Auto-download from GitHub releases
-  console.error("[aft-plugin] Binary not found locally, attempting auto-download...");
+  log("Binary not found locally, attempting auto-download...");
   const downloaded = await ensureBinary();
   if (downloaded) return downloaded;
 

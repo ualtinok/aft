@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import type { Plugin } from "@opencode-ai/plugin";
 import { loadAftConfig } from "./config.js";
 import { ensureBinary } from "./downloader.js";
+import { error, log, warn } from "./logger.js";
 import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import { BridgePool } from "./pool.js";
@@ -67,22 +68,20 @@ const plugin: Plugin = async (input) => {
     {
       minVersion: PLUGIN_VERSION,
       onVersionMismatch: (binaryVersion, minVersion) => {
-        console.error(
-          `[aft-plugin] WARNING: aft binary v${binaryVersion} is older than plugin v${minVersion}. ` +
+        warn(
+          `WARNING: aft binary v${binaryVersion} is older than plugin v${minVersion}. ` +
             "Some features may not work. Attempting to download a compatible binary...",
         );
         // Fire-and-forget: try to download matching version in background
         ensureBinary(`v${minVersion}`).then(
           (path) => {
             if (path) {
-              console.error(
-                `[aft-plugin] Downloaded compatible binary to ${path}. Restart OpenCode to use it.`,
-              );
+              log(`Downloaded compatible binary to ${path}. Restart OpenCode to use it.`);
             }
           },
           () => {
-            console.error(
-              `[aft-plugin] Auto-download failed. Install manually: cargo install agent-file-tools@${minVersion}`,
+            error(
+              `Auto-download failed. Install manually: cargo install agent-file-tools@${minVersion}`,
             );
           },
         );
@@ -135,8 +134,6 @@ const plugin: Plugin = async (input) => {
     }
   }
 
-  console.error(`[aft-plugin] Tool surface: ${surface} (${Object.keys(allTools).length} tools)`);
-
   // Filter disabled tools (user + project config union)
   const disabled = new Set(aftConfig.disabled_tools ?? []);
   if (disabled.size > 0) {
@@ -144,12 +141,12 @@ const plugin: Plugin = async (input) => {
       if (name in allTools) {
         delete allTools[name];
       } else {
-        console.error(
-          `[aft-plugin] disabled_tools: "${name}" not found — available: ${Object.keys(allTools).join(", ")}`,
+        warn(
+          `disabled_tools: "${name}" not found — available: ${Object.keys(allTools).join(", ")}`,
         );
       }
     }
-    console.error(`[aft-plugin] Disabled ${disabled.size} tool(s): ${[...disabled].join(", ")}`);
+    log(`Disabled ${disabled.size} tool(s): ${[...disabled].join(", ")}`);
   }
 
   return {

@@ -36,7 +36,7 @@ function runConfigLoader(projectDirectory: string, env: Record<string, string>) 
   `;
   const result = spawnSync(process.execPath, ["-e", script], {
     cwd: packageRoot,
-    env: { ...process.env, ...env, PROJECT_DIR: projectDirectory },
+    env: { ...process.env, AFT_LOG_STDERR: "1", ...env, PROJECT_DIR: projectDirectory },
     encoding: "utf8",
   });
 

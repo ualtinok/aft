@@ -190,6 +190,11 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
 
       const data = await bridge.send("read", params);
 
+      // Error response (e.g. file not found)
+      if (data.success === false) {
+        throw new Error((data.message as string) || "read failed");
+      }
+
       const readCallID = getCallID(context);
 
       // Directory response
@@ -282,6 +287,11 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
         diagnostics: true,
         include_diff: true,
       });
+
+      // Error response (e.g. path validation failure)
+      if (data.success === false) {
+        throw new Error((data.message as string) || "write failed");
+      }
 
       let output = data.created ? "Created new file." : "File updated.";
       if (data.formatted) output += " Auto-formatted.";
@@ -845,6 +855,9 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
       });
 
       const result = await bridge.send("delete_file", { file: filePath });
+      if (result.success === false) {
+        throw new Error((result.message as string) || "delete failed");
+      }
       return JSON.stringify(result);
     },
   };
@@ -885,6 +898,9 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
         file: filePath,
         destination: destPath,
       });
+      if (result.success === false) {
+        throw new Error((result.message as string) || "move failed");
+      }
       return JSON.stringify(result);
     },
   };

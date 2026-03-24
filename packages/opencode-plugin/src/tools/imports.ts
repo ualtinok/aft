@@ -90,6 +90,9 @@ export function importTools(ctx: PluginContext): Record<string, ToolDefinition> 
         if (args.validate !== undefined) params.validate = args.validate;
         if (args.dryRun !== undefined) params.dry_run = args.dryRun;
         const response = await bridge.send(commandMap[op], params);
+        if (response.success === false) {
+          throw new Error((response.message as string) || `${op} failed`);
+        }
         return JSON.stringify(response);
       },
     },

@@ -88,6 +88,9 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
         if (args.name !== undefined) params.name = args.name;
         if (args.files !== undefined) params.files = args.files;
         const response = await bridge.send(commandMap[op], params);
+        if (response.success === false) {
+          throw new Error((response.message as string) || `${op} failed`);
+        }
         return JSON.stringify(response);
       },
     },

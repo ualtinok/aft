@@ -136,6 +136,9 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
         if (hints) params.lsp_hints = hints;
 
         const response = await bridge.send(commandMap[op], params);
+        if (response.success === false) {
+          throw new Error((response.message as string) || `${op} failed`);
+        }
         return JSON.stringify(response);
       },
     },

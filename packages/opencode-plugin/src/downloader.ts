@@ -14,10 +14,10 @@
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { error, log, warn } from "./logger.js";
 import { PLATFORM_ASSET_MAP } from "./platform.js";
 
 const REPO = "ualtinok/aft";
-const TAG = "[aft-downloader]";
 
 /** Get the cache directory, respecting XDG_CACHE_HOME / LOCALAPPDATA. */
 export function getCacheDir(): string {
@@ -61,14 +61,14 @@ export async function downloadBinary(version?: string): Promise<string | null> {
   const assetName = PLATFORM_ASSET_MAP[platformKey];
 
   if (!assetName) {
-    console.error(`${TAG} Unsupported platform: ${platformKey}`);
+    error(`Unsupported platform: ${platformKey}`);
     return null;
   }
 
   // Resolve version if not provided
   const tag = version ?? (await fetchLatestTag());
   if (!tag) {
-    console.error(`${TAG} Could not determine latest release version.`);
+    error("Could not determine latest release version.");
     return null;
   }
 
@@ -85,7 +85,7 @@ export async function downloadBinary(version?: string): Promise<string | null> {
   const downloadUrl = `https://github.com/${REPO}/releases/download/${tag}/${assetName}`;
   const checksumUrl = `https://github.com/${REPO}/releases/download/${tag}/checksums.sha256`;
 
-  console.error(`${TAG} Downloading AFT binary (${tag}) for ${platformKey}...`);
+  log(`Downloading AFT binary (${tag}) for ${platformKey}...`);
 
   try {
     // Ensure versioned cache directory exists
@@ -120,12 +120,12 @@ export async function downloadBinary(version?: string): Promise<string | null> {
               "The binary may have been tampered with.",
           );
         }
-        console.error(`${TAG} Checksum verified (SHA-256: ${actualHash.slice(0, 16)}...)`);
+        log(`Checksum verified (SHA-256: ${actualHash.slice(0, 16)}...)`);
       } else {
-        console.error(`${TAG} Warning: checksums.sha256 found but no entry for ${assetName}`);
+        warn(`Warning: checksums.sha256 found but no entry for ${assetName}`);
       }
     } else {
-      console.error(`${TAG} Warning: no checksums.sha256 found for ${tag}, skipping verification`);
+      warn(`Warning: no checksums.sha256 found for ${tag}, skipping verification`);
     }
 
     // Write to a temp file first, then rename (atomic-ish)
@@ -142,11 +142,11 @@ export async function downloadBinary(version?: string): Promise<string | null> {
     const { renameSync } = await import("node:fs");
     renameSync(tmpPath, binaryPath);
 
-    console.error(`${TAG} AFT binary ready at ${binaryPath}`);
+    log(`AFT binary ready at ${binaryPath}`);
     return binaryPath;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`${TAG} Failed to download AFT binary: ${msg}`);
+    error(`Failed to download AFT binary: ${msg}`);
 
     // Clean up partial download
     const tmpPath = `${binaryPath}.tmp`;

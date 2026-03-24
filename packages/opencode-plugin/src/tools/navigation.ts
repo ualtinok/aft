@@ -54,6 +54,9 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
           throw new Error("'expression' is required for 'trace_data' op");
         }
         const response = await bridge.send(args.op as string, params);
+        if (response.success === false) {
+          throw new Error((response.message as string) || `${args.op} failed`);
+        }
         return JSON.stringify(response);
       },
     },

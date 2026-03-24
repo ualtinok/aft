@@ -1,7 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-
-/** Prefix for all bridge diagnostic messages on stderr. */
-const TAG = "[aft-plugin]";
+import { error, log, warn } from "./logger.js";
 
 /**
  * Compare two semver version strings (major.minor.patch).
@@ -89,7 +87,7 @@ export class BinaryBridge {
     params: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
     if (this._shuttingDown) {
-      throw new Error(`${TAG} Bridge is shutting down, cannot send "${command}"`);
+      throw new Error(`[aft-plugin] Bridge is shutting down, cannot send "${command}"`);
     }
 
     this.ensureSpawned();
@@ -114,7 +112,9 @@ export class BinaryBridge {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(
-          new Error(`${TAG} Request "${command}" (id=${id}) timed out after ${this.timeoutMs}ms`),
+          new Error(
+            `[aft-plugin] Request "${command}" (id=${id}) timed out after ${this.timeoutMs}ms`,
+          ),
         );
       }, this.timeoutMs);
 
@@ -123,7 +123,7 @@ export class BinaryBridge {
       if (!this.process?.stdin?.writable) {
         this.pending.delete(id);
         clearTimeout(timer);
-        reject(new Error(`${TAG} stdin not writable for command "${command}"`));
+        reject(new Error(`[aft-plugin] stdin not writable for command "${command}"`));
         return;
       }
 
@@ -133,7 +133,7 @@ export class BinaryBridge {
           if (entry) {
             this.pending.delete(id);
             clearTimeout(entry.timer);
-            entry.reject(new Error(`${TAG} Failed to write to stdin: ${err.message}`));
+            entry.reject(new Error(`[aft-plugin] Failed to write to stdin: ${err.message}`));
           }
         }
       });
@@ -143,7 +143,7 @@ export class BinaryBridge {
   /** Kill the child process and reject all pending requests. */
   async shutdown(): Promise<void> {
     this._shuttingDown = true;
-    this.rejectAllPending(new Error(`${TAG} Bridge shutting down`));
+    this.rejectAllPending(new Error("[aft-plugin] Bridge shutting down"));
 
     if (this.process) {
       const proc = this.process;
@@ -157,7 +157,7 @@ export class BinaryBridge {
 
         proc.once("exit", () => {
           clearTimeout(forceKillTimer);
-          console.error(`${TAG} Process exited during shutdown`);
+          log("Process exited during shutdown");
           resolve();
         });
 
@@ -175,18 +175,16 @@ export class BinaryBridge {
       const resp = await this.send("version");
       const binaryVersion = resp.version as string | undefined;
       if (!binaryVersion) {
-        console.error(`${TAG} Binary did not report a version — skipping version check`);
+        log("Binary did not report a version — skipping version check");
         return;
       }
       if (compareSemver(binaryVersion, this.minVersion) < 0) {
-        console.error(
-          `${TAG} Binary version ${binaryVersion} is older than required ${this.minVersion}`,
-        );
+        warn(`Binary version ${binaryVersion} is older than required ${this.minVersion}`);
         this.onVersionMismatch?.(binaryVersion, this.minVersion);
       }
     } catch (err) {
       // Version check is best-effort — don't block tool usage if it fails
-      console.error(`${TAG} Version check failed: ${(err as Error).message}`);
+      warn(`Version check failed: ${(err as Error).message}`);
     }
   }
 
@@ -196,7 +194,7 @@ export class BinaryBridge {
   }
 
   private spawnProcess(): void {
-    console.error(`${TAG} Spawning binary: ${this.binaryPath} (cwd: ${this.cwd})`);
+    log(`Spawning binary: ${this.binaryPath} (cwd: ${this.cwd})`);
 
     const child = spawn(this.binaryPath, [], {
       cwd: this.cwd,
@@ -210,18 +208,18 @@ export class BinaryBridge {
     child.stderr?.on("data", (chunk: Buffer) => {
       const lines = chunk.toString("utf-8").trimEnd().split("\n");
       for (const line of lines) {
-        console.error(`${TAG} stderr: ${line}`);
+        log(`stderr: ${line}`);
       }
     });
 
     child.on("error", (err) => {
-      console.error(`${TAG} Process error: ${err.message}`);
+      error(`Process error: ${err.message}`);
       this.handleCrash();
     });
 
     child.on("exit", (code, signal) => {
       if (this._shuttingDown) return;
-      console.error(`${TAG} Process exited: code=${code}, signal=${signal}`);
+      log(`Process exited: code=${code}, signal=${signal}`);
       this.handleCrash();
     });
 
@@ -251,7 +249,7 @@ export class BinaryBridge {
           entry.resolve(response);
         }
       } catch (_err) {
-        console.error(`${TAG} Failed to parse stdout line: ${line}`);
+        warn(`Failed to parse stdout line: ${line}`);
       }
     }
   }
@@ -261,25 +259,27 @@ export class BinaryBridge {
     this.configured = false; // Force reconfigure on next command after restart
 
     // Reject all pending requests
-    this.rejectAllPending(new Error(`${TAG} Binary crashed (restarts: ${this._restartCount})`));
+    this.rejectAllPending(
+      new Error(`[aft-plugin] Binary crashed (restarts: ${this._restartCount})`),
+    );
 
     // Auto-restart with exponential backoff
     if (this._restartCount < this.maxRestarts) {
       const delay = 100 * 2 ** this._restartCount; // 100ms, 200ms, 400ms
       this._restartCount++;
-      console.error(`${TAG} Auto-restart #${this._restartCount} in ${delay}ms`);
+      log(`Auto-restart #${this._restartCount} in ${delay}ms`);
 
       setTimeout(() => {
         if (!this._shuttingDown) {
           try {
             this.spawnProcess();
           } catch (err) {
-            console.error(`${TAG} Failed to restart: ${(err as Error).message}`);
+            error(`Failed to restart: ${(err as Error).message}`);
           }
         }
       }, delay);
     } else {
-      console.error(`${TAG} Max restarts (${this.maxRestarts}) reached, giving up`);
+      error(`Max restarts (${this.maxRestarts}) reached, giving up`);
     }
   }
 

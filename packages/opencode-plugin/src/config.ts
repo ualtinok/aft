@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ParseError, parse, printParseErrorCode } from "jsonc-parser";
 import { z } from "zod";
+import { error, log, warn } from "./logger.js";
 
 // ---------------------------------------------------------------------------
 // Zod schema
@@ -137,9 +138,7 @@ function parseConfigPartially(rawConfig: Record<string, unknown>): AftConfig | n
   }
 
   if (invalidSections.length > 0) {
-    console.error(
-      `[aft-plugin] Partial config loaded — invalid sections skipped: ${invalidSections.join("; ")}`,
-    );
+    warn(`Partial config loaded — invalid sections skipped: ${invalidSections.join("; ")}`);
   }
 
   return partialConfig as AftConfig;
@@ -160,17 +159,17 @@ function loadConfigFromPath(configPath: string): AftConfig | null {
     const result = AftConfigSchema.safeParse(rawConfig);
 
     if (result.success) {
-      console.error(`[aft-plugin] Config loaded from ${configPath}`);
+      log(`Config loaded from ${configPath}`);
       return result.data;
     }
 
     const errorMsg = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ");
-    console.error(`[aft-plugin] Config validation error in ${configPath}: ${errorMsg}`);
+    warn(`Config validation error in ${configPath}: ${errorMsg}`);
 
     return parseConfigPartially(rawConfig);
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[aft-plugin] Error loading config from ${configPath}: ${errorMsg}`);
+    error(`Error loading config from ${configPath}: ${errorMsg}`);
     return null;
   }
 }

@@ -355,19 +355,17 @@ describe("Structure tool round-trips", () => {
       sdkCtx,
     );
 
-    const resultStr = await tools.aft_transform.execute(
-      {
-        op: "add_member",
-        filePath,
-        container: "NonExistent",
-        code: "y: string;",
-      },
-      sdkCtx,
-    );
-    const result = JSON.parse(resultStr);
-
-    expect(result.success).toBe(false);
-    expect(result.code).toBe("scope_not_found");
+    await expect(
+      tools.aft_transform.execute(
+        {
+          op: "add_member",
+          filePath,
+          container: "NonExistent",
+          code: "y: string;",
+        },
+        sdkCtx,
+      ),
+    ).rejects.toThrow("scope 'NonExistent' not found");
   });
 
   test("add_derive returns target_not_found for missing struct", async () => {
@@ -387,18 +385,16 @@ describe("Structure tool round-trips", () => {
       sdkCtx,
     );
 
-    const resultStr = await tools.aft_transform.execute(
-      {
-        op: "add_derive",
-        filePath,
-        target: "Fake",
-        derives: ["Clone"],
-      },
-      sdkCtx,
-    );
-    const result = JSON.parse(resultStr);
-
-    expect(result.success).toBe(false);
-    expect(result.code).toBe("target_not_found");
+    await expect(
+      tools.aft_transform.execute(
+        {
+          op: "add_derive",
+          filePath,
+          target: "Fake",
+          derives: ["Clone"],
+        },
+        sdkCtx,
+      ),
+    ).rejects.toThrow("not found");
   });
 });

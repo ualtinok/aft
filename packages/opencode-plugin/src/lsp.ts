@@ -1,7 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
-
-/** Prefix for diagnostic messages. */
-const TAG = "[aft-plugin]";
+import { warn } from "./logger.js";
 
 /** Wire format for a single LSP symbol hint sent to the binary. */
 interface LspSymbolHint {
@@ -98,7 +96,7 @@ export async function queryLspHints(
 
     return { symbols: hints };
   } catch (err) {
-    console.warn(`${TAG} LSP query failed for "${symbolName}": ${(err as Error).message}`);
+    warn(`LSP query failed for "${symbolName}": ${(err as Error).message}`);
     return undefined;
   }
 }

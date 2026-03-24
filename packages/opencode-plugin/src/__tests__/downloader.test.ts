@@ -21,7 +21,7 @@ function createCacheRoot() {
 function runDownloaderScript(script: string, env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, ["-e", script], {
     cwd: packageRoot,
-    env: { ...process.env, ...env },
+    env: { ...process.env, AFT_LOG_STDERR: "1", ...env },
     encoding: "utf8",
   });
 
@@ -51,7 +51,7 @@ describe("downloadBinary error paths", () => {
     `);
 
     expect(result.stdout).toBe("null");
-    expect(result.stderr).toContain("[aft-downloader] Unsupported platform: plan9-x64");
+    expect(result.stderr).toContain("[aft-plugin] Unsupported platform: plan9-x64");
   });
 
   test("returns null and logs HTTP download failures", () => {

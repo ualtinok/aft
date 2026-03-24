@@ -81,6 +81,11 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (args.contextLines !== undefined) params.context = Number(args.contextLines);
       const response = await bridge.send("ast_search", params);
 
+      // Error response (e.g. invalid pattern)
+      if (response.success === false) {
+        throw new Error((response.message as string) || "ast_search failed");
+      }
+
       // Format output for readability
       const data = response as {
         ok?: boolean;
@@ -190,6 +195,11 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (args.globs) params.globs = args.globs;
       params.dry_run = args.dryRun === true;
       const response = await bridge.send("ast_replace", params);
+
+      // Error response (e.g. invalid pattern)
+      if (response.success === false) {
+        throw new Error((response.message as string) || "ast_replace failed");
+      }
 
       const data = response as {
         ok?: boolean;

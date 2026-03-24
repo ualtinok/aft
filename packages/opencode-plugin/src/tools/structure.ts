@@ -172,6 +172,9 @@ export function structureTools(ctx: PluginContext): Record<string, ToolDefinitio
         }
 
         const response = await bridge.send(op, params);
+        if (response.success === false) {
+          throw new Error((response.message as string) || `${op} failed`);
+        }
         return JSON.stringify(response);
       },
     },

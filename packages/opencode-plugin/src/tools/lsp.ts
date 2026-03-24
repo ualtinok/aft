@@ -50,6 +50,9 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (args.severity !== undefined) params.severity = args.severity;
       if (args.waitMs !== undefined) params.wait_ms = args.waitMs;
       const result = await bridge.send("lsp_diagnostics", params);
+      if (result.success === false) {
+        throw new Error((result.message as string) || "lsp_diagnostics failed");
+      }
       return JSON.stringify(result);
     },
   };

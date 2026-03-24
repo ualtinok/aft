@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { platformKey } from "../resolver.js";
 
 const downloaderModulePath = new URL("../downloader.js", import.meta.url).pathname;
@@ -51,8 +51,14 @@ describe("resolver error paths", () => {
   });
 
   test("throws detailed installation instructions when no binary exists anywhere", async () => {
+    const logCalls: string[] = [];
+    const loggerPath = new URL("../logger.js", import.meta.url).pathname;
+    mock.module(loggerPath, () => ({
+      log: (msg: string) => logCalls.push(msg),
+      warn: (msg: string) => logCalls.push(msg),
+      error: (msg: string) => logCalls.push(msg),
+    }));
     mockNoBinaryEnvironment(null);
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const { findBinary } = await freshResolverImport();
     const promise = findBinary();
 
@@ -61,8 +67,6 @@ describe("resolver error paths", () => {
     await expect(promise).rejects.toThrow("Auto-download from GitHub releases (failed)");
     await expect(promise).rejects.toThrow("npm install @cortexkit/aft-opencode");
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      "[aft-plugin] Binary not found locally, attempting auto-download...",
-    );
+    expect(logCalls).toContain("Binary not found locally, attempting auto-download...");
   });
 });
