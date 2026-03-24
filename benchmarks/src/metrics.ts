@@ -51,12 +51,14 @@ export async function extractMetrics(
     if (created < firstMessageTime) firstMessageTime = created;
     if (created > lastMessageTime) lastMessageTime = created;
 
-    // Tokens are on assistant messages
+    // tokens.total is per-API-call (prompt + completion), not cumulative.
+    // The last message's total represents the final conversation size.
+    // input/output/reasoning are new tokens per call, so we sum those.
     if (info.tokens) {
       totalInput += info.tokens.input ?? 0;
       totalOutput += info.tokens.output ?? 0;
       totalReasoning += info.tokens.reasoning ?? 0;
-      totalTokens += info.tokens.total ?? 0;
+      totalTokens = info.tokens.total ?? totalTokens;
       totalCacheRead += info.tokens.cache?.read ?? 0;
       totalCacheWrite += info.tokens.cache?.write ?? 0;
     }

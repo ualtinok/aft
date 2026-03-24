@@ -1,20 +1,48 @@
 <p align="center">
-  <img src="assets/banner.jpeg" alt="AFT — Agent File Toolkit" width="100%" />
+  <img src="assets/banner.jpeg" alt="AFT — Agent File Toolkit" width="50%" />
+</p>
+
+<h1 align="center">AFT — Agent File Toolkit</h1>
+
+<p align="center">
+  <strong>Tree-sitter powered code analysis tools for AI coding agents.</strong><br>
+  Semantic editing, call-graph navigation, and structural search — all in one toolkit.
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/agent-file-tools"><img src="https://img.shields.io/crates/v/agent-file-tools?label=crate&color=blue" alt="crates.io"></a>
-  <a href="https://www.npmjs.com/package/@cortexkit/aft-opencode"><img src="https://img.shields.io/npm/v/@cortexkit/aft-opencode?color=blue" alt="npm"></a>
-  <a href="https://github.com/cortexkit/aft/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+  <a href="https://crates.io/crates/agent-file-tools"><img src="https://img.shields.io/crates/v/agent-file-tools?label=crate&color=blue&style=flat-square" alt="crates.io"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/aft-opencode"><img src="https://img.shields.io/npm/v/@cortexkit/aft-opencode?color=blue&style=flat-square" alt="npm"></a>
+  <a href="https://github.com/ualtinok/aft/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
 </p>
 
-# AFT — Agent File Toolkit
+<p align="center">
+  <a href="#get-started">Get Started</a> ·
+  <a href="#what-is-aft">What is AFT?</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#tool-reference">Tool Reference</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#architecture">Architecture</a>
+</p>
 
-**Tree-sitter powered code analysis tools for AI coding agents.**
+---
 
-AFT replaces generic read/write file operations with semantic, symbol-level tools that give agents
-precise control over code — without the token waste of reading full files or the fragility of
-line-number edits.
+## Get Started
+
+### OpenCode
+
+Add AFT to your OpenCode config:
+
+```json
+// ~/.config/opencode/config.json
+{
+  "plugins": ["@cortexkit/aft-opencode"]
+}
+```
+
+That's it. On the next session start, the binary downloads if needed and all tools become
+available. AFT replaces opencode's built-in `read`, `write`, `edit`, `apply_patch`,
+`ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` with enhanced versions — all
+powered natively by AFT — plus adds the `aft_` family of semantic tools on top.
 
 ---
 
@@ -31,10 +59,10 @@ sit in a file right now. Agents can outline a file's structure in one call, zoom
 function, edit it by name, then follow its callers across the workspace. All without reading a
 single line they don't need.
 
-Starting with v0.3.0, AFT **hoists** itself into opencode's built-in tool slots. The `read`,
-`write`, `edit`, `apply_patch`, `ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics`
-tools are replaced by AFT-enhanced versions — same names the agent already knows, but now backed
-by the Rust binary for backups, formatting, inline diagnostics, and symbol-aware operations.
+AFT **hoists** itself into opencode's built-in tool slots. The `read`, `write`, `edit`,
+`apply_patch`, `ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` tools are replaced
+by AFT-enhanced versions — same names the agent already knows, but now backed by the Rust binary
+for backups, formatting, inline diagnostics, and symbol-aware operations.
 
 The toolkit is a two-component system: a Rust binary that does the heavy lifting (parsing,
 analysis, edits, formatting) and a TypeScript plugin that integrates with OpenCode. The binary
@@ -57,49 +85,6 @@ the symbol, replaces it, validates syntax, and runs the formatter. Nothing to co
 `aft_navigate` with `callers` mode returns every call site across the workspace in one round trip.
 `impact` mode goes further: it tells the agent what else breaks if that function's signature changes.
 
----
-
-## Features
-
-- **File read** — line-numbered file content, directory listing, and image/PDF detection
-- **Semantic outline** — list all symbols in a file (or several files at once) with kind, name, line range, visibility
-- **Symbol editing** — replace a named symbol by name with auto-format and syntax validation
-- **Match editing** — find-and-replace by content with fuzzy fallback (4-pass: exact → trim trailing → trim both → normalize Unicode)
-- **Batch & transaction edits** — atomic multi-edit within a file, or atomic multi-file edits with rollback
-- **Glob replace** — pattern replace across all matching files in one call
-- **Patch apply** — multi-file `*** Begin Patch` format for creates, updates, deletes, and moves
-- **Call tree & callers** — forward call graph and reverse lookup across the workspace
-- **Trace-to & impact analysis** — how does execution reach this function? what breaks if it changes?
-- **Data flow tracing** — follow a value through assignments and parameters across files
-- **Auto-format & auto-backup** — every edit formats the file and saves a snapshot for undo
-- **Import management** — add, remove, organize imports language-aware (TS/JS/TSX/Python/Rust/Go)
-- **Structural transforms** — add class members, Rust derive macros, Python decorators, Go struct tags, wrap try/catch
-- **Workspace-wide refactoring** — move symbols between files (updates all imports), extract functions, inline functions
-- **Safety & recovery** — undo last edit, named checkpoints, restore to any checkpoint
-- **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
-- **Inline diagnostics** — write and edit return LSP errors detected after the change
-- **UI metadata** — the OpenCode desktop shows file paths and diff previews (`+N/-N`) for every edit
-- **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
-
----
-
-## How to Use
-
-### OpenCode
-
-Add AFT to your OpenCode config:
-
-```json
-// ~/.config/opencode/config.json
-{
-  "plugins": ["@cortexkit/aft-opencode"]
-}
-```
-
-That's it. On the next session start, the binary downloads if needed and all tools become
-available. AFT replaces opencode's built-in `read`, `write`, `edit`, `apply_patch`,
-`ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` with enhanced versions — all powered natively by AFT — plus adds the `aft_` family of semantic tools on top.
-
 Here's a typical agent workflow:
 
 **1. Get the file structure:**
@@ -107,17 +92,6 @@ Here's a typical agent workflow:
 ```json
 // aft_outline
 { "filePath": "src/auth/session.ts" }
-```
-
-```json
-// response
-{
-  "symbols": [
-    { "kind": "function", "name": "createSession", "line_start": 12, "line_end": 34, "visibility": "export" },
-    { "kind": "function", "name": "validateToken", "line_start": 36, "line_end": 58, "visibility": "export" },
-    { "kind": "interface", "name": "SessionOptions", "line_start": 1, "line_end": 10, "visibility": "export" }
-  ]
-}
 ```
 
 **2. Read the specific function:**
@@ -147,6 +121,30 @@ Here's a typical agent workflow:
 
 ---
 
+## Features
+
+- **File read** — line-numbered file content, directory listing, and image/PDF detection
+- **Semantic outline** — list all symbols in a file (or several files, or a directory) with kind, name, line range, visibility
+- **Symbol editing** — replace a named symbol by name with auto-format and syntax validation
+- **Match editing** — find-and-replace by content with fuzzy fallback (4-pass: exact → trim trailing → trim both → normalize Unicode)
+- **Batch & transaction edits** — atomic multi-edit within a file, or atomic multi-file edits with rollback
+- **Glob replace** — pattern replace across all matching files in one call
+- **Patch apply** — multi-file `*** Begin Patch` format for creates, updates, deletes, and moves
+- **Call tree & callers** — forward call graph and reverse lookup across the workspace
+- **Trace-to & impact analysis** — how does execution reach this function? what breaks if it changes?
+- **Data flow tracing** — follow a value through assignments and parameters across files
+- **Auto-format & auto-backup** — every edit formats the file and saves a snapshot for undo
+- **Import management** — add, remove, organize imports language-aware (TS/JS/TSX/Python/Rust/Go)
+- **Structural transforms** — add class members, Rust derive macros, Python decorators, Go struct tags, wrap try/catch
+- **Workspace-wide refactoring** — move symbols between files (updates all imports), extract functions, inline functions
+- **Safety & recovery** — undo last edit, named checkpoints, restore to any checkpoint
+- **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
+- **Inline diagnostics** — write and edit return LSP errors detected after the change
+- **UI metadata** — the OpenCode desktop shows file paths and diff previews (`+N/-N`) for every edit
+- **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
+
+---
+
 ## Tool Reference
 
 > **All line numbers are 1-based** (matching editor, git, and compiler conventions).
@@ -163,8 +161,8 @@ These replace opencode's built-ins. Registered under the same names by default. 
 | `write` | opencode write | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
 | `edit` | opencode edit | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
 | `apply_patch` | opencode apply_patch | `*** Begin Patch` multi-file patch format | `patchText` |
-| `ast_grep_search` | opencode ast_grep_search | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
-| `ast_grep_replace` | opencode ast_grep_replace | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
+| `ast_grep_search` | oh-my-opencode ast_grep | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
+| `ast_grep_replace` | oh-my-opencode ast_grep | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
 | `lsp_diagnostics` | opencode lsp_diagnostics | Errors/warnings from language server | `filePath`, `directory`, `severity`, `waitMs` |
 
 ### AFT-only tools
@@ -188,7 +186,7 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 ### read
 
 Plain file reading and directory listing. Pass `filePath` to read a file, or a directory path to
-list its entries. Paginate large files with `start_line`/`end_line` or `offset`/`limit`.
+list its entries. Paginate large files with `startLine`/`endLine` or `offset`/`limit`.
 
 ```json
 // Read full file
@@ -261,7 +259,7 @@ Includes decorators, doc comments, and attributes in the replacement range.
   "filePath": "src/constants.ts",
   "edits": [
     { "oldString": "VERSION = '1.0'", "newString": "VERSION = '2.0'" },
-    { "line_start": 5, "line_end": 7, "content": "// updated header\n" }
+    { "startLine": 5, "endLine": 7, "content": "// updated header\n" }
   ]
 }
 ```
@@ -326,7 +324,7 @@ Search for structural code patterns using meta-variables. Patterns must be compl
 - `$$$` matches multiple nodes (variadic)
 
 Returns matches with file, line (1-based), column, matched text, and captured variable values.
-Add `context: 3` to include surrounding lines.
+Add `contextLines: 3` to include surrounding lines.
 
 ```json
 // Find all async functions in JS/TS
@@ -474,7 +472,7 @@ Language-aware import management for TS, JS, TSX, Python, Rust, and Go.
 }
 
 // Remove a single named import
-{ "op": "remove", "filePath": "src/api.ts", "module": "react", "name": "useEffect" }
+{ "op": "remove", "filePath": "src/api.ts", "module": "react", "removeName": "useEffect" }
 
 // Re-sort and deduplicate all imports by language convention
 { "op": "organize", "filePath": "src/api.ts" }
@@ -577,7 +575,7 @@ Both files are JSONC (comments allowed).
 
 ```jsonc
 {
-  // Replace opencode's built-in read/write/edit/apply_patch and oh-my-opencode's
+  // Replace opencode's built-in read/write/edit/apply_patch and
   // ast_grep_search/ast_grep_replace/lsp_diagnostics with AFT-enhanced versions.
   // Default: true. Set to false to use aft_ prefix on all tools instead.
   "hoist_builtin_tools": true,
@@ -731,4 +729,4 @@ Run `bun run format` and `cargo fmt` before submitting. The CI will reject unfor
 
 ## License
 
-MIT
+[MIT](LICENSE)
