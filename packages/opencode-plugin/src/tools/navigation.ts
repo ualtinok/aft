@@ -18,13 +18,7 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
         "- 'trace_to': Trace how execution reaches a function from entry points (routes, exports, main). Use to understand context around deeply-nested code.\n" +
         "- 'impact': Analyze what breaks if a symbol changes. Returns affected callers with signatures and entry point status.\n" +
         "- 'trace_data': Follow a value through variable assignments and function parameters across files. Requires 'symbol' (scope to trace from) and 'expression'.\n\n" +
-        "All ops require both 'filePath' and 'symbol'. The 'expression' parameter is additionally required for trace_data.\n\n" +
-        "Returns:\n" +
-        "- call_tree: { name, file, line, signature, resolved, children }\n" +
-        "- callers: { symbol, file, callers, total_callers, scanned_files }\n" +
-        "- trace_to: { target_symbol, target_file, paths, total_paths, entry_points_found, max_depth_reached, truncated_paths }\n" +
-        "- impact: { symbol, file, signature, parameters, total_affected, affected_files, callers }\n" +
-        "- trace_data: { expression, origin_file, origin_symbol, hops, depth_limited }",
+        "All ops require both 'filePath' and 'symbol'. The 'expression' parameter is additionally required for trace_data.\n\n",
       // Parameters are Zod-optional because different ops need different subsets.
       // Runtime guards below validate per-op requirements and give clear errors.
       args: {

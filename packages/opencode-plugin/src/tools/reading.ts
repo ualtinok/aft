@@ -51,13 +51,11 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
   return {
     aft_outline: {
       description:
-        "Get a structural outline of a source file, multiple files, or an entire directory — lists all top-level symbols with their kind, name, line range, and visibility. Use this to understand file structure before editing.\n" +
+        "Get a structural outline of a source file, multiple files, or an entire directory — lists all top-level symbols with their kind, name, line range, and visibility. Use this to understand file/directory structure before editing.\n" +
         "Each entry includes 'name', 'kind' (function/class/struct/heading/etc), 'range', 'signature', and 'members' (nested children like methods in classes or sub-headings in markdown).\n" +
         "For Markdown files (.md, .mdx): returns heading hierarchy — h1/h2/h3 as nested symbols with section ranges covering all content until the next same-level heading.\n\n" +
         "Provide 'filePath', 'files', or 'directory'. Priority: directory > files > filePath. If multiple provided, highest-priority wins.\n" +
-        "Supported languages: TypeScript, JavaScript, TSX, Python, Rust, Go, Ruby, C, C++, C#, Java, Kotlin, Scala, Swift, Lua, Elixir, Haskell, Solidity, Nix, Markdown, CSS, HTML, JSON, YAML, Bash.\n" +
-        "Directory mode skips commonly ignored directories (node_modules, .git, dist, build, target, __pycache__, venv, vendor, coverage, etc.) and dot-prefixed directories.\n\n" +
-        "Returns: Single file { entries: [{ name, kind, range, signature?, exported, members }] }. Multi-file/directory { results: [{ file, ok, entries? }] }.",
+        "Directory mode skips commonly ignored directories and dot-prefixed directories.",
       args: {
         filePath: z
           .string()
@@ -114,7 +112,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
     aft_zoom: {
       description: `Inspect code symbols with call-graph annotations. Returns the full source of named symbols with what they call and what calls them.
 
-Use this when you need to understand a specific function, class, or type in detail — not for reading entire files (use read for that).
+Use this when you need to understand a specific function, class, or type in detail.
 
 **Modes:**
 
@@ -126,15 +124,9 @@ Use this when you need to understand a specific function, class, or type in deta
    Returns multiple symbols in one call.
    Example: { "filePath": "src/app.ts", "symbols": ["Config", "createApp"] }
 
-3. **Read line range with context** — pass filePath + startLine + endLine
-   Returns lines with context_before and context_after.
-   Example: { "filePath": "src/app.ts", "startLine": 50, "endLine": 100 }
+For Markdown files, use heading text as symbol name.
 
-For Markdown files, use heading text as symbol name (e.g., symbol: "Architecture").
-
-Mode priority: symbols array > single symbol > line range.
-
-Returns: Symbol mode { name, kind, range, content, context_before, context_after, annotations: { calls_out, called_by } }. Multi-symbol mode returns an array of these. Line-range mode returns { content, context_before, context_after, start_line, end_line }.`,
+Mode priority: symbols array > single symbol.`,
       args: {
         filePath: z.string().describe("Path to file (absolute or relative to project root)"),
         symbol: z.string().optional().describe("Name of a single symbol to inspect"),
@@ -142,15 +134,10 @@ Returns: Symbol mode { name, kind, range, content, context_before, context_after
           .array(z.string())
           .optional()
           .describe("Array of symbol names to inspect in one call"),
-        startLine: z.number().optional().describe("1-based start line for line-range mode"),
-        endLine: z
-          .number()
-          .optional()
-          .describe("1-based end line for line-range mode (inclusive, required with startLine)"),
         contextLines: z
           .number()
           .optional()
-          .describe("Lines of context before/after the requested range or symbol (default: 3)"),
+          .describe("Lines of context before/after the symbol (default: 3)"),
       },
       execute: async (args, context): Promise<string> => {
         const bridge = ctx.pool.getBridge(context.directory);
@@ -168,11 +155,9 @@ Returns: Symbol mode { name, kind, range, content, context_before, context_after
           return JSON.stringify(results);
         }
 
-        // Single symbol or line-range mode
+        // Single symbol mode
         const params: Record<string, unknown> = { file };
         if (typeof args.symbol === "string") params.symbol = args.symbol;
-        if (args.startLine !== undefined) params.start_line = args.startLine;
-        if (args.endLine !== undefined) params.end_line = args.endLine;
         if (args.contextLines !== undefined) params.context_lines = args.contextLines;
 
         const data = await bridge.send("zoom", params);

@@ -9,9 +9,7 @@ const z = tool.schema;
 export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
   const diagnosticsTool: ToolDefinition = {
     description:
-      "Get errors, warnings, hints from language server. " +
-      "Returns diagnostics from LSP servers (typescript-language-server, pyright, rust-analyzer, gopls). " +
-      "Lazily spawns the appropriate server on first use.\n\n" +
+      "Get errors, warnings, hints from a language server. " +
       "Returns: { diagnostics: Array<{ file, line, column, end_line, end_column, severity, message, code }>, total: number, files_with_errors: number }.",
     args: {
       filePath: z

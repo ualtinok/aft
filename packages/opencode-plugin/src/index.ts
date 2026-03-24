@@ -92,21 +92,50 @@ const plugin: Plugin = async (input) => {
   );
   const ctx: PluginContext = { pool, client: input.client, config: aftConfig };
 
-  // Build full tool map, then filter out disabled tools
+  // Tool surface tiers:
+  //   minimal:     aft_outline, aft_zoom, aft_safety
+  //   recommended: minimal + hoisted + lsp_diagnostics + ast_grep_* + aft_import (default)
+  //   all:         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
+  const surface = aftConfig.tool_surface ?? "recommended";
+
+  // Tools only available in "all" tier
+  const ALL_ONLY_TOOLS = new Set([
+    "aft_navigate",
+    "aft_delete",
+    "aft_move",
+    "aft_transform",
+    "aft_refactor",
+  ]);
+
+  // Build full tool map
   const allTools = normalizeToolMap({
-    // When hoisting enabled (default): override opencode built-ins (read, write, edit, apply_patch)
-    // When disabled: register with aft_ prefix (aft_read, aft_write, aft_edit, aft_apply_patch)
-    ...(aftConfig.hoist_builtin_tools !== false ? hoistedTools(ctx) : aftPrefixedTools(ctx)),
+    // Hoisted tools: only in recommended+ (and when hoist_builtin_tools !== false)
+    ...(surface !== "minimal" &&
+      (aftConfig.hoist_builtin_tools !== false ? hoistedTools(ctx) : aftPrefixedTools(ctx))),
     ...readingTools(ctx),
 
     ...safetyTools(ctx),
-    ...importTools(ctx),
+    // aft_import: recommended+
+    ...(surface !== "minimal" && importTools(ctx)),
     ...structureTools(ctx),
     ...navigationTools(ctx),
-    ...astTools(ctx),
+    // AST tools: recommended+
+    ...(surface !== "minimal" && astTools(ctx)),
     ...refactoringTools(ctx),
-    ...lspTools(ctx),
+    // LSP diagnostics: recommended+
+    ...(surface !== "minimal" && lspTools(ctx)),
   });
+
+  // Remove all-only tools when surface is minimal or recommended
+  if (surface !== "all") {
+    for (const name of ALL_ONLY_TOOLS) {
+      if (name in allTools) {
+        delete allTools[name];
+      }
+    }
+  }
+
+  console.error(`[aft-plugin] Tool surface: ${surface} (${Object.keys(allTools).length} tools)`);
 
   // Filter disabled tools (user + project config union)
   const disabled = new Set(aftConfig.disabled_tools ?? []);

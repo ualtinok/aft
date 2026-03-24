@@ -579,47 +579,47 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
 // APPLY_PATCH tool
 // ---------------------------------------------------------------------------
 
-const APPLY_PATCH_DESCRIPTION = `Apply a multi-file patch to create, update, delete, or move files in one operation.
+const APPLY_PATCH_DESCRIPTION = `Use the \`apply_patch\` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
-Uses the opencode patch format with \`*** Begin Patch\` / \`*** End Patch\` markers.
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
 
-**Patch format:**
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+*** Move to: <path> - after update file header, renames the file.
+
+
+Example patch:
+
 \`\`\`
 *** Begin Patch
-*** Add File: path/to/new-file.ts
-+line 1 of new file
-+line 2 of new file
-*** Update File: path/to/existing-file.ts
-@@ function targetFunction()
--old line to remove
-+new line to add
- context line (unchanged, prefixed with space)
-*** Update File: path/to/old-name.ts
-*** Move to: path/to/new-name.ts
-@@ import { foo }
--import { foo } from './old'
-+import { foo } from './new'
-*** Delete File: path/to/obsolete-file.ts
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
 *** End Patch
 \`\`\`
-
-**File operations:**
-- \`*** Add File: <path>\` — Create a new file. Every line prefixed with \`+\`.
-- \`*** Update File: <path>\` — Patch an existing file. Uses \`@@\` context anchors.
-- \`*** Delete File: <path>\` — Remove a file.
-- \`*** Move to: <path>\` — After Update File header, renames the file.
-
-**Update file syntax:**
-- \`@@ context line\` — Anchor: finds this line in the file to locate the edit
-- \`-line\` — Remove this line
-- \`+line\` — Add this line
-- \` line\` — Context line (space prefix), appears in both old and new
 
 **Behavior:**
 - All file changes are applied with checkpoint-based rollback — if any file fails, previous changes are rolled back (best-effort)
 - Files are backed up before modification
 - Parent directories are created automatically for new files
 - Fuzzy matching for context anchors (handles whitespace and Unicode differences)
+
+**It is important to remember:**
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with \`+\` even when creating a new file
 
 Returns: Status message string listing created, updated, moved, deleted, or failed file operations. May include inline LSP errors if type errors are introduced by the patch.`;
 
@@ -822,17 +822,14 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
 // ---------------------------------------------------------------------------
 
 const DELETE_DESCRIPTION =
-  "Delete a file with backup (recoverable via aft_safety undo).\n\n" +
-  "Returns: { file, deleted, backup_id } on success.\n" +
+  "Delete a file with backup.\n\n" +
   "The file content is backed up before deletion — use aft_safety undo to recover if needed.";
 
 function createDeleteTool(ctx: PluginContext): ToolDefinition {
   return {
     description: DELETE_DESCRIPTION,
     args: {
-      filePath: z
-        .string()
-        .describe("Path to file to delete (absolute or relative to project root)"),
+      filePath: z.string().describe("Path to file to delete"),
     },
     execute: async (args, context): Promise<string> => {
       const bridge = ctx.pool.getBridge(context.directory);
@@ -858,22 +855,15 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
 // ---------------------------------------------------------------------------
 
 const MOVE_DESCRIPTION =
-  "Move or rename a file with backup (recoverable via aft_safety undo).\n\n" +
-  "Creates parent directories for destination automatically.\n" +
-  "Falls back to copy+delete for cross-filesystem moves.\n" +
-  "Returns: { file, destination, moved, backup_id } on success.\n\n" +
-  "Note: This moves/renames files at the OS level. To move a code symbol (function, class) to another file while updating all imports, use aft_refactor with op='move' instead.";
+  "Move or rename a file with backup. Creates parent directories for destination automatically\n" +
+  "Note: This moves/renames files at the OS level.";
 
 function createMoveTool(ctx: PluginContext): ToolDefinition {
   return {
     description: MOVE_DESCRIPTION,
     args: {
-      filePath: z
-        .string()
-        .describe("Source file path to move (absolute or relative to project root)"),
-      destination: z
-        .string()
-        .describe("Destination file path (absolute or relative to project root)"),
+      filePath: z.string().describe("Source file path to move"),
+      destination: z.string().describe("Destination file path"),
     },
     execute: async (args, context): Promise<string> => {
       const bridge = ctx.pool.getBridge(context.directory);

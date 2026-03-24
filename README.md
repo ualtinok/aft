@@ -169,17 +169,24 @@ These replace opencode's built-ins. Registered under the same names by default. 
 
 Always registered with `aft_` prefix regardless of hoisting setting.
 
+**Recommended tier** (default):
+
 | Tool | Description | Key Params |
 |------|-------------|------------|
 | `aft_outline` | Structural outline of a file, files, or directory | `filePath`, `files[]`, `directory` |
-| `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]`, `startLine`, `endLine` |
+| `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]` |
+| `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
+| `aft_safety` | Undo, history, checkpoints, restore | `op`, `filePath`, `name` |
+
+**All tier** (set `tool_surface: "all"`):
+
+| Tool | Description | Key Params |
+|------|-------------|------------|
 | `aft_delete` | Delete a file with backup | `filePath` |
 | `aft_move` | Move or rename a file with backup | `filePath`, `destination` |
 | `aft_navigate` | Call graph and data-flow navigation | `op`, `filePath`, `symbol`, `depth` |
-| `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
 | `aft_transform` | Structural code transforms (members, derives, decorators) | `op`, `filePath`, `container`, `target` |
 | `aft_refactor` | Workspace-wide move, extract, inline | `op`, `filePath`, `symbol`, `destination` |
-| `aft_safety` | Undo, history, checkpoints, restore | `op`, `filePath`, `name` |
 
 ---
 
@@ -391,7 +398,7 @@ Inspect code symbols with call-graph annotations. Returns the full source of nam
 `calls_out` (what it calls) and `called_by` (what calls it) annotations.
 
 Use this when you need to understand a specific function, class, or type in detail — not for
-reading entire files (use `read` for that). Also supports line-range reads with context.
+reading entire files (use `read` for that).
 
 ```json
 // Inspect a single symbol
@@ -399,9 +406,6 @@ reading entire files (use `read` for that). Also supports line-range reads with 
 
 // Inspect multiple symbols in one call
 { "filePath": "src/app.ts", "symbols": ["Config", "createApp"] }
-
-// Read a line range with context
-{ "filePath": "src/app.ts", "startLine": 50, "endLine": 100 }
 ```
 
 For Markdown files, use the heading text as the symbol name (e.g. `"symbol": "Architecture"`).
@@ -601,7 +605,13 @@ Both files are JSONC (comments allowed).
     "typescript": "biome"
   },
 
-  // List of tool names to disable (e.g. ["aft_transform", "aft_refactor"])
+  // Tool surface level: "minimal" | "recommended" (default) | "all"
+  // minimal:     aft_outline, aft_zoom, aft_safety only (no hoisting)
+  // recommended: minimal + hoisted tools + lsp_diagnostics + ast_grep + aft_import
+  // all:         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
+  "tool_surface": "recommended",
+
+  // List of tool names to disable after surface filtering
   "disabled_tools": []
 }
 ```
