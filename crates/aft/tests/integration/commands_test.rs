@@ -15,81 +15,73 @@ fn test_outline_typescript_nested_structure() {
     assert_eq!(resp["id"], "ol-1");
     assert_eq!(resp["success"], true, "outline should succeed");
 
-    let entries = resp["entries"].as_array().expect("entries should be array");
+    let text = resp["text"]
+        .as_str()
+        .expect("text field should be a string");
 
-    // Collect top-level names
-    let top_names: Vec<&str> = entries
-        .iter()
-        .map(|e| e["name"].as_str().unwrap())
-        .collect();
-
-    // UserService should be at top level
+    // UserService should be at top level (no "." prefix in its line)
+    let user_service_line = text
+        .lines()
+        .find(|l| l.contains("UserService"))
+        .expect("UserService should be in outline");
     assert!(
-        top_names.contains(&"UserService"),
-        "UserService should be at top level, got: {:?}",
-        top_names
+        !user_service_line.contains('.'),
+        "UserService should be at top level (no '.' prefix), got: {:?}",
+        user_service_line
     );
 
-    // Methods should NOT be at top level
+    // getUser should be a nested member (its line has a "." prefix)
+    let get_user_line = text
+        .lines()
+        .find(|l| l.contains("getUser"))
+        .expect("getUser should be in outline");
     assert!(
-        !top_names.contains(&"getUser"),
-        "getUser should NOT be at top level"
-    );
-    assert!(
-        !top_names.contains(&"addUser"),
-        "addUser should NOT be at top level"
-    );
-
-    // Methods should be nested under UserService
-    let user_service = entries
-        .iter()
-        .find(|e| e["name"] == "UserService")
-        .expect("UserService entry");
-    let members = user_service["members"].as_array().expect("members array");
-    let member_names: Vec<&str> = members
-        .iter()
-        .map(|m| m["name"].as_str().unwrap())
-        .collect();
-    assert!(
-        member_names.contains(&"getUser"),
-        "getUser should be under UserService"
-    );
-    assert!(
-        member_names.contains(&"addUser"),
-        "addUser should be under UserService"
+        get_user_line.contains('.'),
+        "getUser should be a nested member (has '.' prefix), got: {:?}",
+        get_user_line
     );
 
-    // Verify all expected symbol kinds are present
-    let all_kinds: Vec<&str> = entries
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap())
-        .collect();
-    assert!(all_kinds.contains(&"function"), "should have function kind");
-    assert!(all_kinds.contains(&"class"), "should have class kind");
+    // addUser should be a nested member (its line has a "." prefix)
+    let add_user_line = text
+        .lines()
+        .find(|l| l.contains("addUser"))
+        .expect("addUser should be in outline");
     assert!(
-        all_kinds.contains(&"interface"),
-        "should have interface kind"
-    );
-    assert!(all_kinds.contains(&"enum"), "should have enum kind");
-    assert!(
-        all_kinds.contains(&"type_alias"),
-        "should have type_alias kind"
+        add_user_line.contains('.'),
+        "addUser should be a nested member (has '.' prefix), got: {:?}",
+        add_user_line
     );
 
-    // Verify exported flag
-    let greet = entries
-        .iter()
-        .find(|e| e["name"] == "greet")
-        .expect("greet entry");
-    assert_eq!(greet["exported"], true, "greet should be exported");
+    // Verify all expected symbol kind abbreviations are present
+    assert!(text.contains(" fn "), "should have fn (function) kind");
+    assert!(text.contains(" cls "), "should have cls (class) kind");
+    assert!(text.contains(" ifc "), "should have ifc (interface) kind");
+    assert!(text.contains(" enum "), "should have enum kind");
+    assert!(
+        text.contains(" type "),
+        "should have type (type_alias) kind"
+    );
 
-    let internal = entries
-        .iter()
-        .find(|e| e["name"] == "internalHelper")
-        .expect("internalHelper entry");
-    assert_eq!(
-        internal["exported"], false,
-        "internalHelper should not be exported"
+    // greet should be exported: its line's first non-space chars are "E "
+    let greet_line = text
+        .lines()
+        .find(|l| l.contains("greet") && !l.contains("UserService"))
+        .expect("greet line should be in outline");
+    assert!(
+        greet_line.trim_start().starts_with("E "),
+        "greet should be exported, got: {:?}",
+        greet_line
+    );
+
+    // internalHelper should not be exported: its line's first non-space chars are "- "
+    let internal_line = text
+        .lines()
+        .find(|l| l.contains("internalHelper"))
+        .expect("internalHelper line should be in outline");
+    assert!(
+        internal_line.trim_start().starts_with("- "),
+        "internalHelper should not be exported, got: {:?}",
+        internal_line
     );
 
     let status = aft.shutdown();
@@ -108,47 +100,47 @@ fn test_outline_python_multi_level_nesting() {
 
     assert_eq!(resp["success"], true, "outline should succeed for Python");
 
-    let entries = resp["entries"].as_array().expect("entries array");
-    let top_names: Vec<&str> = entries
-        .iter()
-        .map(|e| e["name"].as_str().unwrap())
-        .collect();
+    let text = resp["text"]
+        .as_str()
+        .expect("text field should be a string");
 
-    // OuterClass should be at top level
-    assert!(top_names.contains(&"OuterClass"));
-
-    // InnerClass and inner_method should NOT be at top level
+    // OuterClass should be present at top level (2-space indent: starts with "  E" or "  -")
+    let outer_class_line = text
+        .lines()
+        .find(|l| l.contains("OuterClass"))
+        .expect("OuterClass should be in outline");
     assert!(
-        !top_names.contains(&"InnerClass"),
-        "InnerClass should be nested"
-    );
-    assert!(
-        !top_names.contains(&"inner_method"),
-        "inner_method should be nested"
+        outer_class_line.starts_with("  E") || outer_class_line.starts_with("  -"),
+        "OuterClass should be at top level (2-space indent), got: {:?}",
+        outer_class_line
     );
 
-    // Navigate: OuterClass → InnerClass → inner_method
-    let outer = entries
-        .iter()
-        .find(|e| e["name"] == "OuterClass")
-        .expect("OuterClass");
-    let outer_members = outer["members"].as_array().expect("outer members");
-
-    let inner = outer_members
-        .iter()
-        .find(|m| m["name"] == "InnerClass")
-        .expect("InnerClass under OuterClass");
-    let inner_members = inner["members"].as_array().expect("inner members");
-
+    // InnerClass should be nested, NOT at top level
+    let inner_class_line = text
+        .lines()
+        .find(|l| l.contains("InnerClass"))
+        .expect("InnerClass should be in outline");
     assert!(
-        inner_members.iter().any(|m| m["name"] == "inner_method"),
-        "inner_method should be under InnerClass"
+        !(inner_class_line.starts_with("  E") || inner_class_line.starts_with("  -")),
+        "InnerClass should be nested, not at top level, got: {:?}",
+        inner_class_line
     );
 
-    // outer_method should be under OuterClass (not under InnerClass)
+    // inner_method should be nested, NOT at top level
+    let inner_method_line = text
+        .lines()
+        .find(|l| l.contains("inner_method"))
+        .expect("inner_method should be in outline");
     assert!(
-        outer_members.iter().any(|m| m["name"] == "outer_method"),
-        "outer_method should be under OuterClass"
+        !(inner_method_line.starts_with("  E") || inner_method_line.starts_with("  -")),
+        "inner_method should be nested, not at top level, got: {:?}",
+        inner_method_line
+    );
+
+    // outer_method should be present as a member of OuterClass
+    assert!(
+        text.contains("outer_method"),
+        "outer_method should be in outline"
     );
 
     let status = aft.shutdown();

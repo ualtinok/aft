@@ -46,39 +46,75 @@ fn markdown_outline_extracts_headings() {
     ));
 
     assert_eq!(resp["success"], true, "outline should succeed: {:?}", resp);
-    let entries = resp["entries"].as_array().expect("entries should be array");
 
-    // Top-level: 2 h1 sections ("Project Title" and "Appendix")
+    let text = resp["text"]
+        .as_str()
+        .expect("text field should be a string");
+
+    // Headings should use 'h' kind abbreviation
+    assert!(text.contains(" h "), "headings should use 'h' kind");
+
+    // All headings should be present in the outline
+    assert!(text.contains("Project Title"), "should have Project Title");
+    assert!(text.contains("Features"), "should have Features");
+    assert!(text.contains("Sub-feature A"), "should have Sub-feature A");
+    assert!(text.contains("Sub-feature B"), "should have Sub-feature B");
+    assert!(text.contains("Architecture"), "should have Architecture");
+    assert!(text.contains("Appendix"), "should have Appendix");
+
+    // Exactly 2 top-level headings: lines with 2-space indent (starts with "  E " or "  - ")
+    // and containing " h " kind
+    let top_level_count = text
+        .lines()
+        .filter(|l| (l.starts_with("  E ") || l.starts_with("  - ")) && l.contains(" h "))
+        .count();
     assert_eq!(
-        entries.len(),
-        2,
-        "expected 2 top-level headings, got: {}",
-        entries.len()
+        top_level_count, 2,
+        "expected 2 top-level headings (Project Title and Appendix), got: {}",
+        top_level_count
     );
 
-    // Check first h1
-    assert_eq!(entries[0]["name"], "Project Title");
-    assert_eq!(entries[0]["kind"], "heading");
-    assert_eq!(entries[0]["signature"], "# Project Title");
+    // Project Title and Appendix are top-level (their lines have no "." prefix)
+    let project_title_line = text
+        .lines()
+        .find(|l| l.contains("Project Title"))
+        .expect("Project Title line");
+    assert!(
+        !project_title_line.contains('.'),
+        "Project Title should be top-level (no '.' prefix), got: {:?}",
+        project_title_line
+    );
 
-    // Check nested h2s under "Project Title"
-    let members = entries[0]["members"].as_array().unwrap();
-    assert_eq!(members.len(), 2, "Project Title should have 2 h2 children");
-    assert_eq!(members[0]["name"], "Features");
-    assert_eq!(members[0]["signature"], "## Features");
-    assert_eq!(members[1]["name"], "Architecture");
+    let appendix_line = text
+        .lines()
+        .find(|l| l.contains("Appendix"))
+        .expect("Appendix line");
+    assert!(
+        !appendix_line.contains('.'),
+        "Appendix should be top-level (no '.' prefix), got: {:?}",
+        appendix_line
+    );
 
-    // Check nested h3s under "Features"
-    let sub_members = members[0]["members"].as_array().unwrap();
-    assert_eq!(sub_members.len(), 2, "Features should have 2 h3 children");
-    assert_eq!(sub_members[0]["name"], "Sub-feature A");
-    assert_eq!(sub_members[0]["signature"], "### Sub-feature A");
-    assert_eq!(sub_members[1]["name"], "Sub-feature B");
+    // Features and Architecture are nested (their lines have "." prefix)
+    let features_line = text
+        .lines()
+        .find(|l| l.contains("Features"))
+        .expect("Features line");
+    assert!(
+        features_line.contains('.'),
+        "Features should be nested under Project Title (has '.' prefix), got: {:?}",
+        features_line
+    );
 
-    // Check second h1
-    assert_eq!(entries[1]["name"], "Appendix");
-    assert_eq!(entries[1]["signature"], "# Appendix");
-    assert!(entries[1]["members"].as_array().unwrap().is_empty());
+    let arch_line = text
+        .lines()
+        .find(|l| l.contains("Architecture"))
+        .expect("Architecture line");
+    assert!(
+        arch_line.contains('.'),
+        "Architecture should be nested under Project Title (has '.' prefix), got: {:?}",
+        arch_line
+    );
 }
 
 #[test]
@@ -95,14 +131,27 @@ fn markdown_outline_section_ranges_cover_content() {
     ));
 
     assert_eq!(resp["success"], true);
-    let entries = resp["entries"].as_array().unwrap();
 
-    // "Features" is a child of the first h1
-    let features = &entries[0]["members"].as_array().unwrap()[0];
-    assert_eq!(features["name"], "Features");
-    let range = &features["range"];
-    let start = range["start_line"].as_u64().unwrap();
-    let end = range["end_line"].as_u64().unwrap();
+    let text = resp["text"]
+        .as_str()
+        .expect("text field should be a string");
+
+    // Find the Features heading line to extract its range
+    let features_line = text
+        .lines()
+        .find(|l| l.contains("Features"))
+        .expect("Features should be in outline");
+
+    // The range is the last token in the line, format "start:end"
+    let range_part = features_line
+        .split_whitespace()
+        .last()
+        .expect("range at end of line");
+    let (start_str, end_str) = range_part
+        .split_once(':')
+        .expect("range should be in start:end format");
+    let start: u64 = start_str.parse().expect("start should be a number");
+    let end: u64 = end_str.parse().expect("end should be a number");
 
     // Section should cover multiple lines (heading + list + sub-sections)
     assert!(
@@ -210,7 +259,13 @@ fn markdown_mdx_extension_supported() {
     ));
 
     assert_eq!(resp["success"], true, "mdx should be supported: {:?}", resp);
-    let entries = resp["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["name"], "MDX Doc");
+
+    let text = resp["text"]
+        .as_str()
+        .expect("text field should be a string");
+    assert!(
+        text.contains("MDX Doc"),
+        "outline should contain MDX Doc heading, got: {:?}",
+        text
+    );
 }

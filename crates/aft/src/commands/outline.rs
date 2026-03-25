@@ -23,13 +23,22 @@ pub struct OutlineEntry {
 
 /// Handle an `outline` request.
 ///
-/// Expects `file` in request params. Calls `list_symbols()` on the provider,
-/// then builds a nested tree: methods with a `parent` appear only under their
-/// parent entry, not duplicated at top level.
+/// Expects `file` or `files` in request params. Calls `list_symbols()` on the provider,
+/// then builds a nested tree and returns compact tree-text output.
+///
+/// - Single-file mode: includes signatures (e.g. `E fn  greet(name: string): void 5:12`)
+/// - Multi-file mode: no signatures, paths relative to project_root
+///
+/// Output is capped at 30KB; if exceeded, truncates with a narrowing hint.
 pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
+    const MAX_OUTPUT_BYTES: usize = 30 * 1024;
+
     // Multi-file mode: if "files" array is present, outline each file
     if let Some(files_arr) = req.params.get("files").and_then(|v| v.as_array()) {
-        let mut results: Vec<serde_json::Value> = Vec::with_capacity(files_arr.len());
+        let project_root = ctx.config().project_root.clone();
+        let mut file_outlines: Vec<FileOutline> = Vec::with_capacity(files_arr.len());
+        let total_files_requested = files_arr.len();
+
         for file_val in files_arr {
             let file = match file_val.as_str() {
                 Some(f) => f,
@@ -37,34 +46,27 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
             };
             let path = Path::new(file);
             if !path.exists() {
-                results.push(serde_json::json!({
-                    "file": file,
-                    "ok": false,
-                    "code": "file_not_found",
-                    "message": format!("file not found: {}", file),
-                }));
                 continue;
             }
             match ctx.provider().list_symbols(path) {
                 Ok(symbols) => {
                     let entries = build_outline_tree(&symbols);
-                    results.push(serde_json::json!({
-                        "file": file,
-                        "ok": true,
-                        "entries": entries,
-                    }));
+                    let rel_path = project_root
+                        .as_ref()
+                        .and_then(|root| Path::new(file).strip_prefix(root).ok())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| file.to_string());
+                    file_outlines.push(FileOutline {
+                        path: rel_path,
+                        entries,
+                    });
                 }
-                Err(e) => {
-                    results.push(serde_json::json!({
-                        "file": file,
-                        "ok": false,
-                        "code": e.code(),
-                        "message": e.to_string(),
-                    }));
-                }
+                Err(_) => continue,
             }
         }
-        return Response::success(&req.id, serde_json::json!({ "results": results }));
+
+        let text = format_multi_file_tree(&file_outlines, MAX_OUTPUT_BYTES, total_files_requested);
+        return Response::success(&req.id, serde_json::json!({ "text": text }));
     }
 
     // Single-file mode (original behavior)
@@ -96,8 +98,13 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
     };
 
     let entries = build_outline_tree(&symbols);
+    let filename = Path::new(file)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| file.to_string());
+    let text = format_single_file_tree(&filename, &entries);
 
-    Response::success(&req.id, serde_json::json!({ "entries": entries }))
+    Response::success(&req.id, serde_json::json!({ "text": text }))
 }
 
 /// Build a nested outline tree from a flat symbol list.
@@ -173,6 +180,166 @@ fn insert_at_scope(
     }
 
     false
+}
+
+// ── Tree text formatting ──────────────────────────────────────────────
+
+/// Intermediate representation for multi-file tree rendering.
+struct FileOutline {
+    path: String, // relative path
+    entries: Vec<OutlineEntry>,
+}
+
+/// Short kind abbreviation for compact display.
+fn kind_abbrev(kind: &str) -> &str {
+    match kind {
+        "function" => "fn",
+        "variable" => "var",
+        "class" => "cls",
+        "interface" => "ifc",
+        "type_alias" => "type",
+        "enum" => "enum",
+        "method" => "mth",
+        "property" => "prop",
+        "struct" => "st",
+        "heading" => "h",
+        _ => &kind[..kind.len().min(4)],
+    }
+}
+
+/// Format a single entry line for multi-file mode (no signature).
+fn format_entry_compact(entry: &OutlineEntry) -> String {
+    let vis = if entry.exported { 'E' } else { '-' };
+    let kind = kind_abbrev(&entry.kind);
+    // Range is serialized 1-based, but internal Range is 0-based.
+    // Add 1 to match agent-facing convention.
+    let sl = entry.range.start_line + 1;
+    let el = entry.range.end_line + 1;
+    format!("{} {:<4} {} {}:{}", vis, kind, entry.name, sl, el)
+}
+
+/// Format a single entry line for single-file mode (with signature).
+fn format_entry_with_sig(entry: &OutlineEntry) -> String {
+    let vis = if entry.exported { 'E' } else { '-' };
+    let kind = kind_abbrev(&entry.kind);
+    let sl = entry.range.start_line + 1;
+    let el = entry.range.end_line + 1;
+    if let Some(ref sig) = entry.signature {
+        format!("{} {:<4} {} {}:{}", vis, kind, sig, sl, el)
+    } else {
+        format!("{} {:<4} {} {}:{}", vis, kind, entry.name, sl, el)
+    }
+}
+
+/// Render entries recursively with indentation.
+fn render_entries(entries: &[OutlineEntry], indent: usize, output: &mut String, with_sig: bool) {
+    let prefix = "  ".repeat(indent);
+    let member_prefix = "  ".repeat(indent + 1);
+    for entry in entries {
+        if with_sig {
+            output.push_str(&format!("{}{}\n", prefix, format_entry_with_sig(entry)));
+        } else {
+            output.push_str(&format!("{}{}\n", prefix, format_entry_compact(entry)));
+        }
+        if !entry.members.is_empty() {
+            for member in &entry.members {
+                if with_sig {
+                    output.push_str(&format!(
+                        "{}.{}\n",
+                        member_prefix,
+                        format_entry_with_sig(member)
+                    ));
+                } else {
+                    output.push_str(&format!(
+                        "{}.{}\n",
+                        member_prefix,
+                        format_entry_compact(member)
+                    ));
+                }
+                // Recurse for deeply nested members
+                if !member.members.is_empty() {
+                    render_entries(&member.members, indent + 2, output, with_sig);
+                }
+            }
+        }
+    }
+}
+
+/// Format single-file outline as tree text with signatures.
+fn format_single_file_tree(filename: &str, entries: &[OutlineEntry]) -> String {
+    let mut output = format!("{}\n", filename);
+    render_entries(entries, 1, &mut output, true);
+    output
+}
+
+/// Build a directory tree structure from file paths and render as text.
+///
+/// Groups files by directory hierarchy and renders symbols under each file.
+/// If output exceeds `max_bytes`, truncates with a narrowing hint.
+fn format_multi_file_tree(
+    file_outlines: &[FileOutline],
+    max_bytes: usize,
+    total_requested: usize,
+) -> String {
+    // Build a tree of directories → files → symbols
+    // Using a simple sorted-path approach with indentation
+    let mut output = String::new();
+    let mut truncated = false;
+    let mut files_shown = 0;
+
+    // Sort by path for clean directory grouping
+    let mut sorted: Vec<&FileOutline> = file_outlines.iter().collect();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // Track directory nesting via path components
+    let mut prev_parts: Vec<&str> = Vec::new();
+
+    for fo in &sorted {
+        let parts: Vec<&str> = fo.path.split('/').collect();
+        let file_name = parts.last().copied().unwrap_or(&fo.path);
+        let dir_parts = &parts[..parts.len().saturating_sub(1)];
+
+        // Find common prefix with previous path
+        let common = prev_parts
+            .iter()
+            .zip(dir_parts.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        // Emit new directory levels
+        for (i, part) in dir_parts.iter().enumerate().skip(common) {
+            let indent = "  ".repeat(i);
+            output.push_str(&format!("{}{}/\n", indent, part));
+        }
+
+        // Emit file name
+        let file_indent = "  ".repeat(dir_parts.len());
+        output.push_str(&format!("{}{}\n", file_indent, file_name));
+
+        // Emit symbols under file
+        render_entries(&fo.entries, dir_parts.len() + 1, &mut output, false);
+
+        files_shown += 1;
+        prev_parts = parts.iter().map(|s| *s).collect();
+
+        // Check size cap
+        if output.len() > max_bytes {
+            truncated = true;
+            break;
+        }
+    }
+
+    if truncated {
+        output.push_str(&format!(
+            "\n... truncated ({}/{} files shown, {}KB limit)\n\
+             Narrow scope with a more specific directory path or use filePath for single files.\n",
+            files_shown,
+            total_requested,
+            max_bytes / 1024,
+        ));
+    }
+
+    output
 }
 
 fn symbol_to_entry(sym: &Symbol) -> OutlineEntry {

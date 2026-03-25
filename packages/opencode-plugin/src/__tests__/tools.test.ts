@@ -74,34 +74,29 @@ describe("Tool round-trips", () => {
     sdkCtx = createMockSdkContext(PROJECT_CWD);
   });
 
-  test("aft_outline tool returns entries for fixture file with known symbols", async () => {
+  test("aft_outline tool returns tree text for fixture file with known symbols", async () => {
     createBridge();
     const tools = readingTools(createPluginContext(pool));
 
-    const resultStr = await tools.aft_outline.execute({ filePath: FIXTURE_FILE }, sdkCtx);
-    const result = JSON.parse(resultStr);
+    const text = await tools.aft_outline.execute({ filePath: FIXTURE_FILE }, sdkCtx);
 
-    expect(result.success).toBe(true);
-    expect(Array.isArray(result.entries)).toBe(true);
-    expect(result.entries.length).toBeGreaterThan(0);
+    // Output is now tree-formatted text, not JSON
+    expect(typeof text).toBe("string");
+    expect(text.length).toBeGreaterThan(0);
 
-    // Verify known symbols from the fixture
-    const names = result.entries.map((e: { name: string }) => e.name);
-    expect(names).toContain("greet");
-    expect(names).toContain("add");
-    expect(names).toContain("UserService");
-    expect(names).toContain("Config");
-    expect(names).toContain("Status");
-    expect(names).toContain("UserId");
-    expect(names).toContain("internalHelper");
+    // Verify known symbols appear in the tree text
+    expect(text).toContain("greet");
+    expect(text).toContain("add");
+    expect(text).toContain("UserService");
+    expect(text).toContain("Config");
+    expect(text).toContain("Status");
+    expect(text).toContain("UserId");
+    expect(text).toContain("internalHelper");
 
-    // Verify structure of an entry
-    const greetEntry = result.entries.find((e: { name: string }) => e.name === "greet");
-    expect(greetEntry.kind).toBe("function");
-    expect(greetEntry.exported).toBe(true);
-    expect(greetEntry.range).toBeDefined();
-    expect(greetEntry.range.start_line).toBeDefined();
-    expect(greetEntry.range.end_line).toBeDefined();
+    // Verify kind abbreviations and exported markers
+    expect(text).toContain("E fn"); // exported function
+    expect(text).toContain("E cls"); // exported class
+    expect(text).toContain("- fn"); // internal function (internalHelper)
   });
 
   test("write tool creates a temp file and returns syntax_valid", async () => {

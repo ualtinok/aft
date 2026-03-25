@@ -100,7 +100,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return JSON.stringify(response);
+          return response.text as string;
         }
 
         if (Array.isArray(args.files) && args.files.length > 0) {
@@ -108,13 +108,13 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return JSON.stringify(response);
+          return response.text as string;
         }
         const response = await bridge.send("outline", { file: args.filePath });
         if (response.success === false) {
           throw new Error((response.message as string) || "outline failed");
         }
-        return JSON.stringify(response);
+        return response.text as string;
       },
     },
 
