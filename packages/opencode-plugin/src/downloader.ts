@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { error, log, warn } from "./logger.js";
 import { PLATFORM_ASSET_MAP } from "./platform.js";
 
-const REPO = "ualtinok/aft";
+const REPO = "cortexkit/aft";
 
 /** Get the cache directory, respecting XDG_CACHE_HOME / LOCALAPPDATA. */
 export function getCacheDir(): string {

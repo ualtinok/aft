@@ -73,7 +73,7 @@ describe("downloadBinary error paths", () => {
 
     expect(result.stdout).toBe("null");
     expect(result.stderr).toContain(
-      `Failed to download AFT binary: HTTP 502: Bad Gateway (https://github.com/ualtinok/aft/releases/download/v9.9.9/${currentAssetName})`,
+      `Failed to download AFT binary: HTTP 502: Bad Gateway (https://github.com/cortexkit/aft/releases/download/v9.9.9/${currentAssetName})`,
     );
   });
 

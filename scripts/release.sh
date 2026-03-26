@@ -114,4 +114,4 @@ echo ""
 
 echo "  ✓ Released $TAG"
 echo "  → GitHub Actions will now: test → build → publish"
-echo "  → Watch: https://github.com/ualtinok/aft/actions"
+echo "  → Watch: https://github.com/cortexkit/aft/actions"

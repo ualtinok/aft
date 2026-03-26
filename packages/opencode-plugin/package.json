@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ualtinok/aft"
+    "url": "https://github.com/cortexkit/aft"
   },
   "files": [
     "dist",
