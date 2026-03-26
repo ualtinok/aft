@@ -28,6 +28,9 @@ jobs:
       - name: Rust tests
         run: cargo test
 
+      - name: Build aft binary (needed for e2e tests)
+        run: cargo build -p agent-file-tools
+
       - name: Install JS dependencies
         run: bun install
 
