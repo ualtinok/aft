@@ -178,12 +178,21 @@ fn handle_glob_edit_match(
         }
 
         // Backup before mutation
-        if let Err(e) = edit::auto_backup(ctx, path, &format!("glob_edit_match: {}", match_str)) {
+        let validated_path = match validate_glob_edit_path(ctx, &req.id, path) {
+            Ok(validated) => validated,
+            Err(resp) => return resp,
+        };
+
+        if let Err(e) = edit::auto_backup(
+            ctx,
+            &validated_path,
+            &format!("glob_edit_match: {}", match_str),
+        ) {
             return Response::error(&req.id, e.code(), e.to_string());
         }
 
         // Write immediately (fast — no formatting yet)
-        if let Err(e) = std::fs::write(path, &new_source) {
+        if let Err(e) = std::fs::write(&validated_path, &new_source) {
             return Response::error(
                 &req.id,
                 "write_error",
@@ -192,7 +201,7 @@ fn handle_glob_edit_match(
         }
 
         pending.push(PendingEdit {
-            path: path.clone(),
+            path: validated_path,
 
             count,
         });
@@ -269,6 +278,14 @@ fn handle_glob_edit_match(
             "total_files": total_files,
         }),
     )
+}
+
+fn validate_glob_edit_path(
+    ctx: &AppContext,
+    req_id: &str,
+    path: &Path,
+) -> Result<std::path::PathBuf, Response> {
+    ctx.validate_path(req_id, path)
 }
 
 /// Handle a single-file edit_match (original behavior).

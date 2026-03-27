@@ -461,11 +461,11 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
 
     match run_external_tool(&cmd, &arg_refs, None, config.formatter_timeout_secs) {
         Ok(_) => {
-            log::error!("format: {} ({})", path.display(), cmd);
+            log::info!("format: {} ({})", path.display(), cmd);
             (true, None)
         }
         Err(FormatError::Timeout { .. }) => {
-            log::error!("format: {} (skipped: timeout)", path.display());
+            log::warn!("format: {} (skipped: timeout)", path.display());
             (false, Some("timeout".to_string()))
         }
         Err(FormatError::NotFound { .. }) => {

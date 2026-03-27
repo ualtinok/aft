@@ -76,7 +76,10 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     let mut parsed: Vec<ParsedOp> = Vec::with_capacity(operations.len());
     for (i, op) in operations.iter().enumerate() {
         match parse_operation(op, i) {
-            Ok(p) => parsed.push(p),
+            Ok(p) => match validate_operation_path(p, &req.id, ctx) {
+                Ok(validated) => parsed.push(validated),
+                Err(resp) => return resp,
+            },
             Err(msg) => return Response::error(&req.id, "invalid_request", msg),
         }
     }
@@ -122,8 +125,15 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
         let new_content = match compute_new_content(op) {
             Ok(c) => c,
             Err(msg) => {
-                rollback(ctx, &snapshotted_files, &new_files);
-                return transaction_error(&req.id, i, &snapshotted_files, &new_files, &msg);
+                let failures = rollback(ctx, &snapshotted_files, &new_files);
+                return transaction_error(
+                    &req.id,
+                    i,
+                    &snapshotted_files,
+                    &new_files,
+                    &msg,
+                    &failures,
+                );
             }
         };
 
@@ -146,13 +156,14 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
                 });
             }
             Err(e) => {
-                rollback(ctx, &snapshotted_files, &new_files);
+                let failures = rollback(ctx, &snapshotted_files, &new_files);
                 return transaction_error(
                     &req.id,
                     i,
                     &snapshotted_files,
                     &new_files,
                     &format!("write failed: {}", e),
+                    &failures,
                 );
             }
         }
@@ -161,13 +172,14 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     // --- Validate phase: check syntax_valid on all results ---
     for (i, result) in results.iter().enumerate() {
         if result.syntax_valid == Some(false) {
-            rollback(ctx, &snapshotted_files, &new_files);
+            let failures = rollback(ctx, &snapshotted_files, &new_files);
             return transaction_error(
                 &req.id,
                 i,
                 &snapshotted_files,
                 &new_files,
                 &format!("syntax error in {}", result.file),
+                &failures,
             );
         }
     }
@@ -202,6 +214,15 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
             "results": result_json,
         }),
     )
+}
+
+fn validate_operation_path(
+    mut op: ParsedOp,
+    req_id: &str,
+    ctx: &AppContext,
+) -> Result<ParsedOp, Response> {
+    op.file = ctx.validate_path(req_id, &op.file)?;
+    Ok(op)
 }
 
 /// Parse and validate a single operation object.
@@ -374,8 +395,22 @@ fn compute_new_content_dry(op: &ParsedOp, original: &str) -> Result<String, Stri
     }
 }
 
+/// Rollback failure information
+struct RollbackFailure {
+    file: String,
+    action: String,
+    error: String,
+}
+
 /// Rollback: restore snapshotted files (reverse order), delete new files.
-fn rollback(ctx: &AppContext, snapshotted: &[PathBuf], new_files: &[PathBuf]) {
+/// Returns a list of files that failed to rollback.
+fn rollback(
+    ctx: &AppContext,
+    snapshotted: &[PathBuf],
+    new_files: &[PathBuf],
+) -> Vec<RollbackFailure> {
+    let mut failures = Vec::new();
+
     // Restore snapshotted files in reverse order
     for path in snapshotted.iter().rev() {
         let result = {
@@ -383,11 +418,16 @@ fn rollback(ctx: &AppContext, snapshotted: &[PathBuf], new_files: &[PathBuf]) {
             store.restore_latest(path)
         };
         if let Err(e) = result {
-            log::debug!(
+            log::warn!(
                 "[aft] transaction rollback: failed to restore {}: {}",
                 path.display(),
                 e
             );
+            failures.push(RollbackFailure {
+                file: path.display().to_string(),
+                action: "restore".to_string(),
+                error: e.to_string(),
+            });
         }
     }
 
@@ -395,14 +435,21 @@ fn rollback(ctx: &AppContext, snapshotted: &[PathBuf], new_files: &[PathBuf]) {
     for path in new_files {
         if path.exists() {
             if let Err(e) = std::fs::remove_file(path) {
-                log::debug!(
+                log::warn!(
                     "[aft] transaction rollback: failed to delete new file {}: {}",
                     path.display(),
                     e
                 );
+                failures.push(RollbackFailure {
+                    file: path.display().to_string(),
+                    action: "delete".to_string(),
+                    error: e.to_string(),
+                });
             }
         }
     }
+
+    failures
 }
 
 /// Build the structured error response for a failed transaction.
@@ -412,6 +459,7 @@ fn transaction_error(
     snapshotted: &[PathBuf],
     new_files: &[PathBuf],
     message: &str,
+    rollback_failures: &[RollbackFailure],
 ) -> Response {
     let mut rolled_back: Vec<serde_json::Value> = snapshotted
         .iter()
@@ -432,13 +480,21 @@ fn transaction_error(
         rolled_back.len()
     );
 
-    Response::error_with_data(
-        req_id,
-        "transaction_failed",
-        message,
-        serde_json::json!({
-            "failed_operation": failed_index,
-            "rolled_back": rolled_back,
-        }),
-    )
+    let mut data = serde_json::json!({
+        "failed_operation": failed_index,
+        "rolled_back": rolled_back,
+    });
+
+    if !rollback_failures.is_empty() {
+        data["rollback_failures"] = serde_json::json!(rollback_failures
+            .iter()
+            .map(|f| serde_json::json!({
+                "file": f.file,
+                "action": f.action,
+                "error": f.error,
+            }))
+            .collect::<Vec<_>>());
+    }
+
+    Response::error_with_data(req_id, "transaction_failed", message, data)
 }

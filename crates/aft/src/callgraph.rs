@@ -11,6 +11,7 @@ use serde::Serialize;
 use tree_sitter::{Parser, Tree};
 
 use crate::calls::extract_calls_full;
+use crate::edit::line_col_to_byte;
 use crate::error::AftError;
 use crate::imports::{self, ImportBlock};
 use crate::language::LanguageProvider;
@@ -2064,18 +2065,6 @@ fn list_symbols_from_tree(
             .collect(),
         Err(_) => vec![],
     }
-}
-
-/// Convert a 0-based line + column to a byte offset in the source.
-fn line_col_to_byte(source: &str, line: u32, col: u32) -> usize {
-    let mut byte = 0;
-    for (i, l) in source.lines().enumerate() {
-        if i == line as usize {
-            return byte + (col as usize).min(l.len());
-        }
-        byte += l.len() + 1;
-    }
-    source.len()
 }
 
 /// Get symbol metadata (line, signature) from a file.

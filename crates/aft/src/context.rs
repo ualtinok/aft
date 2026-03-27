@@ -1,5 +1,5 @@
 use std::cell::{Ref, RefCell, RefMut};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 
 use notify::RecommendedWatcher;
@@ -10,6 +10,26 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
+
+/// Normalize a path by resolving `.` and `..` components lexically,
+/// without touching the filesystem. This prevents path traversal
+/// attacks when `fs::canonicalize` fails (e.g. for non-existent paths).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                // Pop the last component unless we're at root or have no components
+                if !result.pop() {
+                    result.push(component);
+                }
+            }
+            Component::CurDir => {} // Skip `.`
+            _ => result.push(component),
+        }
+    }
+    result
+}
 
 /// Shared application context threaded through all command handlers.
 ///
@@ -196,15 +216,17 @@ impl AppContext {
 
         // Resolve the path (follow symlinks, normalize ..)
         let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| {
-            // For new files that don't exist yet, resolve parent + filename
+            // For new files that don't exist yet, resolve parent + filename.
+            // We must fully normalize '..' components to prevent path traversal
+            // (e.g. `root/../outside/file.ts` would lexically pass starts_with).
             if let Some(parent) = path.parent() {
                 let resolved_parent =
-                    std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                    std::fs::canonicalize(parent).unwrap_or_else(|_| normalize_path(parent));
                 if let Some(name) = path.file_name() {
                     return resolved_parent.join(name);
                 }
             }
-            path.to_path_buf()
+            normalize_path(path)
         });
 
         let resolved_root = std::fs::canonicalize(&root).unwrap_or(root);

@@ -16,17 +16,38 @@ use crate::parser::{detect_language, grammar_for, FileParser};
 /// Tree-sitter columns are byte-indexed within the line, so `col` is a byte
 /// offset from the start of the line (not a character offset).
 ///
+/// Scans raw bytes so both LF and CRLF line endings are counted correctly.
 /// Returns `source.len()` if line is beyond the end of the file.
 pub fn line_col_to_byte(source: &str, line: u32, col: u32) -> usize {
-    let mut byte = 0;
-    for (i, l) in source.lines().enumerate() {
-        if i == line as usize {
-            return byte + (col as usize).min(l.len());
+    let bytes = source.as_bytes();
+    let target_line = line as usize;
+    let mut current_line = 0usize;
+    let mut line_start = 0usize;
+
+    loop {
+        let mut line_end = line_start;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' && bytes[line_end] != b'\r' {
+            line_end += 1;
         }
-        byte += l.len() + 1; // +1 for the newline character
+
+        if current_line == target_line {
+            return line_start + (col as usize).min(line_end.saturating_sub(line_start));
+        }
+
+        if line_end >= bytes.len() {
+            return source.len();
+        }
+
+        line_start = if bytes[line_end] == b'\r'
+            && line_end + 1 < bytes.len()
+            && bytes[line_end + 1] == b'\n'
+        {
+            line_end + 2
+        } else {
+            line_end + 1
+        };
+        current_line += 1;
     }
-    // If we run out of lines, clamp to source length.
-    source.len()
 }
 
 /// Replace bytes in `[start..end)` with `replacement`.
@@ -377,6 +398,16 @@ mod tests {
         let source = "ab\ncd";
         // col=10 on a 2-char line should clamp to 2
         assert_eq!(line_col_to_byte(source, 0, 10), 2);
+    }
+
+    #[test]
+    fn line_col_to_byte_crlf() {
+        let source = "abc\r\ndef\r\nghi\r\n";
+        assert_eq!(line_col_to_byte(source, 0, 0), 0);
+        assert_eq!(line_col_to_byte(source, 0, 10), 3);
+        assert_eq!(line_col_to_byte(source, 1, 0), 5);
+        assert_eq!(line_col_to_byte(source, 1, 3), 8);
+        assert_eq!(line_col_to_byte(source, 2, 0), 10);
     }
 
     // --- replace_byte_range ---

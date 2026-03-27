@@ -181,13 +181,19 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
                 "replacements": replacement_count,
             }));
         } else {
+            let validated_path = match validate_matched_file_path(ctx, &req.id, file_path.as_path())
+            {
+                Ok(path) => path,
+                Err(resp) => return resp,
+            };
+
             let backup_id = ctx
                 .backup()
                 .borrow_mut()
-                .snapshot(file_path.as_path(), "ast_replace")
+                .snapshot(validated_path.as_path(), "ast_replace")
                 .ok();
 
-            match std::fs::write(file_path.as_path(), &new_content) {
+            match std::fs::write(validated_path.as_path(), &new_content) {
                 Ok(()) => {
                     let mut entry = serde_json::json!({
                         "file": file_path.display().to_string(),
@@ -222,6 +228,14 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
             "dry_run": dry_run,
         }),
     )
+}
+
+fn validate_matched_file_path(
+    ctx: &AppContext,
+    req_id: &str,
+    file_path: &Path,
+) -> Result<PathBuf, Response> {
+    ctx.validate_path(req_id, file_path)
 }
 
 fn collect_files(

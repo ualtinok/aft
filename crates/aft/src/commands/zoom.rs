@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::context::AppContext;
+use crate::edit::line_col_to_byte;
 use crate::lsp_hints;
 use crate::parser::{FileParser, LangId};
 use crate::protocol::{RawRequest, Response};
@@ -394,18 +395,6 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
             format!("zoom: failed to serialize response: {err}"),
         ),
     }
-}
-
-/// Convert a 0-based line + column to a byte offset in the source.
-fn line_col_to_byte(source: &str, line: u32, col: u32) -> usize {
-    let mut byte = 0;
-    for (i, l) in source.lines().enumerate() {
-        if i == line as usize {
-            return byte + (col as usize).min(l.len());
-        }
-        byte += l.len() + 1; // +1 for newline
-    }
-    source.len()
 }
 
 /// Extract call expression names within a byte range of the AST.

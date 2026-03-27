@@ -235,6 +235,8 @@ fn line_col_to_byte_lsp(source: &str, line: u32, character: u32) -> usize {
     let target_line = line as usize;
     let mut line_start = 0;
 
+    // Keep the UTF-16 conversion local, but preserve raw newline bytes by iterating
+    // split_inclusive('\n') segments instead of source.lines(); that keeps CRLF offsets accurate.
     for (index, segment) in source.split_inclusive('\n').enumerate() {
         let line_text = segment.strip_suffix('\n').unwrap_or(segment);
         if index == target_line {

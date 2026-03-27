@@ -150,7 +150,7 @@ pub fn handle_lsp_rename(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    match apply_workspace_edit(&workspace_edit, ctx) {
+    match apply_workspace_edit(&workspace_edit, ctx, &req.id) {
         Ok(changes) => {
             let total_files = changes.len();
             let total_edits: usize = changes.iter().map(|change| change.edits).sum();
@@ -174,39 +174,51 @@ pub fn handle_lsp_rename(req: &RawRequest, ctx: &AppContext) -> Response {
                 }),
             )
         }
-        Err(err) => Response::error(&req.id, "lsp_error", format!("rename failed: {err}")),
+        Err(resp) => resp,
     }
 }
 
 fn apply_workspace_edit(
     edit: &WorkspaceEdit,
     ctx: &AppContext,
-) -> Result<Vec<FileChange>, LspError> {
-    let file_changes = collect_workspace_edit_changes(edit)?;
+    req_id: &str,
+) -> Result<Vec<FileChange>, Response> {
+    let file_changes = collect_workspace_edit_changes(edit, ctx, req_id)?;
     if file_changes.is_empty() {
-        return Err(LspError::NotFound(
-            "workspace edit did not contain any text edits".to_string(),
+        return Err(Response::error(
+            req_id,
+            "lsp_error",
+            "rename failed: workspace edit did not contain any text edits",
         ));
     }
 
-    let snapshotted = snapshot_affected_files(&file_changes, ctx)?;
+    let snapshotted = snapshot_affected_files(&file_changes, ctx)
+        .map_err(|err| Response::error(req_id, "lsp_error", format!("rename failed: {err}")))?;
     let result = apply_collected_changes(&file_changes, ctx);
 
-    if result.is_err() {
-        rollback_rename(ctx, &snapshotted);
+    match result {
+        Ok(changes) => Ok(changes),
+        Err(err) => {
+            rollback_rename(ctx, &snapshotted);
+            Err(Response::error(
+                req_id,
+                "lsp_error",
+                format!("rename failed: {err}"),
+            ))
+        }
     }
-
-    result
 }
 
 fn collect_workspace_edit_changes(
     edit: &WorkspaceEdit,
-) -> Result<BTreeMap<PathBuf, Vec<PendingTextEdit>>, LspError> {
+    ctx: &AppContext,
+    req_id: &str,
+) -> Result<BTreeMap<PathBuf, Vec<PendingTextEdit>>, Response> {
     let mut file_changes: BTreeMap<PathBuf, Vec<PendingTextEdit>> = BTreeMap::new();
 
     if let Some(changes) = &edit.changes {
         for (uri, edits) in changes {
-            let path = path_for_uri(uri)?;
+            let path = path_for_uri(uri, ctx, req_id)?;
             let entry = file_changes.entry(path).or_default();
             for text_edit in edits {
                 entry.push(PendingTextEdit {
@@ -225,7 +237,7 @@ fn collect_workspace_edit_changes(
         match document_changes {
             DocumentChanges::Edits(edits) => {
                 for document_edit in edits {
-                    let path = path_for_uri(&document_edit.text_document.uri)?;
+                    let path = path_for_uri(&document_edit.text_document.uri, ctx, req_id)?;
                     let entry = file_changes.entry(path).or_default();
                     for edit in &document_edit.edits {
                         match edit {
@@ -245,7 +257,7 @@ fn collect_workspace_edit_changes(
                 for operation in ops {
                     match operation {
                         DocumentChangeOperation::Edit(document_edit) => {
-                            let path = path_for_uri(&document_edit.text_document.uri)?;
+                            let path = path_for_uri(&document_edit.text_document.uri, ctx, req_id)?;
                             let entry = file_changes.entry(path).or_default();
                             for edit in &document_edit.edits {
                                 match edit {
@@ -261,8 +273,10 @@ fn collect_workspace_edit_changes(
                             }
                         }
                         DocumentChangeOperation::Op(_) => {
-                            return Err(LspError::NotFound(
-                                "workspace edit contains unsupported file operation".to_string(),
+                            return Err(Response::error(
+                                req_id,
+                                "lsp_error",
+                                "rename failed: workspace edit contains unsupported file operation",
                             ));
                         }
                     }
@@ -345,19 +359,26 @@ fn compare_ranges_desc(left: &Range, right: &Range) -> std::cmp::Ordering {
         .then(right.end.character.cmp(&left.end.character))
 }
 
-fn path_for_uri(uri: &lsp_types::Uri) -> Result<PathBuf, LspError> {
-    uri_to_path(uri).ok_or_else(|| {
-        LspError::NotFound(format!(
-            "failed to resolve file path from URI '{}'",
-            uri.as_str()
-        ))
-    })
+fn path_for_uri(uri: &lsp_types::Uri, ctx: &AppContext, req_id: &str) -> Result<PathBuf, Response> {
+    let path = uri_to_path(uri).ok_or_else(|| {
+        Response::error(
+            req_id,
+            "lsp_error",
+            format!(
+                "rename failed: failed to resolve file path from URI '{}'",
+                uri.as_str()
+            ),
+        )
+    })?;
+    ctx.validate_path(req_id, &path)
 }
 
 fn line_col_to_byte_lsp(source: &str, line: u32, character: u32) -> Result<usize, LspError> {
     let target_line = line as usize;
     let mut line_start = 0;
 
+    // Keep the UTF-16 conversion local, but preserve raw newline bytes by iterating
+    // split_inclusive('\n') segments instead of source.lines(); that keeps CRLF offsets accurate.
     for (index, segment) in source.split_inclusive('\n').enumerate() {
         let line_text = segment.strip_suffix('\n').unwrap_or(segment);
         if index == target_line {

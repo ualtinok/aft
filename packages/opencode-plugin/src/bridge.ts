@@ -49,6 +49,7 @@ export class BinaryBridge {
   private timeoutMs: number;
   private maxRestarts: number;
   private configured = false;
+  private _configureDepth = 0;
   private configOverrides: Record<string, unknown>;
   private minVersion: string | undefined;
   private onVersionMismatch: ((binaryVersion: string, minVersion: string) => void) | undefined;
@@ -92,22 +93,36 @@ export class BinaryBridge {
 
     this.ensureSpawned();
 
-    // Auto-configure project root + plugin config on first command, then check version
+    // Auto-configure project root + plugin config on first command, then check version.
+    // configured is set AFTER success to prevent skipping configuration on failure (#18).
+    // Recursion depth is guarded to prevent infinite loops on repeated version mismatches (#9).
     if (!this.configured) {
-      this.configured = true;
       if (command !== "configure" && command !== "version") {
-        await this.send("configure", {
-          project_root: this.cwd,
-          ...this.configOverrides,
-        });
-        await this.checkVersion();
+        this._configureDepth = (this._configureDepth ?? 0) + 1;
+        if (this._configureDepth > 3) {
+          this._configureDepth = 0;
+          throw new Error("[aft-plugin] Failed to configure bridge after 3 attempts");
+        }
+        try {
+          await this.send("configure", {
+            project_root: this.cwd,
+            ...this.configOverrides,
+          });
+          await this.checkVersion();
+        } catch (err) {
+          // Configure failed — leave configured=false so next call retries
+          this._configureDepth = 0;
+          throw err;
+        }
 
         // Version check may have triggered a hot-swap (replaceBinary kills the process).
         // If the bridge died, re-spawn and re-configure before proceeding.
         if (!this.isAlive()) {
-          this.configured = false;
           return this.send(command, params);
         }
+
+        this.configured = true;
+        this._configureDepth = 0;
       }
     }
 

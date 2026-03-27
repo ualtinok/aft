@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use crate::context::AppContext;
-use crate::edit;
+use crate::edit::{self, line_col_to_byte};
 use crate::protocol::{RawRequest, Response};
 
 /// A validated edit ready to apply, carrying byte offsets into the original content.
@@ -381,7 +381,7 @@ fn resolve_edit(
                     == Some(0)
                 && line_start > line_end)
         {
-            let byte_pos = line_byte_offset(source, line_start);
+            let byte_pos = line_col_to_byte(source, line_start as u32, 0);
             let mut replacement_str = content.to_string();
             if !replacement_str.ends_with('\n') {
                 replacement_str.push('\n');
@@ -401,9 +401,9 @@ fn resolve_edit(
         };
 
         // Convert line range to byte offsets
-        let byte_start = line_byte_offset(source, line_start);
+        let byte_start = line_col_to_byte(source, line_start as u32, 0);
         // line_end is inclusive: end byte is at the end of line_end (including its newline if present)
-        let byte_end = line_end_byte_offset(source, line_end);
+        let byte_end = line_col_to_byte(source, line_end.saturating_add(1) as u32, 0);
 
         // Empty content = delete lines entirely (no trailing newline added)
         // Non-empty content = if the replaced range had a trailing newline, auto-append
@@ -433,34 +433,4 @@ fn resolve_edit(
             ),
         ))
     }
-}
-
-/// Get the byte offset of the start of a line (0-indexed).
-fn line_byte_offset(source: &str, line: usize) -> usize {
-    let mut offset = 0;
-    for (i, l) in source.lines().enumerate() {
-        if i == line {
-            return offset;
-        }
-        offset += l.len() + 1; // +1 for newline
-    }
-    source.len()
-}
-
-/// Get the byte offset of the end of a line (0-indexed, inclusive).
-/// Includes the trailing newline if present, so the replaced range covers the full line.
-fn line_end_byte_offset(source: &str, line: usize) -> usize {
-    let mut offset = 0;
-    for (i, l) in source.lines().enumerate() {
-        offset += l.len();
-        if i == line {
-            // Include trailing newline if it exists
-            if offset < source.len() && source.as_bytes()[offset] == b'\n' {
-                offset += 1;
-            }
-            return offset;
-        }
-        offset += 1; // newline
-    }
-    source.len()
 }

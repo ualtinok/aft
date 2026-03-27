@@ -91,15 +91,17 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Move the file
+    let mut source_delete_failed = false;
     if let Err(e) = std::fs::rename(src_path, dst_path) {
         // rename() can fail across filesystems — fallback to copy+delete
         match std::fs::copy(src_path, dst_path) {
             Ok(_) => {
                 if let Err(e2) = std::fs::remove_file(src_path) {
-                    log::debug!(
+                    log::warn!(
                         "[aft] move_file: copied but failed to remove source: {}",
                         e2
                     );
+                    source_delete_failed = true;
                 }
             }
             Err(_) => {
@@ -117,8 +119,12 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
     let mut result = serde_json::json!({
         "file": file,
         "destination": destination,
-        "moved": true,
+        "moved": !source_delete_failed,
     });
+
+    if source_delete_failed {
+        result["warning"] = serde_json::json!("source file could not be deleted after copy");
+    }
 
     if let Some(ref id) = backup_id {
         result["backup_id"] = serde_json::json!(id);

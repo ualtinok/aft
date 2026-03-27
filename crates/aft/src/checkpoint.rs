@@ -105,6 +105,18 @@ impl CheckpointStore {
         })
     }
 
+    /// Return the file paths stored for a checkpoint.
+    pub fn file_paths(&self, name: &str) -> Result<Vec<PathBuf>, AftError> {
+        let checkpoint =
+            self.checkpoints
+                .get(name)
+                .ok_or_else(|| AftError::CheckpointNotFound {
+                    name: name.to_string(),
+                })?;
+
+        Ok(checkpoint.file_contents.keys().cloned().collect())
+    }
+
     /// List all checkpoints with metadata.
     pub fn list(&self) -> Vec<CheckpointInfo> {
         self.checkpoints

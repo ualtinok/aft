@@ -87,7 +87,9 @@ impl LspClient {
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            // Use null() instead of piped() to prevent deadlock when the server
+            // writes more than ~64KB to stderr (piped buffer fills, server blocks)
+            .stderr(Stdio::null())
             .spawn()?;
 
         let stdout = child
