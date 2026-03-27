@@ -107,26 +107,34 @@ export async function downloadBinary(version?: string): Promise<string | null> {
 
     const arrayBuffer = await binaryResponse.arrayBuffer();
 
-    // Verify checksum if available
-    if (checksumResponse.ok) {
-      const checksumText = await checksumResponse.text();
-      const expectedHash = parseChecksumForAsset(checksumText, assetName);
-      if (expectedHash) {
-        const { createHash } = await import("node:crypto");
-        const actualHash = createHash("sha256").update(Buffer.from(arrayBuffer)).digest("hex");
-        if (actualHash !== expectedHash) {
-          throw new Error(
-            `Checksum mismatch for ${assetName}: expected ${expectedHash}, got ${actualHash}. ` +
-              "The binary may have been tampered with.",
-          );
-        }
-        log(`Checksum verified (SHA-256: ${actualHash.slice(0, 16)}...)`);
-      } else {
-        warn(`Warning: checksums.sha256 found but no entry for ${assetName}`);
-      }
-    } else {
-      warn(`Warning: no checksums.sha256 found for ${tag}, skipping verification`);
+    // Verify checksum - MANDATORY for security
+    if (!checksumResponse.ok) {
+      warn(
+        `Checksum verification failed: no checksums.sha256 found for ${tag}. ` +
+          "Binary download aborted for security reasons.",
+      );
+      return null;
     }
+
+    const checksumText = await checksumResponse.text();
+    const expectedHash = parseChecksumForAsset(checksumText, assetName);
+    if (!expectedHash) {
+      warn(
+        `Checksum verification failed: checksums.sha256 found but no entry for ${assetName}. ` +
+          "Binary download aborted for security reasons.",
+      );
+      return null;
+    }
+
+    const { createHash } = await import("node:crypto");
+    const actualHash = createHash("sha256").update(Buffer.from(arrayBuffer)).digest("hex");
+    if (actualHash !== expectedHash) {
+      throw new Error(
+        `Checksum mismatch for ${assetName}: expected ${expectedHash}, got ${actualHash}. ` +
+          "The binary may have been tampered with.",
+      );
+    }
+    log(`Checksum verified (SHA-256: ${actualHash.slice(0, 16)}...)`);
 
     // Write to a temp file first, then rename (atomic-ish)
     const tmpPath = `${binaryPath}.tmp`;

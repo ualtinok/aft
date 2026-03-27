@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tree_sitter::{Parser, Tree};
@@ -21,6 +22,10 @@ use crate::symbols::SymbolKind;
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
+
+type SharedPath = Arc<PathBuf>;
+type SharedStr = Arc<str>;
+type ReverseIndex = HashMap<PathBuf, HashMap<String, Vec<IndexedCallerSite>>>;
 
 /// A single call site within a function body.
 #[derive(Debug, Clone)]
@@ -86,6 +91,15 @@ pub struct CallerSite {
     pub col: u32,
     /// Whether the edge was resolved via import chain.
     pub resolved: bool,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedCallerSite {
+    caller_file: SharedPath,
+    caller_symbol: SharedStr,
+    line: u32,
+    col: u32,
+    resolved: bool,
 }
 
 /// A group of callers from a single file.
@@ -472,9 +486,9 @@ pub struct CallGraph {
     project_root: PathBuf,
     /// All files discovered in the worktree (lazily populated).
     project_files: Option<Vec<PathBuf>>,
-    /// Reverse index: (target_file, target_symbol) → callers.
+    /// Reverse index: target_file → target_symbol → callers.
     /// Built lazily on first `callers_of` call, cleared on `invalidate_file`.
-    reverse_index: Option<HashMap<(PathBuf, String), Vec<CallerSite>>>,
+    reverse_index: Option<ReverseIndex>,
 }
 
 impl CallGraph {
@@ -493,35 +507,16 @@ impl CallGraph {
         &self.project_root
     }
 
-    /// Get or build the call data for a file.
-    pub fn build_file(&mut self, path: &Path) -> Result<&FileCallData, AftError> {
-        let canon = self.canonicalize(path)?;
-
-        if !self.data.contains_key(&canon) {
-            let file_data = build_file_data(&canon)?;
-            self.data.insert(canon.clone(), file_data);
-        }
-
-        Ok(&self.data[&canon])
-    }
-
-    /// Resolve a cross-file call edge.
-    ///
-    /// Given a callee expression and the calling file's import block,
-    /// determines which file and symbol the call targets.
-    pub fn resolve_cross_file_edge(
-        &mut self,
+    fn resolve_cross_file_edge_with_exports<F>(
         full_callee: &str,
         short_name: &str,
         caller_file: &Path,
         import_block: &ImportBlock,
-    ) -> EdgeResolution {
-        // Strategy:
-        // 1. Check if the callee matches a namespace import (utils.foo → import * as utils)
-        // 2. Check if the callee matches a named import (foo → import { foo } from './mod')
-        // 3. Check if the callee matches an aliased import (bar → import { foo as bar } from './mod')
-        // 4. Check if the callee matches a default import
-
+        mut file_exports_symbol: F,
+    ) -> EdgeResolution
+    where
+        F: FnMut(&Path, &str) -> bool,
+    {
         let caller_dir = caller_file.parent().unwrap_or(Path::new("."));
 
         // Check namespace imports: "utils.foo" where utils is a namespace import
@@ -538,7 +533,7 @@ impl CallGraph {
                         {
                             return EdgeResolution::Resolved {
                                 file: resolved_path,
-                                symbol: member.to_string(),
+                                symbol: member.to_owned(),
                             };
                         }
                     }
@@ -549,12 +544,12 @@ impl CallGraph {
         // Check named imports (direct and aliased)
         for imp in &import_block.imports {
             // Direct named import: import { foo } from './utils'
-            if imp.names.contains(&short_name.to_string()) {
+            if imp.names.iter().any(|name| name == short_name) {
                 if let Some(resolved_path) = resolve_module_path(caller_dir, &imp.module_path) {
                     // The name in the import is the original name from the source module
                     return EdgeResolution::Resolved {
                         file: resolved_path,
-                        symbol: short_name.to_string(),
+                        symbol: short_name.to_owned(),
                     };
                 }
             }
@@ -564,7 +559,7 @@ impl CallGraph {
                 if let Some(resolved_path) = resolve_module_path(caller_dir, &imp.module_path) {
                     return EdgeResolution::Resolved {
                         file: resolved_path,
-                        symbol: "default".to_string(),
+                        symbol: "default".to_owned(),
                     };
                 }
             }
@@ -591,33 +586,71 @@ impl CallGraph {
                 if resolved_path.is_dir() {
                     if let Some(index_path) = find_index_file(&resolved_path) {
                         // Check if the index file exports this symbol
-                        if self.file_exports_symbol(&index_path, short_name) {
+                        if file_exports_symbol(&index_path, short_name) {
                             return EdgeResolution::Resolved {
                                 file: index_path,
-                                symbol: short_name.to_string(),
+                                symbol: short_name.to_owned(),
                             };
                         }
                     }
-                } else if self.file_exports_symbol(&resolved_path, short_name) {
+                } else if file_exports_symbol(&resolved_path, short_name) {
                     return EdgeResolution::Resolved {
                         file: resolved_path,
-                        symbol: short_name.to_string(),
+                        symbol: short_name.to_owned(),
                     };
                 }
             }
         }
 
         EdgeResolution::Unresolved {
-            callee_name: short_name.to_string(),
+            callee_name: short_name.to_owned(),
         }
+    }
+
+    /// Get or build the call data for a file.
+    pub fn build_file(&mut self, path: &Path) -> Result<&FileCallData, AftError> {
+        let canon = self.canonicalize(path)?;
+
+        if !self.data.contains_key(&canon) {
+            let file_data = build_file_data(&canon)?;
+            self.data.insert(canon.clone(), file_data);
+        }
+
+        Ok(&self.data[&canon])
+    }
+
+    /// Resolve a cross-file call edge.
+    ///
+    /// Given a callee expression and the calling file's import block,
+    /// determines which file and symbol the call targets.
+    pub fn resolve_cross_file_edge(
+        &mut self,
+        full_callee: &str,
+        short_name: &str,
+        caller_file: &Path,
+        import_block: &ImportBlock,
+    ) -> EdgeResolution {
+        Self::resolve_cross_file_edge_with_exports(
+            full_callee,
+            short_name,
+            caller_file,
+            import_block,
+            |path, symbol_name| self.file_exports_symbol(path, symbol_name),
+        )
     }
 
     /// Check if a file exports a given symbol name.
     fn file_exports_symbol(&mut self, path: &Path, symbol_name: &str) -> bool {
         match self.build_file(path) {
-            Ok(data) => data.exported_symbols.contains(&symbol_name.to_string()),
+            Ok(data) => data.exported_symbols.iter().any(|name| name == symbol_name),
             Err(_) => false,
         }
+    }
+
+    fn file_exports_symbol_cached(&self, path: &Path, symbol_name: &str) -> bool {
+        self.lookup_file_data(path)
+            .map(|data| data.exported_symbols.iter().any(|name| name == symbol_name))
+            .unwrap_or(false)
     }
 
     /// Depth-limited forward call tree traversal.
@@ -762,70 +795,70 @@ impl CallGraph {
 
         // Build file data for all project files
         for f in &all_files {
-            if !self.data.contains_key(f) {
-                if let Ok(fd) = build_file_data(f) {
-                    self.data.insert(f.clone(), fd);
-                }
-            }
+            let _ = self.build_file(f);
         }
 
         // Now build the reverse map
-        let mut reverse: HashMap<(PathBuf, String), Vec<CallerSite>> = HashMap::new();
+        let mut reverse: ReverseIndex = HashMap::new();
 
         for caller_file in &all_files {
             // Canonicalize the caller file path for consistent lookups
-            let canon_caller =
-                std::fs::canonicalize(caller_file).unwrap_or_else(|_| caller_file.clone());
+            let canon_caller = Arc::new(
+                std::fs::canonicalize(caller_file).unwrap_or_else(|_| caller_file.clone()),
+            );
             let file_data = match self
                 .data
                 .get(caller_file)
-                .or_else(|| self.data.get(&canon_caller))
+                .or_else(|| self.data.get(canon_caller.as_ref()))
             {
-                Some(d) => d.clone(),
+                Some(d) => d,
                 None => continue,
             };
 
             for (symbol_name, call_sites) in &file_data.calls_by_symbol {
+                let caller_symbol: SharedStr = Arc::from(symbol_name.as_str());
+
                 for call_site in call_sites {
-                    let edge = self.resolve_cross_file_edge(
+                    let edge = Self::resolve_cross_file_edge_with_exports(
                         &call_site.full_callee,
                         &call_site.callee_name,
-                        caller_file,
+                        canon_caller.as_ref(),
                         &file_data.import_block,
+                        |path, symbol_name| self.file_exports_symbol_cached(path, symbol_name),
                     );
 
-                    match edge {
-                        EdgeResolution::Resolved {
-                            file: ref target_file,
-                            ref symbol,
-                        } => {
-                            let key = (target_file.clone(), symbol.clone());
-                            reverse.entry(key).or_default().push(CallerSite {
-                                caller_file: canon_caller.clone(),
-                                caller_symbol: symbol_name.clone(),
-                                line: call_site.line,
-                                col: 0,
-                                resolved: true,
-                            });
+                    let (target_file, target_symbol, resolved) = match edge {
+                        EdgeResolution::Resolved { file, symbol } => (file, symbol, true),
+                        EdgeResolution::Unresolved { callee_name } => {
+                            (canon_caller.as_ref().clone(), callee_name, false)
                         }
-                        EdgeResolution::Unresolved { ref callee_name } => {
-                            // For unresolved edges, index by (caller_file, callee_name)
-                            // so same-file calls are still findable
-                            let key = (canon_caller.clone(), callee_name.clone());
-                            reverse.entry(key).or_default().push(CallerSite {
-                                caller_file: canon_caller.clone(),
-                                caller_symbol: symbol_name.clone(),
-                                line: call_site.line,
-                                col: 0,
-                                resolved: false,
-                            });
-                        }
-                    }
+                    };
+
+                    reverse
+                        .entry(target_file)
+                        .or_default()
+                        .entry(target_symbol)
+                        .or_default()
+                        .push(IndexedCallerSite {
+                            caller_file: Arc::clone(&canon_caller),
+                            caller_symbol: Arc::clone(&caller_symbol),
+                            line: call_site.line,
+                            col: 0,
+                            resolved,
+                        });
                 }
             }
         }
 
         self.reverse_index = Some(reverse);
+    }
+
+    fn reverse_sites(&self, file: &Path, symbol: &str) -> Option<&[IndexedCallerSite]> {
+        self.reverse_index
+            .as_ref()?
+            .get(file)?
+            .get(symbol)
+            .map(Vec::as_slice)
     }
 
     /// Get callers of a symbol in a file, grouped by calling file.
@@ -864,18 +897,25 @@ impl CallGraph {
         );
 
         // Group by file
+
         let mut groups_map: HashMap<PathBuf, Vec<CallerEntry>> = HashMap::new();
-        for site in &all_sites {
-            groups_map
-                .entry(site.caller_file.clone())
-                .or_default()
-                .push(CallerEntry {
-                    symbol: site.caller_symbol.clone(),
-                    line: site.line,
-                });
+        let total_callers = all_sites.len();
+        for site in all_sites {
+            let caller_file: PathBuf = site.caller_file;
+            let caller_symbol: String = site.caller_symbol;
+            let line = site.line;
+            let entry = CallerEntry {
+                symbol: caller_symbol,
+                line,
+            };
+
+            if let Some(entries) = groups_map.get_mut(&caller_file) {
+                entries.push(entry);
+            } else {
+                groups_map.insert(caller_file, vec![entry]);
+            }
         }
 
-        let total_callers = all_sites.len();
         let mut callers: Vec<CallerGroup> = groups_map
             .into_iter()
             .map(|(file_path, entries)| CallerGroup {
@@ -919,15 +959,14 @@ impl CallGraph {
 
         let target_rel = self.relative_path(&canon);
         let effective_max = if max_depth == 0 { 10 } else { max_depth };
-        let reverse_index = self
-            .reverse_index
-            .as_ref()
-            .ok_or_else(|| AftError::ParseError {
+        if self.reverse_index.is_none() {
+            return Err(AftError::ParseError {
                 message: format!(
                     "reverse index unavailable after building callers for {}",
                     canon.display()
                 ),
-            })?;
+            });
+        }
 
         // Get line/signature for the target symbol
         let (target_line, target_sig) = get_symbol_meta(&canon, symbol);
@@ -943,14 +982,18 @@ impl CallGraph {
 
         // BFS state: each item is a partial path (bottom-up, will be reversed later)
         // Each path element: (canonicalized file, symbol name, line, signature)
-        type PathElem = (PathBuf, String, u32, Option<String>);
+        type PathElem = (SharedPath, SharedStr, u32, Option<String>);
         let mut complete_paths: Vec<Vec<PathElem>> = Vec::new();
         let mut max_depth_reached = false;
         let mut truncated_paths: usize = 0;
 
         // Initial path starts at the target
-        let initial: Vec<PathElem> =
-            vec![(canon.clone(), symbol.to_string(), target_line, target_sig)];
+        let initial: Vec<PathElem> = vec![(
+            Arc::new(canon.clone()),
+            Arc::from(symbol),
+            target_line,
+            target_sig,
+        )];
 
         // If the target itself is an entry point, record it as a trivial path
         if target_is_entry {
@@ -966,20 +1009,13 @@ impl CallGraph {
                 continue;
             }
 
-            let Some((current_file, current_symbol, _, _)) = path.last().cloned() else {
+            let Some((current_file, current_symbol, _, _)) = path.last() else {
                 continue;
             };
 
-            // Build per-path visited set from path elements
-            let path_visited: HashSet<(PathBuf, String)> = path
-                .iter()
-                .map(|(f, s, _, _)| (f.clone(), s.clone()))
-                .collect();
-
             // Look up callers in reverse index
-            let lookup_key = (current_file.clone(), current_symbol.clone());
-            let callers = match reverse_index.get(&lookup_key) {
-                Some(sites) => sites.clone(),
+            let callers = match self.reverse_sites(current_file.as_ref(), current_symbol.as_ref()) {
+                Some(sites) => sites,
                 None => {
                     // Dead end: no callers and not an entry point
                     // (if it were an entry point, we'd have recorded it already)
@@ -993,11 +1029,12 @@ impl CallGraph {
             };
 
             let mut has_new_path = false;
-            for site in &callers {
-                let caller_key = (site.caller_file.clone(), site.caller_symbol.clone());
-
+            for site in callers {
                 // Cycle detection: skip if this caller is already in the current path
-                if path_visited.contains(&caller_key) {
+                if path.iter().any(|(file_path, sym, _, _)| {
+                    file_path.as_ref() == site.caller_file.as_ref()
+                        && sym.as_ref() == site.caller_symbol.as_ref()
+                }) {
                     continue;
                 }
 
@@ -1005,12 +1042,12 @@ impl CallGraph {
 
                 // Get caller's metadata
                 let (caller_line, caller_sig) =
-                    get_symbol_meta(&site.caller_file, &site.caller_symbol);
+                    get_symbol_meta(site.caller_file.as_ref(), site.caller_symbol.as_ref());
 
                 let mut new_path = path.clone();
                 new_path.push((
-                    site.caller_file.clone(),
-                    site.caller_symbol.clone(),
+                    Arc::clone(&site.caller_file),
+                    Arc::clone(&site.caller_symbol),
                     caller_line,
                     caller_sig,
                 ));
@@ -1019,11 +1056,11 @@ impl CallGraph {
                 // Try both canonical and non-canonical keys (build_reverse_index
                 // may have stored data under the raw walker path)
                 let caller_is_entry = self
-                    .lookup_file_data(&site.caller_file)
+                    .lookup_file_data(site.caller_file.as_ref())
                     .and_then(|fd| {
-                        let meta = fd.symbol_metadata.get(&site.caller_symbol)?;
+                        let meta = fd.symbol_metadata.get(site.caller_symbol.as_ref())?;
                         Some(is_entry_point(
-                            &site.caller_symbol,
+                            site.caller_symbol.as_ref(),
                             &meta.kind,
                             meta.exported,
                             fd.lang,
@@ -1057,18 +1094,23 @@ impl CallGraph {
                     .map(|(i, (file_path, sym, line, sig))| {
                         let is_ep = if i == 0 {
                             // First hop (after reverse) is the entry point
-                            self.lookup_file_data(file_path)
+                            self.lookup_file_data(file_path.as_ref())
                                 .and_then(|fd| {
-                                    let meta = fd.symbol_metadata.get(sym)?;
-                                    Some(is_entry_point(sym, &meta.kind, meta.exported, fd.lang))
+                                    let meta = fd.symbol_metadata.get(sym.as_ref())?;
+                                    Some(is_entry_point(
+                                        sym.as_ref(),
+                                        &meta.kind,
+                                        meta.exported,
+                                        fd.lang,
+                                    ))
                                 })
                                 .unwrap_or(false)
                         } else {
                             false
                         };
                         TraceHop {
-                            symbol: sym.clone(),
-                            file: self.relative_path(file_path),
+                            symbol: sym.to_string(),
+                            file: self.relative_path(file_path.as_ref()),
                             line: *line,
                             signature: sig.clone(),
                             is_entry_point: is_ep,
@@ -1166,8 +1208,14 @@ impl CallGraph {
         );
 
         // Deduplicate sites by (file, symbol, line)
-        let mut seen = HashSet::new();
-        all_sites.retain(|s| seen.insert((s.caller_file.clone(), s.caller_symbol.clone(), s.line)));
+        let mut seen: HashSet<(PathBuf, String, u32)> = HashSet::new();
+        all_sites.retain(|site| {
+            seen.insert((
+                site.caller_file.clone(),
+                site.caller_symbol.clone(),
+                site.line,
+            ))
+        });
 
         // Enrich each caller site
         let mut callers = Vec::new();
@@ -1175,18 +1223,16 @@ impl CallGraph {
 
         for site in &all_sites {
             // Build the caller's file to get metadata
-            let caller_canon = std::fs::canonicalize(&site.caller_file)
-                .unwrap_or_else(|_| site.caller_file.clone());
-            if let Err(e) = self.build_file(&caller_canon) {
+            if let Err(e) = self.build_file(site.caller_file.as_path()) {
                 log::debug!(
                     "callgraph: skipping caller file {}: {}",
-                    caller_canon.display(),
+                    site.caller_file.display(),
                     e
                 );
             }
 
             let (sig, is_ep, params, _lang) = {
-                if let Some(fd) = self.data.get(&caller_canon) {
+                if let Some(fd) = self.lookup_file_data(site.caller_file.as_path()) {
                     let meta = fd.symbol_metadata.get(&site.caller_symbol);
                     let sig = meta.and_then(|m| m.signature.clone());
                     let kind = meta.map(|m| m.kind.clone()).unwrap_or(SymbolKind::Function);
@@ -1204,9 +1250,9 @@ impl CallGraph {
             };
 
             // Read the source line at the call site
-            let call_expression = self.read_source_line(&caller_canon, site.line);
+            let call_expression = self.read_source_line(site.caller_file.as_path(), site.line);
 
-            let rel_file = self.relative_path(&site.caller_file);
+            let rel_file = self.relative_path(site.caller_file.as_path());
             affected_file_set.insert(rel_file.clone());
 
             callers.push(ImpactCaller {
@@ -1271,7 +1317,7 @@ impl CallGraph {
                 }
             };
             let has_symbol = fd.calls_by_symbol.contains_key(symbol)
-                || fd.exported_symbols.contains(&symbol.to_string())
+                || fd.exported_symbols.iter().any(|name| name == symbol)
                 || fd.symbol_metadata.contains_key(symbol);
             if !has_symbol {
                 return Err(AftError::InvalidRequest {
@@ -1827,7 +1873,7 @@ impl CallGraph {
         symbol: &str,
         max_depth: usize,
         current_depth: usize,
-        visited: &mut HashSet<(PathBuf, String)>,
+        visited: &mut HashSet<(PathBuf, SharedStr)>,
         result: &mut Vec<CallerSite>,
     ) {
         if current_depth >= max_depth {
@@ -1836,26 +1882,25 @@ impl CallGraph {
 
         // Canonicalize for consistent reverse index lookup
         let canon = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-        let key = (canon.clone(), symbol.to_string());
-        if visited.contains(&key) {
+        let key_symbol: SharedStr = Arc::from(symbol);
+        if !visited.insert((canon.clone(), Arc::clone(&key_symbol))) {
             return; // cycle detection
         }
-        visited.insert(key);
 
-        let reverse_index = match &self.reverse_index {
-            Some(ri) => ri,
-            None => return,
-        };
-
-        let lookup_key = (canon, symbol.to_string());
-        if let Some(sites) = reverse_index.get(&lookup_key) {
+        if let Some(sites) = self.reverse_sites(&canon, key_symbol.as_ref()) {
             for site in sites {
-                result.push(site.clone());
+                result.push(CallerSite {
+                    caller_file: site.caller_file.as_ref().clone(),
+                    caller_symbol: site.caller_symbol.to_string(),
+                    line: site.line,
+                    col: site.col,
+                    resolved: site.resolved,
+                });
                 // Recurse: find callers of the caller
                 if current_depth + 1 < max_depth {
                     self.collect_callers_recursive(
-                        &site.caller_file,
-                        &site.caller_symbol,
+                        site.caller_file.as_ref(),
+                        site.caller_symbol.as_ref(),
                         max_depth,
                         current_depth + 1,
                         visited,

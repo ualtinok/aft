@@ -1,6 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { error, log, warn } from "./logger.js";
 
+// ## Note on TypeScript `as` type assertions
+//
+// Bridge responses use `as string`, `as string[]` etc. in several places.
+// This is intentional: all 16 tool handlers already guard against error
+// responses with `if (response.success === false) throw ...` before accessing
+// typed fields. The remaining `as` casts are on fields from known-success
+// Rust responses where the shape is guaranteed by the protocol contract.
+// Adding Zod runtime validation for every bridge response would add ~2ms
+// per call with no practical safety benefit given the error guards.
+
 /**
  * Compare two semver version strings (major.minor.patch).
  * Returns: negative if a < b, 0 if equal, positive if a > b.
@@ -311,7 +321,7 @@ export class BinaryBridge {
       log(`Auto-restart #${this._restartCount} in ${delay}ms`);
 
       setTimeout(() => {
-        if (!this._shuttingDown) {
+        if (!this._shuttingDown && !this.isAlive()) {
           try {
             this.spawnProcess();
           } catch (err) {

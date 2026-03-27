@@ -141,10 +141,26 @@ impl LspClient {
                         // window/workDoneProgress/create) block the server until
                         // we respond. If we don't respond, the server won't send
                         // responses to OUR pending requests → deadlock.
+                        //
+                        // Dispatch by method to return correct types:
+                        // - workspace/configuration expects Vec<Value> (one per item)
+                        // - Everything else gets null (safe default for registration/progress)
+                        let response_value = if method == "workspace/configuration" {
+                            // Return an array of null configs — one per requested item.
+                            // Servers fall back to filesystem config (tsconfig, pyrightconfig, etc.)
+                            let item_count = params
+                                .as_ref()
+                                .and_then(|p| p.get("items"))
+                                .and_then(|items| items.as_array())
+                                .map_or(1, |arr| arr.len());
+                            serde_json::Value::Array(vec![serde_json::Value::Null; item_count])
+                        } else {
+                            serde_json::Value::Null
+                        };
                         if let Ok(mut w) = reader_writer.lock() {
                             let response = super::jsonrpc::OutgoingResponse::success(
                                 id.clone(),
-                                serde_json::Value::Null,
+                                response_value,
                             );
                             let _ = transport::write_response(&mut *w, &response);
                         }

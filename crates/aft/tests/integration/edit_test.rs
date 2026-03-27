@@ -444,6 +444,66 @@ fn edit_match_returns_inline_lsp_diagnostics_when_requested() {
 }
 
 #[test]
+fn edit_match_inline_lsp_diagnostics_respects_wait_ms() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = root.join("main.rs");
+    let cargo_toml = root.join("Cargo.toml");
+    fs::write(
+        &cargo_toml,
+        "[package]\nname = \"inline-diag-fast\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &file,
+        "fn main() { let value = 1; println!(\"{}\", value); }\n",
+    )
+    .unwrap();
+
+    let fake_server = fake_server_path();
+    let mut aft = AftProcess::spawn_with_env(&[("AFT_LSP_RUST_BINARY", fake_server.as_os_str())]);
+
+    let configure = aft.send(&format!(
+        r#"{{"id":"cfg-inline-fast","command":"configure","project_root":"{}"}}"#,
+        root.display()
+    ));
+    assert_eq!(
+        configure["success"], true,
+        "configure failed: {configure:?}"
+    );
+
+    let start = std::time::Instant::now();
+    let req = serde_json::json!({
+        "id": "em-inline-diag-fast",
+        "command": "edit_match",
+        "file": file.display().to_string(),
+        "match": "let value = 1",
+        "replacement": "let answer = 1",
+        "diagnostics": true,
+        "wait_ms": 2_000,
+    });
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+    let elapsed = start.elapsed();
+
+    assert_eq!(resp["success"], true, "edit_match should succeed: {resp:?}");
+    let diagnostics = resp["lsp_diagnostics"]
+        .as_array()
+        .expect("lsp_diagnostics array");
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected inline diagnostics: {resp:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_000),
+        "expected event-driven wait, elapsed: {elapsed:?}, resp: {resp:?}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn edit_match_multiple_occurrences_returns_candidates() {
     let mut aft = AftProcess::spawn();
     let dir = std::env::temp_dir().join("aft_edit_tests");

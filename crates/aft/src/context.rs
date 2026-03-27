@@ -135,6 +135,10 @@ impl AppContext {
             return Vec::new();
         };
 
+        // Clear any queued notifications before this write so the wait loop only
+        // observes diagnostics triggered by the current change.
+        lsp.drain_events();
+
         // Send didChange/didOpen
         if let Err(e) = lsp.notify_file_changed(file_path, content) {
             log::warn!("sync error for {}: {}", file_path.display(), e);
@@ -148,8 +152,8 @@ impl AppContext {
     /// Post-write LSP hook: notify server and optionally collect diagnostics.
     ///
     /// This is the single call site for all command handlers after `write_format_validate`.
-    /// When `diagnostics` is true, it notifies the server, waits briefly, drains
-    /// queued LSP notifications, and returns diagnostics for the file.
+    /// When `diagnostics` is true, it notifies the server, waits until matching
+    /// diagnostics arrive or the timeout expires, and returns diagnostics for the file.
     /// When false, it just notifies (fire-and-forget).
     pub fn lsp_post_write(
         &self,
@@ -162,15 +166,8 @@ impl AppContext {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        self.lsp_notify_file_changed(file_path, content);
-
         if !wants_diagnostics {
-            return Vec::new();
-        }
-
-        // Only wait if an LSP server is actually running
-        let mut lsp = self.lsp();
-        if !lsp.has_active_servers() {
+            self.lsp_notify_file_changed(file_path, content);
             return Vec::new();
         }
 
@@ -179,15 +176,12 @@ impl AppContext {
             .and_then(|v| v.as_u64())
             .unwrap_or(1500)
             .min(10_000); // Cap at 10 seconds to prevent hangs from adversarial input
-        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
 
-        let canonical_path =
-            std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
-        lsp.drain_events();
-        lsp.get_diagnostics_for_file(&canonical_path)
-            .into_iter()
-            .cloned()
-            .collect()
+        self.lsp_notify_and_collect_diagnostics(
+            file_path,
+            content,
+            std::time::Duration::from_millis(wait_ms),
+        )
     }
 
     /// Validate that a file path falls within the configured project root.

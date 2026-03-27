@@ -43,6 +43,10 @@ pub enum AftError {
         scope: String,
         file: String,
     },
+    IoError {
+        path: String,
+        message: String,
+    },
 }
 
 impl AftError {
@@ -59,6 +63,7 @@ impl AftError {
             AftError::AmbiguousMatch { .. } => "ambiguous_match",
             AftError::ScopeNotFound { .. } => "scope_not_found",
             AftError::MemberNotFound { .. } => "member_not_found",
+            AftError::IoError { .. } => "io_error",
         }
     }
 
@@ -140,6 +145,9 @@ impl fmt::Display for AftError {
                     "member '{}' not found in scope '{}' in {}",
                     member, scope, file
                 )
+            }
+            AftError::IoError { path, message } => {
+                write!(f, "I/O error on {}: {}", path, message)
             }
         }
     }

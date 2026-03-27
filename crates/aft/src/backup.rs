@@ -85,8 +85,9 @@ impl BackupStore {
         }
 
         // Write the restored content back to disk
-        std::fs::write(path, &entry.content).map_err(|_| AftError::FileNotFound {
+        std::fs::write(path, &entry.content).map_err(|e| AftError::IoError {
             path: path.display().to_string(),
+            message: e.to_string(),
         })?;
 
         Ok(entry)

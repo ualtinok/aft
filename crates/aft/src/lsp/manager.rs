@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use lsp_types::notification::{DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
@@ -250,52 +250,63 @@ impl LspManager {
     pub fn drain_events(&mut self) -> Vec<LspEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.event_rx.try_recv() {
-            match &event {
-                LspEvent::Notification {
-                    server_kind,
-                    method,
-                    params,
-                    ..
-                } if method == "textDocument/publishDiagnostics" => {
-                    if let Some(params) = params {
-                        self.handle_publish_diagnostics(*server_kind, params);
-                    }
-                }
-                LspEvent::ServerExited { server_kind, root } => {
-                    let key = ServerKey {
-                        kind: *server_kind,
-                        root: root.clone(),
-                    };
-                    self.clients.remove(&key);
-                    self.documents.remove(&key);
-                    self.diagnostics.clear_server(*server_kind);
-                }
-                _ => {}
-            }
+            self.handle_event(&event);
             events.push(event);
         }
         events
     }
 
-    /// Wait briefly for diagnostics to arrive for a specific file after a change.
-    ///
-    /// This mirrors the existing `lsp_diagnostics` command behavior: sleep for a
-    /// short interval, drain queued LSP notifications, then read diagnostics from
-    /// the store using the canonicalized file path.
+    /// Wait for diagnostics to arrive for a specific file until a timeout expires.
     pub fn wait_for_diagnostics(
         &mut self,
         file_path: &Path,
         timeout: std::time::Duration,
     ) -> Vec<StoredDiagnostic> {
+        let deadline = std::time::Instant::now() + timeout;
+        self.wait_for_file_diagnostics(file_path, deadline)
+    }
+
+    /// Wait for diagnostics to arrive for a specific file until a deadline.
+    ///
+    /// Drains already-queued events first, then blocks on the shared event
+    /// channel only until either `publishDiagnostics` arrives for this file or
+    /// the deadline is reached.
+    pub fn wait_for_file_diagnostics(
+        &mut self,
+        file_path: &Path,
+        deadline: std::time::Instant,
+    ) -> Vec<StoredDiagnostic> {
         let lookup_path = normalize_lookup_path(file_path);
 
-        if !timeout.is_zero() {
-            std::thread::sleep(timeout);
+        if self.server_key_for_file(&lookup_path).is_none() {
+            return Vec::new();
         }
-        self.drain_events();
 
-        self.diagnostics
-            .for_file(&lookup_path)
+        loop {
+            if self.drain_events_for_file(&lookup_path) {
+                break;
+            }
+
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+
+            let timeout = deadline.saturating_duration_since(now);
+            match self.event_rx.recv_timeout(timeout) {
+                Ok(event) => {
+                    if matches!(
+                        self.handle_event(&event),
+                        Some(ref published_file) if published_file.as_path() == lookup_path.as_path()
+                    ) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        self.get_diagnostics_for_file(&lookup_path)
             .into_iter()
             .cloned()
             .collect()
@@ -333,16 +344,59 @@ impl LspManager {
         self.diagnostics.all()
     }
 
-    fn handle_publish_diagnostics(&mut self, server: ServerKind, params: &serde_json::Value) {
+    fn drain_events_for_file(&mut self, file_path: &Path) -> bool {
+        let mut saw_file_diagnostics = false;
+        while let Ok(event) = self.event_rx.try_recv() {
+            if matches!(
+                self.handle_event(&event),
+                Some(ref published_file) if published_file.as_path() == file_path
+            ) {
+                saw_file_diagnostics = true;
+            }
+        }
+        saw_file_diagnostics
+    }
+
+    fn handle_event(&mut self, event: &LspEvent) -> Option<PathBuf> {
+        match event {
+            LspEvent::Notification {
+                server_kind,
+                method,
+                params: Some(params),
+                ..
+            } if method == "textDocument/publishDiagnostics" => {
+                self.handle_publish_diagnostics(*server_kind, params)
+            }
+            LspEvent::ServerExited { server_kind, root } => {
+                let key = ServerKey {
+                    kind: *server_kind,
+                    root: root.clone(),
+                };
+                self.clients.remove(&key);
+                self.documents.remove(&key);
+                self.diagnostics.clear_server(*server_kind);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_publish_diagnostics(
+        &mut self,
+        server: ServerKind,
+        params: &serde_json::Value,
+    ) -> Option<PathBuf> {
         if let Ok(publish_params) =
             serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params.clone())
         {
             let Some(file) = uri_to_path(&publish_params.uri) else {
-                return;
+                return None;
             };
             let stored = from_lsp_diagnostics(file.clone(), publish_params.diagnostics);
             self.diagnostics.publish(server, file, stored);
+            return Some(uri_to_path(&publish_params.uri)?);
         }
+        None
     }
 
     fn spawn_server(&self, def: &ServerDef, root: &Path) -> Result<LspClient, LspError> {

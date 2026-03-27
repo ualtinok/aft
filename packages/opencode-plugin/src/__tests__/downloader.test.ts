@@ -102,7 +102,7 @@ describe("downloadBinary error paths", () => {
     expect(existsSync(join(cacheRoot, "aft", "bin", binaryName))).toBe(false);
   });
 
-  test("warns but still downloads when the checksum file is unavailable", () => {
+  test("returns null when the checksum file is unavailable (security requirement)", () => {
     if (!currentAssetName) throw new Error(`Unsupported test platform: ${currentPlatformKey}`);
     const cacheRoot = createCacheRoot();
     const result = runDownloaderScript(
@@ -119,14 +119,15 @@ describe("downloadBinary error paths", () => {
       { XDG_CACHE_HOME: cacheRoot },
     );
 
-    expect(result.stdout).toBe(join(cacheRoot, "aft", "bin", "v2.0.0", binaryName));
-    expect(existsSync(result.stdout)).toBe(true);
+    expect(result.stdout).toBe("null");
+    expect(existsSync(join(cacheRoot, "aft", "bin", "v2.0.0", binaryName))).toBe(false);
     expect(result.stderr).toContain(
-      "Warning: no checksums.sha256 found for v2.0.0, skipping verification",
+      "Checksum verification failed: no checksums.sha256 found for v2.0.0",
     );
+    expect(result.stderr).toContain("Binary download aborted for security reasons");
   });
 
-  test("treats malformed checksum files as missing entries", () => {
+  test("returns null when checksum file has no entry for the asset (security requirement)", () => {
     if (!currentAssetName) throw new Error(`Unsupported test platform: ${currentPlatformKey}`);
     const cacheRoot = createCacheRoot();
     const result = runDownloaderScript(
@@ -143,10 +144,11 @@ describe("downloadBinary error paths", () => {
       { XDG_CACHE_HOME: cacheRoot },
     );
 
-    expect(result.stdout).toBe(join(cacheRoot, "aft", "bin", "v3.0.0", binaryName));
-    expect(existsSync(result.stdout)).toBe(true);
+    expect(result.stdout).toBe("null");
+    expect(existsSync(join(cacheRoot, "aft", "bin", "v3.0.0", binaryName))).toBe(false);
     expect(result.stderr).toContain(
-      `Warning: checksums.sha256 found but no entry for ${currentAssetName}`,
+      `Checksum verification failed: checksums.sha256 found but no entry for ${currentAssetName}`,
     );
+    expect(result.stderr).toContain("Binary download aborted for security reasons");
   });
 });

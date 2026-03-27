@@ -168,6 +168,31 @@ fn test_diagnostics_filter_by_severity() {
 }
 
 #[test]
+fn test_wait_for_diagnostics_returns_after_matching_publish() {
+    let (_temp_dir, _root, files) = rust_workspace_with_files(&["main.rs", "lib.rs"]);
+    let main_rs = &files[0];
+    let lib_rs = &files[1];
+    let mut manager = manager_with_fake_server();
+
+    manager
+        .notify_file_changed(lib_rs, "pub fn answer() -> u32 { 42 }\n")
+        .expect("open lib");
+    wait_for_publish(&mut manager);
+
+    manager
+        .notify_file_changed(main_rs, "fn main() { println!(\"hi\"); }\n")
+        .expect("open main");
+
+    let diagnostics = manager.wait_for_diagnostics(main_rs, Duration::from_secs(2));
+    let canonical_main = fs::canonicalize(main_rs).expect("canonical main");
+
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.file == canonical_main));
+}
+
+#[test]
 fn test_diagnostics_for_file_vs_all() {
     let (_temp_dir, _root, files) = rust_workspace_with_files(&["main.rs", "lib.rs"]);
     let main_rs = &files[0];

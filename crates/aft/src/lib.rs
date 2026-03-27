@@ -1,3 +1,18 @@
+// ## Note on `.unwrap()` / `.expect()` usage
+//
+// The remaining `.unwrap()` and `.expect()` calls in `src/` are in:
+// - **Tree-sitter query operations** (parser.rs, zoom.rs, extract.rs, inline.rs,
+//   outline.rs): These operate on AFT's own compiled grammars and query patterns, which
+//   are compile-time constants. Pattern captures and node kinds are guaranteed to exist.
+// - **Checkpoint serialization** (checkpoint.rs): serde_json::to_value on known-good
+//   HashMap<PathBuf, String> types cannot fail.
+// - **lib.rs main loop**: JSON parsing of stdin lines — a malformed line is logged and
+//   skipped, not unwrapped.
+//
+// All production command handlers that process user/agent input return Result or
+// Response::error instead of panicking. Confirmed zero .unwrap()/.expect() in
+// production error paths as of v0.6.3 audit.
+
 pub mod ast_grep_lang;
 pub mod backup;
 pub mod callgraph;
