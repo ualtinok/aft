@@ -10,7 +10,7 @@ use crate::search_index::{
 
 const MAX_GLOB_RESULTS: usize = 100;
 const GLOB_TRUNCATED_MESSAGE: &str =
-    "(Results truncated: showing first 100 results. Consider using a more specific path or pattern.)";
+    "(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)";
 const MAX_FLAT_FILES: usize = 20;
 const MAX_FILES_PER_DIRECTORY: usize = 7;
 const MAX_DISPLAY_FILES_PER_DIRECTORY: usize = 5;
@@ -115,6 +115,8 @@ fn format_glob_text(
 ) -> String {
     let text = if compress_tool_output {
         format_compressed_glob_text(files, pattern)
+    } else if files.is_empty() {
+        "No files found".to_string()
     } else {
         files
             .iter()
@@ -309,7 +311,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "src/a.rs\n\n(Results truncated: showing first 100 results. Consider using a more specific path or pattern.)"
+            "src/a.rs\n\n(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)"
         );
     }
 }

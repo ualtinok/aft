@@ -1,11 +1,53 @@
-import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execSync, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ensureBinary, getCachedBinaryPath } from "./downloader.js";
-import { log } from "./logger.js";
+import { ensureBinary, getCachedBinaryPath, getCacheDir } from "./downloader.js";
+import { log, warn } from "./logger.js";
 import { PLATFORM_ARCH_MAP } from "./platform.js";
+
+/**
+ * Copy an npm platform binary to the versioned cache so we never run from
+ * node_modules directly. This prevents corruption when npm updates the
+ * package while a bridge process is running the binary.
+ */
+function copyToVersionedCache(npmBinaryPath: string): string | null {
+  try {
+    // Get the version from the binary
+    const result = spawnSync(npmBinaryPath, ["--version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    });
+    const version = result.stdout?.trim();
+    if (!version) return null;
+
+    const tag = version.startsWith("v") ? version : `v${version}`;
+    const cacheDir = getCacheDir();
+    const versionedDir = join(cacheDir, tag);
+    const ext = process.platform === "win32" ? ".exe" : "";
+    const cachedPath = join(versionedDir, `aft${ext}`);
+
+    // Already cached
+    if (existsSync(cachedPath)) return cachedPath;
+
+    // Copy to versioned cache
+    mkdirSync(versionedDir, { recursive: true });
+    const tmpPath = `${cachedPath}.tmp`;
+    copyFileSync(npmBinaryPath, tmpPath);
+    if (process.platform !== "win32") {
+      chmodSync(tmpPath, 0o755);
+    }
+    const { renameSync } = require("node:fs") as typeof import("node:fs");
+    renameSync(tmpPath, cachedPath);
+    log(`Copied npm binary to versioned cache: ${cachedPath}`);
+    return cachedPath;
+  } catch (err) {
+    warn(`Failed to copy binary to cache: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
 
 /**
  * Map the current `process.platform` and `process.arch` to the npm platform
@@ -54,13 +96,17 @@ export function findBinarySync(): string | null {
   const cached = getCachedBinaryPath();
   if (cached) return cached;
 
-  // 2. Check npm platform package
+  // 2. Check npm platform package — copy to versioned cache to avoid
+  // corruption when npm updates the package while a bridge is running
   try {
     const key = platformKey();
     const packageBin = `@cortexkit/aft-${key}/bin/aft${ext}`;
     const req = createRequire(import.meta.url);
     const resolved = req.resolve(packageBin);
-    if (existsSync(resolved)) return resolved;
+    if (existsSync(resolved)) {
+      const copied = copyToVersionedCache(resolved);
+      return copied ?? resolved;
+    }
   } catch {
     // npm package not installed or resolution failed
   }

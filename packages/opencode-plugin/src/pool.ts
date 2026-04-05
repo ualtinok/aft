@@ -1,5 +1,5 @@
 import { BinaryBridge, type BridgeOptions } from "./bridge";
-import { error } from "./logger.js";
+import { error, log } from "./logger.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = Infinity; // keep alive as long as opencode is running
 const DEFAULT_MAX_POOL_SIZE = 8;
@@ -125,10 +125,12 @@ export class BridgePool {
    */
   async replaceBinary(newPath: string): Promise<void> {
     this.binaryPath = newPath;
-    // Shut down all existing bridges so they respawn with the new binary on next call
-    const shutdowns = Array.from(this.bridges.values()).map((e) => e.bridge.shutdown());
-    this.bridges.clear();
-    await Promise.allSettled(shutdowns);
+    // Do NOT kill running bridges — they may be mid-request. The old process
+    // continues running from the old binary (safe on all platforms since the
+    // binary is already loaded in memory). New bridges created by getBridge()
+    // will use the updated binaryPath. Old bridges will be recycled naturally
+    // when their session ends or when a version-check detects the mismatch.
+    log(`Binary path updated to ${newPath}. New sessions will use the updated binary.`);
   }
 
   /** Number of active bridges in the pool. */

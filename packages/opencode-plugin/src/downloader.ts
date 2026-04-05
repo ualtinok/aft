@@ -37,15 +37,12 @@ export function getBinaryName(): string {
 }
 
 /** Return the cached binary path if it exists, otherwise null.
- *  When version is provided, checks the version-specific cache directory.
- *  When omitted, checks the legacy flat cache for backward compatibility. */
+ *  Checks the version-specific cache directory only.
+ *  The legacy flat cache (~/.cache/aft/bin/aft) is intentionally NOT checked
+ *  because it can be overwritten by other instances, corrupting running processes. */
 export function getCachedBinaryPath(version?: string): string | null {
-  if (version) {
-    const binaryPath = join(getCacheDir(), version, getBinaryName());
-    return existsSync(binaryPath) ? binaryPath : null;
-  }
-  // Legacy flat cache (pre-versioned downloads)
-  const binaryPath = join(getCacheDir(), getBinaryName());
+  if (!version) return null;
+  const binaryPath = join(getCacheDir(), version, getBinaryName());
   return existsSync(binaryPath) ? binaryPath : null;
 }
 

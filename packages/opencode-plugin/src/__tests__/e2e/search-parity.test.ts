@@ -335,7 +335,16 @@ function ripgrep(
     throw new Error(result.stderr || `rg failed with exit code ${result.status ?? "unknown"}`);
   }
 
-  return result.stdout.split("\n").filter(Boolean).map(parseRipgrepLine).sort(compareGrepMatches);
+  return result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const parsed = parseRipgrepLine(line);
+      // Resolve to absolute path to match AFT's output (which uses canonical absolute paths)
+      parsed.file = normalizePath(realpathSync(join(cwd, parsed.file)));
+      return parsed;
+    })
+    .sort(compareGrepMatches);
 }
 
 function filesystemGlob(pattern: string, cwd: string, path?: string): string[] {

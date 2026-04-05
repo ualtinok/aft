@@ -7,7 +7,7 @@ use regex::RegexBuilder;
 use crate::context::AppContext;
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
-    build_path_filters, read_searchable_text, relative_to_root, resolve_search_scope,
+    build_path_filters, read_searchable_text, resolve_search_scope,
     sort_grep_matches_by_mtime_desc, walk_project_files_from, GrepMatch, GrepResult, IndexStatus,
 };
 
@@ -206,7 +206,7 @@ fn fallback_grep(
             total_matches += 1;
             if matches.len() < max_results {
                 matches.push(GrepMatch {
-                    file: relative_to_root(&project_root, &file),
+                    file: file.clone(),
                     line,
                     column,
                     line_text,
@@ -389,36 +389,66 @@ fn format_grep_text(result: &GrepResult, compress_tool_output: bool) -> String {
 
 fn format_raw_grep_text(result: &GrepResult) -> String {
     if result.matches.is_empty() {
-        return String::new();
+        return "No files found".to_string();
     }
 
-    let mut groups: BTreeMap<String, Vec<&GrepMatch>> = BTreeMap::new();
+    let mut lines = Vec::new();
+
+    // Header: match OpenCode's "Found N matches" / "Found N matches (showing first 100)"
+    if result.truncated {
+        lines.push(format!(
+            "Found {} matches (showing first {})",
+            result.total_matches,
+            result.matches.len()
+        ));
+    } else {
+        lines.push(format!("Found {} matches", result.total_matches));
+    }
+
+    // Group matches by file, preserving the input order (already sorted by mtime)
+    let mut groups: Vec<(String, Vec<&GrepMatch>)> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for grep_match in &result.matches {
-        groups
-            .entry(grep_match.file.display().to_string())
-            .or_default()
-            .push(grep_match);
+        let file_key = grep_match.file.display().to_string();
+        if let Some(&idx) = seen.get(&file_key) {
+            groups[idx].1.push(grep_match);
+        } else {
+            seen.insert(file_key.clone(), groups.len());
+            groups.push((file_key, vec![grep_match]));
+        }
     }
 
-    groups
-        .into_iter()
-        .map(|(file, matches)| {
-            let lines = matches
-                .into_iter()
-                .map(|grep_match| {
-                    format!(
-                        "  Line {}: {}",
-                        grep_match.line,
-                        truncate_raw_line_text(&grep_match.line_text)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("{}:\n{}", file, lines)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let mut current_file = String::new();
+    for (file, file_matches) in &groups {
+        if current_file != *file {
+            if !current_file.is_empty() {
+                lines.push(String::new());
+            }
+            current_file = file.clone();
+            lines.push(format!("{}:", file));
+        }
+        for grep_match in file_matches {
+            lines.push(format!(
+                "  Line {}: {}",
+                grep_match.line,
+                truncate_raw_line_text(&grep_match.line_text)
+            ));
+        }
+    }
+
+    // Truncation footer: match OpenCode's exact wording
+    if result.truncated {
+        lines.push(String::new());
+        lines.push(format!(
+            "(Results truncated: showing {} of {} matches ({} hidden). Consider using a more specific path or pattern.)",
+            result.matches.len(),
+            result.total_matches,
+            result.total_matches - result.matches.len()
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn format_compressed_grep_text(result: &GrepResult) -> String {
@@ -633,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_grep_groups_matches_by_file() {
+    fn raw_grep_matches_opencode_format() {
         let result = GrepResult {
             matches: vec![
                 grep_match(
@@ -653,9 +683,10 @@ mod tests {
 
         let text = format_grep_text(&result, false);
 
+        // Must match OpenCode's exact format: header, filepath:, indented Line N: text
         assert_eq!(
             text,
-            "/absolute/path/to/file.rs:\n  Line 14: pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {\n  Line 116: another match\n\n/absolute/path/to/main.rs:\n  Line 42: dispatch call"
+            "Found 3 matches\n/absolute/path/to/file.rs:\n  Line 14: pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {\n  Line 116: another match\n\n/absolute/path/to/main.rs:\n  Line 42: dispatch call"
         );
     }
 
@@ -672,12 +703,15 @@ mod tests {
 
         let text = format_grep_text(&result, false);
 
-        let expected_line = format!("src/main.rs:\n  Line 42: {}...", "a".repeat(2000));
-        assert_eq!(text, expected_line);
+        let expected = format!(
+            "Found 1 matches\nsrc/main.rs:\n  Line 42: {}...",
+            "a".repeat(2000)
+        );
+        assert_eq!(text, expected);
     }
 
     #[test]
-    fn raw_grep_returns_empty_text_for_zero_results() {
+    fn raw_grep_returns_no_files_found_for_zero_results() {
         let result = GrepResult {
             matches: Vec::new(),
             total_matches: 0,
@@ -689,6 +723,6 @@ mod tests {
 
         let text = format_grep_text(&result, false);
 
-        assert!(text.is_empty());
+        assert_eq!(text, "No files found");
     }
 }

@@ -336,7 +336,7 @@ impl SearchIndex {
                 total_matches += 1;
                 if matches.len() < max_results {
                     matches.push(GrepMatch {
-                        file: relative_to_root(&self.project_root, &file.path),
+                        file: file.path.clone(),
                         line,
                         column,
                         line_text,
@@ -1535,7 +1535,9 @@ mod tests {
         assert_eq!(result.files_searched, 1);
         assert_eq!(result.files_with_matches, 1);
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].file, PathBuf::from("src/main.rs"));
+        // Index stores canonicalized paths; on macOS /var → /private/var
+        let expected = fs::canonicalize(src.join("main.rs")).expect("canonicalize");
+        assert_eq!(result.matches[0].file, expected);
     }
 
     #[test]

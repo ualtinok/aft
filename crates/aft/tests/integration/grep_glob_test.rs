@@ -91,10 +91,9 @@ fn grep_fallback_returns_relative_paths_and_counts() {
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0]["line"], 1);
     assert!(matches[0]["column"].as_u64().unwrap_or(0) >= 1);
-    assert!(matches[0]["file"]
-        .as_str()
-        .expect("file path")
-        .starts_with("src/"));
+    // Files are returned as absolute paths
+    let file_path = matches[0]["file"].as_str().expect("file path");
+    assert!(file_path.contains("src/one.rs") || file_path.contains("src/two.rs"));
 
     let status = aft.shutdown();
     assert!(status.success());
@@ -175,7 +174,9 @@ fn grep_uses_index_when_configured() {
     assert_eq!(response["total_matches"], 1);
     assert_eq!(response["files_with_matches"], 1);
     assert_eq!(response["files_searched"], 1);
-    assert_eq!(response["matches"][0]["file"], "src/search.rs");
+    // Files are returned as absolute paths
+    let expected_path = canonical_path_string(&project.path().join("src/search.rs"));
+    assert_eq!(response["matches"][0]["file"], expected_path);
 
     let status = aft.shutdown();
     assert!(status.success());
@@ -205,8 +206,10 @@ fn grep_text_is_compressed_by_default() {
         "grep should succeed: {response:?}"
     );
     let text = response["text"].as_str().expect("grep text");
-    assert!(text.contains("── src/one.rs (1 match) ──"));
-    assert!(text.contains("── src/two.rs (1 match) ──"));
+    // Compressed format: decorative headers with absolute paths + summary footer
+    assert!(text.contains("(1 match) ──"));
+    assert!(text.contains("src/one.rs"));
+    assert!(text.contains("src/two.rs"));
     assert!(text.ends_with("Found 2 match(es) across 2 file(s). [index: fallback]"));
 
     let status = aft.shutdown();
@@ -233,10 +236,10 @@ fn grep_text_can_disable_compression() {
         response["success"], true,
         "grep should succeed: {response:?}"
     );
-    assert_eq!(
-        response["text"],
-        Value::String("src/one.rs:\n  Line 1: fn alpha() { println!(\"alpha\"); }".to_string())
-    );
+    // Raw grep format: "Found N matches" header + absolute path + plain file: format
+    let expected_path = canonical_path_string(&project.path().join("src/one.rs"));
+    let expected_text = format!("Found 1 matches\n{}:\n  Line 1: fn alpha() {{ println!(\"alpha\"); }}", expected_path);
+    assert_eq!(response["text"], Value::String(expected_text));
 
     let status = aft.shutdown();
     assert!(status.success());

@@ -221,6 +221,7 @@ export class BinaryBridge {
         log("Binary did not report a version — skipping version check");
         return;
       }
+      log(`Binary version: ${binaryVersion}`);
       if (compareSemver(binaryVersion, this.minVersion) < 0) {
         warn(`Binary version ${binaryVersion} is older than required ${this.minVersion}`);
         this.onVersionMismatch?.(binaryVersion, this.minVersion);
