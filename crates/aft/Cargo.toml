@@ -1,6 +1,6 @@
 [package]
 name = "agent-file-tools"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "Agent File Tools — tree-sitter powered code analysis for AI agents"
 license = "MIT"
