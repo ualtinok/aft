@@ -256,6 +256,10 @@ pub fn detect_formatter(
         LangId::Python => "python",
         LangId::Rust => "rust",
         LangId::Go => "go",
+        LangId::C => "c",
+        LangId::Cpp => "cpp",
+        LangId::Zig => "zig",
+        LangId::CSharp => "csharp",
         LangId::Markdown => "markdown",
     };
     let project_root = config.project_root.as_deref();
@@ -344,6 +348,7 @@ pub fn detect_formatter(
                 None
             }
         }
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
         LangId::Markdown => None,
     }
 }
@@ -608,6 +613,10 @@ pub fn detect_type_checker(
         LangId::Python => "python",
         LangId::Rust => "rust",
         LangId::Go => "go",
+        LangId::C => "c",
+        LangId::Cpp => "cpp",
+        LangId::Zig => "zig",
+        LangId::CSharp => "csharp",
         LangId::Markdown => "markdown",
     };
     if let Some(preferred) = config.checker.get(lang_key) {
@@ -697,6 +706,7 @@ pub fn detect_type_checker(
                 None
             }
         }
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
         LangId::Markdown => None,
     }
 }

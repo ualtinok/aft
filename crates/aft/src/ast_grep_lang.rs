@@ -21,6 +21,10 @@ pub enum AstGrepLang {
     Python,
     Rust,
     Go,
+    C,
+    Cpp,
+    Zig,
+    CSharp,
 }
 
 impl AstGrepLang {
@@ -33,6 +37,10 @@ impl AstGrepLang {
             LangId::Python => Some(Self::Python),
             LangId::Rust => Some(Self::Rust),
             LangId::Go => Some(Self::Go),
+            LangId::C => Some(Self::C),
+            LangId::Cpp => Some(Self::Cpp),
+            LangId::Zig => Some(Self::Zig),
+            LangId::CSharp => Some(Self::CSharp),
             // Markdown, CSS, HTML etc. don't have meaningful AST patterns
             _ => None,
         }
@@ -47,6 +55,10 @@ impl AstGrepLang {
             "python" | "py" => Some(Self::Python),
             "rust" | "rs" => Some(Self::Rust),
             "go" | "golang" => Some(Self::Go),
+            "c" => Some(Self::C),
+            "cpp" | "c++" | "cplusplus" => Some(Self::Cpp),
+            "zig" => Some(Self::Zig),
+            "csharp" | "c#" | "cs" => Some(Self::CSharp),
             _ => None,
         }
     }
@@ -60,6 +72,10 @@ impl AstGrepLang {
             Self::Python => &["py", "pyi"],
             Self::Rust => &["rs"],
             Self::Go => &["go"],
+            Self::C => &["c", "h"],
+            Self::Cpp => &["cc", "cpp", "cxx", "hpp", "hh"],
+            Self::Zig => &["zig"],
+            Self::CSharp => &["cs"],
         }
     }
 
@@ -126,8 +142,10 @@ impl Language for AstGrepLang {
 
     fn expando_char(&self) -> char {
         match self {
-            // $ is not a valid identifier char in Python, Rust
-            Self::Python | Self::Rust => '\u{00B5}', // µ
+            // $ is not a valid identifier char in Python, Rust, C-family, Zig, or C#
+            Self::Python | Self::Rust | Self::C | Self::Cpp | Self::Zig | Self::CSharp => {
+                '\u{00B5}' // µ
+            }
             // $ is valid in TS, JS, Go identifiers
             _ => '$',
         }
@@ -143,6 +161,10 @@ impl LanguageExt for AstGrepLang {
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Zig => tree_sitter_zig::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         }
     }
 }
@@ -166,6 +188,10 @@ mod tests {
         assert_eq!(AstGrepLang::from_str("python"), Some(AstGrepLang::Python));
         assert_eq!(AstGrepLang::from_str("rust"), Some(AstGrepLang::Rust));
         assert_eq!(AstGrepLang::from_str("go"), Some(AstGrepLang::Go));
+        assert_eq!(AstGrepLang::from_str("c"), Some(AstGrepLang::C));
+        assert_eq!(AstGrepLang::from_str("cpp"), Some(AstGrepLang::Cpp));
+        assert_eq!(AstGrepLang::from_str("zig"), Some(AstGrepLang::Zig));
+        assert_eq!(AstGrepLang::from_str("c#"), Some(AstGrepLang::CSharp));
         assert_eq!(AstGrepLang::from_str("markdown"), None);
     }
 
@@ -214,6 +240,10 @@ mod tests {
     fn test_expando_char() {
         assert_eq!(AstGrepLang::Python.expando_char(), '\u{00B5}');
         assert_eq!(AstGrepLang::Rust.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::C.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::Cpp.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::Zig.expando_char(), '\u{00B5}');
+        assert_eq!(AstGrepLang::CSharp.expando_char(), '\u{00B5}');
         assert_eq!(AstGrepLang::TypeScript.expando_char(), '$');
         assert_eq!(AstGrepLang::JavaScript.expando_char(), '$');
         assert_eq!(AstGrepLang::Go.expando_char(), '$');

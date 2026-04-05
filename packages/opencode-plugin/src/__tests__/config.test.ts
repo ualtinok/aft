@@ -115,7 +115,6 @@ describe("loadAftConfig", () => {
       fixture.userConfigPath,
       JSON.stringify({
         format_on_edit: false,
-        compress_tool_output: false,
         formatter: { typescript: "biome", python: "black" },
         checker: { python: "ruff" },
       }),
@@ -125,7 +124,6 @@ describe("loadAftConfig", () => {
       JSON.stringify({
         validate_on_edit: "full",
         hoist_builtin_tools: true,
-        compress_tool_output: true,
         formatter: { typescript: "prettier" },
         checker: { typescript: "tsc" },
       }),
@@ -140,7 +138,6 @@ describe("loadAftConfig", () => {
       format_on_edit: false,
       validate_on_edit: "full",
       hoist_builtin_tools: true,
-      compress_tool_output: true,
       formatter: { typescript: "prettier", python: "black" },
       checker: { python: "ruff", typescript: "tsc" },
     });

@@ -12,6 +12,9 @@ pub trait LanguageProvider {
 
     /// List all top-level symbols in a file.
     fn list_symbols(&self, file: &Path) -> Result<Vec<Symbol>, AftError>;
+
+    /// Downcast to concrete type for provider-specific operations.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Placeholder provider that rejects all calls.
@@ -30,5 +33,9 @@ impl LanguageProvider for StubProvider {
         Err(AftError::InvalidRequest {
             message: "no language provider configured".to_string(),
         })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

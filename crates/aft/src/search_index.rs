@@ -3,11 +3,16 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
-use regex::RegexBuilder;
+use rayon::prelude::*;
+use regex::bytes::{Regex, RegexBuilder};
 use regex_syntax::hir::{Hir, HirKind};
 
 const DEFAULT_MAX_FILE_SIZE: u64 = 1_048_576;
@@ -112,6 +117,27 @@ pub(crate) struct SearchScope {
     pub use_index: bool,
 }
 
+#[derive(Clone, Debug)]
+struct SharedGrepMatch {
+    file: Arc<PathBuf>,
+    line: u32,
+    column: u32,
+    line_text: String,
+    match_text: String,
+}
+
+#[derive(Clone, Debug)]
+enum SearchMatcher {
+    Literal(LiteralSearch),
+    Regex(Regex),
+}
+
+#[derive(Clone, Debug)]
+enum LiteralSearch {
+    CaseSensitive(Vec<u8>),
+    AsciiCaseInsensitive(Vec<u8>),
+}
+
 impl SearchIndex {
     pub fn new() -> Self {
         SearchIndex {
@@ -166,16 +192,21 @@ impl SearchIndex {
 
         let mut file_trigrams = Vec::with_capacity(trigram_map.len());
         for (trigram, filter) in trigram_map {
-            self.postings.entry(trigram).or_default().push(Posting {
+            let postings = self.postings.entry(trigram).or_default();
+            postings.push(Posting {
                 file_id,
                 next_mask: filter.next_mask,
                 loc_mask: filter.loc_mask,
             });
+            // Posting lists are kept sorted by file_id for binary search during
+            // intersection. Since file_ids are allocated incrementally, the new
+            // entry is usually already in order. Only sort when needed.
+            if postings.len() > 1
+                && postings[postings.len() - 2].file_id > postings[postings.len() - 1].file_id
+            {
+                postings.sort_unstable_by_key(|p| p.file_id);
+            }
             file_trigrams.push(trigram);
-        }
-
-        for postings in self.postings.values_mut() {
-            postings.sort_by_key(|posting| posting.file_id);
         }
 
         self.file_trigrams.insert(file_id, file_trigrams);
@@ -267,24 +298,69 @@ impl SearchIndex {
         search_root: &Path,
         max_results: usize,
     ) -> GrepResult {
-        let mut regex_builder = RegexBuilder::new(pattern);
-        regex_builder.case_insensitive(!case_sensitive);
-        let regex = match regex_builder.build() {
-            Ok(regex) => regex,
-            Err(_) => {
-                return GrepResult {
-                    matches: Vec::new(),
-                    total_matches: 0,
-                    files_searched: 0,
-                    files_with_matches: 0,
-                    index_status: if self.ready {
-                        IndexStatus::Ready
-                    } else {
-                        IndexStatus::Building
-                    },
-                    truncated: false,
-                };
+        // Detect if pattern is a plain literal (no regex metacharacters).
+        // If so, use memchr::memmem which is 3-10x faster than regex for byte scanning.
+        let is_literal = !pattern.chars().any(|c| {
+            matches!(
+                c,
+                '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
+            )
+        });
+
+        let literal_search = if is_literal {
+            if case_sensitive {
+                Some(LiteralSearch::CaseSensitive(pattern.as_bytes().to_vec()))
+            } else if pattern.is_ascii() {
+                Some(LiteralSearch::AsciiCaseInsensitive(
+                    pattern
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| byte.to_ascii_lowercase())
+                        .collect(),
+                ))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // Build the regex for non-literal patterns (or literal Unicode fallback).
+        let regex = if literal_search.is_some() {
+            None
+        } else {
+            let regex_pattern = if is_literal {
+                regex::escape(pattern)
+            } else {
+                pattern.to_string()
+            };
+            let mut builder = RegexBuilder::new(&regex_pattern);
+            builder.case_insensitive(!case_sensitive);
+            match builder.build() {
+                Ok(r) => Some(r),
+                Err(_) => {
+                    return GrepResult {
+                        matches: Vec::new(),
+                        total_matches: 0,
+                        files_searched: 0,
+                        files_with_matches: 0,
+                        index_status: if self.ready {
+                            IndexStatus::Ready
+                        } else {
+                            IndexStatus::Building
+                        },
+                        truncated: false,
+                    };
+                }
+            }
+        };
+
+        let matcher = if let Some(literal_search) = literal_search {
+            SearchMatcher::Literal(literal_search)
+        } else {
+            SearchMatcher::Regex(
+                regex.expect("regex should exist when literal matcher is unavailable"),
+            )
         };
 
         let filters = match build_path_filters(include, exclude) {
@@ -296,76 +372,89 @@ impl SearchIndex {
         let query = decompose_regex(pattern);
         let candidate_ids = self.candidates(&query);
 
-        let mut matches = Vec::new();
-        let mut total_matches = 0usize;
-        let mut files_searched = 0usize;
-        let mut files_with_matches = 0usize;
-        let mut truncated = false;
+        let candidate_files: Vec<&FileEntry> = candidate_ids
+            .into_iter()
+            .filter_map(|file_id| self.files.get(file_id as usize))
+            .filter(|file| !file.path.as_os_str().is_empty())
+            .filter(|file| is_within_search_root(&search_root, &file.path))
+            .filter(|file| filters.matches(&self.project_root, &file.path))
+            .collect();
 
-        for file_id in candidate_ids {
-            let Some(file) = self.files.get(file_id as usize) else {
-                continue;
-            };
-            if file.path.as_os_str().is_empty() {
-                continue;
-            }
-            if !is_within_search_root(&search_root, &file.path) {
-                continue;
-            }
-            if !filters.matches(&self.project_root, &file.path) {
-                continue;
-            }
+        let total_matches = AtomicUsize::new(0);
+        let files_searched = AtomicUsize::new(0);
+        let files_with_matches = AtomicUsize::new(0);
+        let truncated = AtomicBool::new(false);
+        let stop_after = max_results.saturating_mul(2);
 
-            let content = match read_searchable_text(&file.path) {
-                Some(content) => content,
-                None => continue,
-            };
+        let mut matches = if candidate_files.len() > 10 {
+            candidate_files
+                .par_iter()
+                .map(|file| {
+                    search_candidate_file(
+                        file,
+                        &matcher,
+                        max_results,
+                        stop_after,
+                        &total_matches,
+                        &files_searched,
+                        &files_with_matches,
+                        &truncated,
+                    )
+                })
+                .reduce(Vec::new, |mut left, mut right| {
+                    left.append(&mut right);
+                    left
+                })
+        } else {
+            let mut matches = Vec::new();
+            for file in candidate_files {
+                matches.extend(search_candidate_file(
+                    file,
+                    &matcher,
+                    max_results,
+                    stop_after,
+                    &total_matches,
+                    &files_searched,
+                    &files_with_matches,
+                    &truncated,
+                ));
 
-            files_searched += 1;
-            let line_starts = line_starts(&content);
-            let mut seen_lines = HashSet::new();
-            let mut matched_this_file = false;
-
-            for matched in regex.find_iter(&content) {
-                let (line, column, line_text) =
-                    line_details(&content, &line_starts, matched.start());
-                if !seen_lines.insert(line) {
-                    continue;
+                if should_stop_search(&truncated, &total_matches, stop_after) {
+                    break;
                 }
-
-                total_matches += 1;
-                if matches.len() < max_results {
-                    matches.push(GrepMatch {
-                        file: file.path.clone(),
-                        line,
-                        column,
-                        line_text,
-                        match_text: matched.as_str().to_string(),
-                    });
-                } else {
-                    truncated = true;
-                }
-                matched_this_file = true;
             }
+            matches
+        };
 
-            if matched_this_file {
-                files_with_matches += 1;
-            }
-        }
+        sort_shared_grep_matches_by_cached_mtime_desc(&mut matches, |path| {
+            self.path_to_id
+                .get(path)
+                .and_then(|file_id| self.files.get(*file_id as usize))
+                .map(|file| file.modified)
+        });
 
-        sort_grep_matches_by_mtime_desc(&mut matches, &self.project_root);
+        let matches = matches
+            .into_iter()
+            .map(|matched| GrepMatch {
+                file: matched.file.as_ref().clone(),
+                line: matched.line,
+                column: matched.column,
+                line_text: matched.line_text,
+                match_text: matched.match_text,
+            })
+            .collect();
 
         GrepResult {
-            total_matches,
+            total_matches: total_matches.load(Ordering::Relaxed),
             matches,
-            files_searched,
-            files_with_matches,
+            files_searched: files_searched.load(Ordering::Relaxed),
+            files_with_matches: files_with_matches.load(Ordering::Relaxed),
             index_status: if self.ready {
                 IndexStatus::Ready
             } else {
                 IndexStatus::Building
             },
-            truncated,
+            truncated: truncated.load(Ordering::Relaxed),
         }
     }
 
@@ -391,45 +480,58 @@ impl SearchIndex {
             return self.active_file_ids();
         }
 
-        let mut current: Option<BTreeSet<u32>> = None;
+        let mut and_trigrams = query.and_trigrams.clone();
+        and_trigrams.sort_unstable_by_key(|trigram| self.postings.get(trigram).map_or(0, Vec::len));
 
-        for trigram in &query.and_trigrams {
-            let filter = query.and_filters.get(trigram).copied();
-            let matches = self.postings_for_trigram(*trigram, filter);
+        let mut current: Option<Vec<u32>> = None;
+
+        for trigram in and_trigrams {
+            let filter = query.and_filters.get(&trigram).copied();
+            let matches = self.postings_for_trigram(trigram, filter);
             current = Some(match current.take() {
-                Some(existing) => existing.intersection(&matches).copied().collect(),
+                Some(existing) => intersect_sorted_ids(&existing, &matches),
                 None => matches,
             });
 
-            if current.as_ref().is_some_and(|set| set.is_empty()) {
+            if current.as_ref().is_some_and(|ids| ids.is_empty()) {
                 break;
             }
         }
 
-        let mut current = current.unwrap_or_else(|| self.active_file_ids().into_iter().collect());
+        let mut current = current.unwrap_or_else(|| self.active_file_ids());
 
         for (index, group) in query.or_groups.iter().enumerate() {
-            let mut group_matches = BTreeSet::new();
+            let mut group_matches = Vec::new();
             let filters = query.or_filters.get(index);
 
             for trigram in group {
                 let filter = filters.and_then(|filters| filters.get(trigram).copied());
-                group_matches.extend(self.postings_for_trigram(*trigram, filter));
+                let matches = self.postings_for_trigram(*trigram, filter);
+                if group_matches.is_empty() {
+                    group_matches = matches;
+                } else {
+                    group_matches = union_sorted_ids(&group_matches, &matches);
+                }
             }
 
-            current = current.intersection(&group_matches).copied().collect();
+            current = intersect_sorted_ids(&current, &group_matches);
             if current.is_empty() {
                 break;
             }
         }
 
-        for file_id in &self.unindexed_files {
-            if self.is_active_file(*file_id) {
-                current.insert(*file_id);
-            }
+        let mut unindexed = self
+            .unindexed_files
+            .iter()
+            .copied()
+            .filter(|file_id| self.is_active_file(*file_id))
+            .collect::<Vec<_>>();
+        if !unindexed.is_empty() {
+            unindexed.sort_unstable();
+            current = union_sorted_ids(&current, &unindexed);
         }
 
-        current.into_iter().collect()
+        current
     }
 
     pub fn write_to_disk(&self, cache_dir: &Path, git_head: Option<&str>) {
@@ -699,6 +801,10 @@ impl SearchIndex {
             baseline.max_file_size = max_file_size;
 
             if baseline.git_head == current_head {
+                // HEAD matches, but files may have changed on disk since the index was
+                // last written (e.g., uncommitted edits, stash pop, manual file changes
+                // while OpenCode was closed). Verify mtimes and re-index stale files.
+                verify_file_mtimes(&mut baseline);
                 baseline.ready = true;
                 return baseline;
             }
@@ -758,11 +864,12 @@ impl SearchIndex {
             .unwrap_or(false)
     }
 
-    fn postings_for_trigram(&self, trigram: u32, filter: Option<PostingFilter>) -> BTreeSet<u32> {
-        let mut matches = BTreeSet::new();
+    fn postings_for_trigram(&self, trigram: u32, filter: Option<PostingFilter>) -> Vec<u32> {
         let Some(postings) = self.postings.get(&trigram) else {
-            return matches;
+            return Vec::new();
         };
+
+        let mut matches = Vec::with_capacity(postings.len());
 
         for posting in postings {
             if let Some(filter) = filter {
@@ -777,12 +884,204 @@ impl SearchIndex {
                 // the position in the file. Using it here causes false negatives.
             }
             if self.is_active_file(posting.file_id) {
-                matches.insert(posting.file_id);
+                matches.push(posting.file_id);
             }
         }
 
         matches
     }
+}
+
+fn search_candidate_file(
+    file: &FileEntry,
+    matcher: &SearchMatcher,
+    max_results: usize,
+    stop_after: usize,
+    total_matches: &AtomicUsize,
+    files_searched: &AtomicUsize,
+    files_with_matches: &AtomicUsize,
+    truncated: &AtomicBool,
+) -> Vec<SharedGrepMatch> {
+    if should_stop_search(truncated, total_matches, stop_after) {
+        return Vec::new();
+    }
+
+    let content = match read_indexed_file_bytes(&file.path) {
+        Some(content) => content,
+        None => return Vec::new(),
+    };
+    files_searched.fetch_add(1, Ordering::Relaxed);
+
+    let shared_path = Arc::new(file.path.clone());
+    let mut matches = Vec::new();
+    let mut line_starts = None;
+    let mut seen_lines = HashSet::new();
+    let mut matched_this_file = false;
+
+    match matcher {
+        SearchMatcher::Literal(LiteralSearch::CaseSensitive(needle)) => {
+            let finder = memchr::memmem::Finder::new(needle);
+            let mut start = 0;
+
+            while let Some(position) = finder.find(&content[start..]) {
+                if should_stop_search(truncated, total_matches, stop_after) {
+                    break;
+                }
+
+                let offset = start + position;
+                start = offset + 1;
+
+                let line_starts = line_starts.get_or_insert_with(|| line_starts_bytes(&content));
+                let (line, column, line_text) = line_details_bytes(&content, line_starts, offset);
+                if !seen_lines.insert(line) {
+                    continue;
+                }
+
+                matched_this_file = true;
+                let match_number = total_matches.fetch_add(1, Ordering::Relaxed) + 1;
+                if match_number > max_results {
+                    truncated.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                let end = offset + needle.len();
+                matches.push(SharedGrepMatch {
+                    file: shared_path.clone(),
+                    line,
+                    column,
+                    line_text,
+                    match_text: String::from_utf8_lossy(&content[offset..end]).into_owned(),
+                });
+            }
+        }
+        SearchMatcher::Literal(LiteralSearch::AsciiCaseInsensitive(needle)) => {
+            let search_content = content.to_ascii_lowercase();
+            let finder = memchr::memmem::Finder::new(needle);
+            let mut start = 0;
+
+            while let Some(position) = finder.find(&search_content[start..]) {
+                if should_stop_search(truncated, total_matches, stop_after) {
+                    break;
+                }
+
+                let offset = start + position;
+                start = offset + 1;
+
+                let line_starts = line_starts.get_or_insert_with(|| line_starts_bytes(&content));
+                let (line, column, line_text) = line_details_bytes(&content, line_starts, offset);
+                if !seen_lines.insert(line) {
+                    continue;
+                }
+
+                matched_this_file = true;
+                let match_number = total_matches.fetch_add(1, Ordering::Relaxed) + 1;
+                if match_number > max_results {
+                    truncated.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                let end = offset + needle.len();
+                matches.push(SharedGrepMatch {
+                    file: shared_path.clone(),
+                    line,
+                    column,
+                    line_text,
+                    match_text: String::from_utf8_lossy(&content[offset..end]).into_owned(),
+                });
+            }
+        }
+        SearchMatcher::Regex(regex) => {
+            for matched in regex.find_iter(&content) {
+                if should_stop_search(truncated, total_matches, stop_after) {
+                    break;
+                }
+
+                let line_starts = line_starts.get_or_insert_with(|| line_starts_bytes(&content));
+                let (line, column, line_text) =
+                    line_details_bytes(&content, line_starts, matched.start());
+                if !seen_lines.insert(line) {
+                    continue;
+                }
+
+                matched_this_file = true;
+                let match_number = total_matches.fetch_add(1, Ordering::Relaxed) + 1;
+                if match_number > max_results {
+                    truncated.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                matches.push(SharedGrepMatch {
+                    file: shared_path.clone(),
+                    line,
+                    column,
+                    line_text,
+                    match_text: String::from_utf8_lossy(matched.as_bytes()).into_owned(),
+                });
+            }
+        }
+    }
+
+    if matched_this_file {
+        files_with_matches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    matches
+}
+
+fn should_stop_search(
+    truncated: &AtomicBool,
+    total_matches: &AtomicUsize,
+    stop_after: usize,
+) -> bool {
+    truncated.load(Ordering::Relaxed) && total_matches.load(Ordering::Relaxed) >= stop_after
+}
+
+fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut merged = Vec::with_capacity(left.len().min(right.len()));
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            std::cmp::Ordering::Less => left_index += 1,
+            std::cmp::Ordering::Greater => right_index += 1,
+            std::cmp::Ordering::Equal => {
+                merged.push(left[left_index]);
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+
+    merged
+}
+
+fn union_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            std::cmp::Ordering::Less => {
+                merged.push(left[left_index]);
+                left_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[right_index]);
+                right_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(left[left_index]);
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+
+    merged.extend_from_slice(&left[left_index..]);
+    merged.extend_from_slice(&right[right_index..]);
+    merged
 }
 
 pub fn decompose_regex(pattern: &str) -> RegexQuery {
@@ -907,6 +1206,10 @@ pub(crate) fn read_searchable_text(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn read_indexed_file_bytes(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path).ok()
+}
+
 pub(crate) fn relative_to_root(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root)
         .map(PathBuf::from)
@@ -929,6 +1232,21 @@ pub(crate) fn sort_grep_matches_by_mtime_desc(matches: &mut [GrepMatch], project
         path_modified_time(&right_path)
             .cmp(&path_modified_time(&left_path))
             .then_with(|| left.file.cmp(&right.file))
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.column.cmp(&right.column))
+    });
+}
+
+fn sort_shared_grep_matches_by_cached_mtime_desc<F>(
+    matches: &mut [SharedGrepMatch],
+    modified_for_path: F,
+) where
+    F: Fn(&Path) -> Option<SystemTime>,
+{
+    matches.sort_by(|left, right| {
+        modified_for_path(right.file.as_path())
+            .cmp(&modified_for_path(left.file.as_path()))
+            .then_with(|| left.file.as_path().cmp(right.file.as_path()))
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.column.cmp(&right.column))
     });
@@ -1032,6 +1350,50 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     result
+}
+
+/// Verify stored file mtimes against disk. Re-index any files whose mtime changed
+/// since the index was last written. Also detect new files and deleted files.
+fn verify_file_mtimes(index: &mut SearchIndex) {
+    // Collect stale files (mtime mismatch or deleted)
+    let mut stale_paths = Vec::new();
+    for entry in &index.files {
+        if entry.path.as_os_str().is_empty() {
+            continue; // tombstoned entry
+        }
+        match fs::metadata(&entry.path) {
+            Ok(meta) => {
+                let current_mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+                if current_mtime != entry.modified || meta.len() != entry.size {
+                    stale_paths.push(entry.path.clone());
+                }
+            }
+            Err(_) => {
+                // File deleted
+                stale_paths.push(entry.path.clone());
+            }
+        }
+    }
+
+    // Re-index stale files
+    for path in &stale_paths {
+        index.update_file(path);
+    }
+
+    // Detect new files not in the index
+    let filters = PathFilters::default();
+    for path in walk_project_files(&index.project_root, &filters) {
+        if !index.path_to_id.contains_key(&path) {
+            index.update_file(&path);
+        }
+    }
+
+    if !stale_paths.is_empty() {
+        log::info!(
+            "[aft] search index: refreshed {} stale file(s) from disk cache",
+            stale_paths.len()
+        );
+    }
 }
 
 fn is_within_search_root(search_root: &Path, path: &Path) -> bool {
@@ -1299,9 +1661,9 @@ fn is_binary_path(path: &Path, size: u64) -> bool {
     }
 }
 
-fn line_starts(content: &str) -> Vec<usize> {
+fn line_starts_bytes(content: &[u8]) -> Vec<usize> {
     let mut starts = vec![0usize];
-    for (index, byte) in content.bytes().enumerate() {
+    for (index, byte) in content.iter().copied().enumerate() {
         if byte == b'\n' {
             starts.push(index + 1);
         }
@@ -1309,20 +1671,26 @@ fn line_starts(content: &str) -> Vec<usize> {
     starts
 }
 
-fn line_details(content: &str, line_starts: &[usize], offset: usize) -> (u32, u32, String) {
+fn line_details_bytes(content: &[u8], line_starts: &[usize], offset: usize) -> (u32, u32, String) {
     let line_index = match line_starts.binary_search(&offset) {
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
     };
     let line_start = line_starts.get(line_index).copied().unwrap_or(0);
     let line_end = content[line_start..]
-        .find('\n')
+        .iter()
+        .position(|byte| *byte == b'\n')
         .map(|length| line_start + length)
         .unwrap_or(content.len());
-    let line_text = content[line_start..line_end]
-        .trim_end_matches('\r')
-        .to_string();
-    let column = content[line_start..offset].chars().count() as u32 + 1;
+    let mut line_slice = &content[line_start..line_end];
+    if line_slice.ends_with(b"\r") {
+        line_slice = &line_slice[..line_slice.len() - 1];
+    }
+    let line_text = String::from_utf8_lossy(line_slice).into_owned();
+    let column = String::from_utf8_lossy(&content[line_start..offset])
+        .chars()
+        .count() as u32
+        + 1;
     (line_index as u32 + 1, column, line_text)
 }
 

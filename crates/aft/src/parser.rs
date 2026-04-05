@@ -142,6 +142,169 @@ const GO_QUERY: &str = r#"
     type: (_) @type.body)) @type.def
 "#;
 
+const C_QUERY: &str = r#"
+;; function definitions
+(function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @fn.name)) @fn.def
+
+;; function declarations / prototypes
+(declaration
+  declarator: (function_declarator
+    declarator: (identifier) @fn.name)) @fn.def
+
+;; struct declarations
+(struct_specifier
+  name: (type_identifier) @struct.name
+  body: (field_declaration_list)) @struct.def
+
+;; enum declarations
+(enum_specifier
+  name: (type_identifier) @enum.name
+  body: (enumerator_list)) @enum.def
+
+;; typedef aliases
+(type_definition
+  declarator: (type_identifier) @type.name) @type.def
+
+;; macros
+(preproc_def
+  name: (identifier) @macro.name) @macro.def
+
+(preproc_function_def
+  name: (identifier) @macro.name) @macro.def
+"#;
+
+const CPP_QUERY: &str = r#"
+;; free function definitions
+(function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @fn.name)) @fn.def
+
+;; free function declarations
+(declaration
+  declarator: (function_declarator
+    declarator: (identifier) @fn.name)) @fn.def
+
+;; inline method definitions / declarations inside class bodies
+(function_definition
+  declarator: (function_declarator
+    declarator: (field_identifier) @method.name)) @method.def
+
+(field_declaration
+  declarator: (function_declarator
+    declarator: (field_identifier) @method.name)) @method.def
+
+;; qualified functions / methods
+(function_definition
+  declarator: (function_declarator
+    declarator: (qualified_identifier
+      scope: (_) @qual.scope
+      name: (identifier) @qual.name))) @qual.def
+
+(declaration
+  declarator: (function_declarator
+    declarator: (qualified_identifier
+      scope: (_) @qual.scope
+      name: (identifier) @qual.name))) @qual.def
+
+;; class / struct / enum / namespace declarations
+(class_specifier
+  name: (_) @class.name) @class.def
+
+(struct_specifier
+  name: (_) @struct.name) @struct.def
+
+(enum_specifier
+  name: (_) @enum.name) @enum.def
+
+(namespace_definition
+  name: (_) @namespace.name) @namespace.def
+
+;; template declarations
+(template_declaration
+  (class_specifier
+    name: (_) @template.class.name) @template.class.item) @template.class.def
+
+(template_declaration
+  (struct_specifier
+    name: (_) @template.struct.name) @template.struct.item) @template.struct.def
+
+(template_declaration
+  (function_definition
+    declarator: (function_declarator
+      declarator: (identifier) @template.fn.name)) @template.fn.item) @template.fn.def
+
+(template_declaration
+  (function_definition
+    declarator: (function_declarator
+      declarator: (qualified_identifier
+        scope: (_) @template.qual.scope
+        name: (identifier) @template.qual.name))) @template.qual.item) @template.qual.def
+"#;
+
+const ZIG_QUERY: &str = r#"
+;; functions
+(function_declaration
+  name: (identifier) @fn.name) @fn.def
+
+;; container declarations bound to const names
+(variable_declaration
+  (identifier) @struct.name
+  "="
+  (struct_declaration) @struct.body) @struct.def
+
+(variable_declaration
+  (identifier) @enum.name
+  "="
+  (enum_declaration) @enum.body) @enum.def
+
+(variable_declaration
+  (identifier) @union.name
+  "="
+  (union_declaration) @union.body) @union.def
+
+;; const declarations
+(variable_declaration
+  (identifier) @const.name) @const.def
+
+;; tests
+(test_declaration
+  (string) @test.name) @test.def
+
+(test_declaration
+  (identifier) @test.name) @test.def
+"#;
+
+const CSHARP_QUERY: &str = r#"
+;; types
+(class_declaration
+  name: (identifier) @class.name) @class.def
+
+(interface_declaration
+  name: (identifier) @interface.name) @interface.def
+
+(struct_declaration
+  name: (identifier) @struct.name) @struct.def
+
+(enum_declaration
+  name: (identifier) @enum.name) @enum.def
+
+;; members
+(method_declaration
+  name: (identifier) @method.name) @method.def
+
+(property_declaration
+  name: (identifier) @property.name) @property.def
+
+;; namespaces
+(namespace_declaration
+  name: (_) @namespace.name) @namespace.def
+
+(file_scoped_namespace_declaration
+  name: (_) @namespace.name) @namespace.def
+"#;
+
 /// Supported language identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LangId {
@@ -151,6 +314,10 @@ pub enum LangId {
     Python,
     Rust,
     Go,
+    C,
+    Cpp,
+    Zig,
+    CSharp,
     Markdown,
 }
 
@@ -164,6 +331,10 @@ pub fn detect_language(path: &Path) -> Option<LangId> {
         "py" => Some(LangId::Python),
         "rs" => Some(LangId::Rust),
         "go" => Some(LangId::Go),
+        "c" | "h" => Some(LangId::C),
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some(LangId::Cpp),
+        "zig" => Some(LangId::Zig),
+        "cs" => Some(LangId::CSharp),
         "md" | "markdown" | "mdx" => Some(LangId::Markdown),
         _ => None,
     }
@@ -178,6 +349,10 @@ pub fn grammar_for(lang: LangId) -> Language {
         LangId::Python => tree_sitter_python::LANGUAGE.into(),
         LangId::Rust => tree_sitter_rust::LANGUAGE.into(),
         LangId::Go => tree_sitter_go::LANGUAGE.into(),
+        LangId::C => tree_sitter_c::LANGUAGE.into(),
+        LangId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        LangId::Zig => tree_sitter_zig::LANGUAGE.into(),
+        LangId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         LangId::Markdown => tree_sitter_md::LANGUAGE.into(),
     }
 }
@@ -190,6 +365,10 @@ fn query_for(lang: LangId) -> Option<&'static str> {
         LangId::Python => Some(PY_QUERY),
         LangId::Rust => Some(RS_QUERY),
         LangId::Go => Some(GO_QUERY),
+        LangId::C => Some(C_QUERY),
+        LangId::Cpp => Some(CPP_QUERY),
+        LangId::Zig => Some(ZIG_QUERY),
+        LangId::CSharp => Some(CSHARP_QUERY),
         LangId::Markdown => None,
     }
 }
@@ -200,10 +379,58 @@ struct CachedTree {
     tree: Tree,
 }
 
+/// Cached symbol extraction result: mtime at extraction time + symbols.
+#[derive(Clone)]
+struct CachedSymbols {
+    mtime: SystemTime,
+    symbols: Vec<Symbol>,
+}
+
+/// Shared symbol cache that can be pre-warmed in a background thread
+/// and merged into the main thread. Thread-safe for building, then
+/// transferred to the single-threaded main loop.
+#[derive(Clone, Default)]
+pub struct SymbolCache {
+    entries: HashMap<PathBuf, CachedSymbols>,
+}
+
+impl SymbolCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Insert pre-warmed symbols for a file.
+    pub fn insert(&mut self, path: PathBuf, mtime: SystemTime, symbols: Vec<Symbol>) {
+        self.entries.insert(path, CachedSymbols { mtime, symbols });
+    }
+
+    /// Merge another cache into this one (newer entries win by mtime).
+    pub fn merge(&mut self, other: SymbolCache) {
+        for (path, entry) in other.entries {
+            match self.entries.get(&path) {
+                Some(existing) if existing.mtime >= entry.mtime => {}
+                _ => {
+                    self.entries.insert(path, entry);
+                }
+            }
+        }
+    }
+
+    /// Number of cached entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Core parsing engine. Handles language detection, parse tree caching,
-/// and query pattern execution via tree-sitter.
+/// symbol table caching, and query pattern execution via tree-sitter.
 pub struct FileParser {
     cache: HashMap<PathBuf, CachedTree>,
+    symbol_cache: HashMap<PathBuf, CachedSymbols>,
+    /// Shared pre-warmed cache from background indexing
+    warm_cache: Option<SymbolCache>,
 }
 
 impl FileParser {
@@ -211,7 +438,14 @@ impl FileParser {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            symbol_cache: HashMap::new(),
+            warm_cache: None,
         }
+    }
+
+    /// Attach a pre-warmed symbol cache from background indexing.
+    pub fn set_warm_cache(&mut self, cache: SymbolCache) {
+        self.warm_cache = Some(cache);
     }
 
     /// Parse a file, returning the tree and detected language. Uses cache if
@@ -285,7 +519,32 @@ impl FileParser {
     }
 
     /// Extract symbols from a file using language-specific query patterns.
+    /// Results are cached by `(path, mtime)` — subsequent calls for unchanged
+    /// files return the cached symbol table without re-parsing.
     pub fn extract_symbols(&mut self, path: &Path) -> Result<Vec<Symbol>, AftError> {
+        let canon = path.to_path_buf();
+        let current_mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map_err(|e| AftError::FileNotFound {
+                path: format!("{}: {}", path.display(), e),
+            })?;
+
+        // Return cached symbols if file hasn't changed (local cache first, then warm cache)
+        if let Some(cached) = self.symbol_cache.get(&canon) {
+            if cached.mtime == current_mtime {
+                return Ok(cached.symbols.clone());
+            }
+        }
+        if let Some(warm) = &self.warm_cache {
+            if let Some(cached) = warm.entries.get(&canon) {
+                if cached.mtime == current_mtime {
+                    // Promote to local cache for future lookups
+                    self.symbol_cache.insert(canon, cached.clone());
+                    return Ok(cached.symbols.clone());
+                }
+            }
+        }
+
         let source = std::fs::read_to_string(path).map_err(|e| AftError::FileNotFound {
             path: format!("{}: {}", path.display(), e),
         })?;
@@ -294,30 +553,51 @@ impl FileParser {
         let root = tree.root_node();
 
         // Markdown uses direct tree walking, not query patterns
-        if lang == LangId::Markdown {
-            return extract_md_symbols(&source, &root);
-        }
+        let symbols = if lang == LangId::Markdown {
+            extract_md_symbols(&source, &root)?
+        } else {
+            let query_src = query_for(lang).ok_or_else(|| AftError::InvalidRequest {
+                message: format!("no query patterns implemented for {:?} yet", lang),
+            })?;
 
-        let query_src = query_for(lang).ok_or_else(|| AftError::InvalidRequest {
-            message: format!("no query patterns implemented for {:?} yet", lang),
-        })?;
+            let grammar = grammar_for(lang);
+            let query = Query::new(&grammar, query_src).map_err(|e| {
+                log::error!("query compile failed for {:?}: {}", lang, e);
+                AftError::ParseError {
+                    message: format!("query compile error for {:?}: {}", lang, e),
+                }
+            })?;
 
-        let grammar = grammar_for(lang);
-        let query = Query::new(&grammar, query_src).map_err(|e| {
-            log::error!("query compile failed for {:?}: {}", lang, e);
-            AftError::ParseError {
-                message: format!("query compile error for {:?}: {}", lang, e),
+            match lang {
+                LangId::TypeScript | LangId::Tsx => extract_ts_symbols(&source, &root, &query)?,
+                LangId::JavaScript => extract_js_symbols(&source, &root, &query)?,
+                LangId::Python => extract_py_symbols(&source, &root, &query)?,
+                LangId::Rust => extract_rs_symbols(&source, &root, &query)?,
+                LangId::Go => extract_go_symbols(&source, &root, &query)?,
+                LangId::C => extract_c_symbols(&source, &root, &query)?,
+                LangId::Cpp => extract_cpp_symbols(&source, &root, &query)?,
+                LangId::Zig => extract_zig_symbols(&source, &root, &query)?,
+                LangId::CSharp => extract_csharp_symbols(&source, &root, &query)?,
+                LangId::Markdown => vec![],
             }
-        })?;
+        };
 
-        match lang {
-            LangId::TypeScript | LangId::Tsx => extract_ts_symbols(&source, &root, &query),
-            LangId::JavaScript => extract_js_symbols(&source, &root, &query),
-            LangId::Python => extract_py_symbols(&source, &root, &query),
-            LangId::Rust => extract_rs_symbols(&source, &root, &query),
-            LangId::Go => extract_go_symbols(&source, &root, &query),
-            LangId::Markdown => Ok(vec![]), // handled by extract_md_symbols
-        }
+        // Cache the result
+        self.symbol_cache.insert(
+            canon,
+            CachedSymbols {
+                mtime: current_mtime,
+                symbols: symbols.clone(),
+            },
+        );
+
+        Ok(symbols)
+    }
+
+    /// Invalidate cached symbols for a specific file (e.g., after an edit).
+    pub fn invalidate_symbols(&mut self, path: &Path) {
+        self.symbol_cache.remove(path);
+        self.cache.remove(path);
     }
 }
 
@@ -362,7 +642,7 @@ pub(crate) fn node_range_with_decorators(node: &Node, source: &str, lang: LangId
                     || (kind == "comment"
                         && node_text(source, &prev).starts_with("/**"))
             }
-            LangId::Go => {
+            LangId::Go | LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => {
                 // Include doc comments only if immediately above (no blank line gap)
                 kind == "comment" && is_adjacent_line(&prev, &current, source)
             }
@@ -1305,6 +1585,838 @@ fn extract_go_receiver_type(method_node: &Node, source: &str) -> Option<String> 
     None
 }
 
+fn split_scope_text(text: &str, separator: &str) -> Vec<String> {
+    text.split(separator)
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn last_scope_segment(text: &str, separator: &str) -> String {
+    split_scope_text(text, separator)
+        .pop()
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+fn zig_container_scope_chain(node: &Node, source: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        if matches!(
+            parent.kind(),
+            "struct_declaration" | "enum_declaration" | "union_declaration" | "opaque_declaration"
+        ) {
+            if let Some(container) = parent.parent() {
+                if container.kind() == "variable_declaration" {
+                    let mut cursor = container.walk();
+                    if cursor.goto_first_child() {
+                        loop {
+                            let child = cursor.node();
+                            if child.kind() == "identifier" {
+                                chain.push(node_text(source, &child).to_string());
+                                break;
+                            }
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        current = parent.parent();
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn csharp_scope_chain(node: &Node, source: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        match parent.kind() {
+            "namespace_declaration" | "file_scoped_namespace_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    chain.push(node_text(source, &name_node).to_string());
+                }
+            }
+            "class_declaration"
+            | "interface_declaration"
+            | "struct_declaration"
+            | "record_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    chain.push(node_text(source, &name_node).to_string());
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn cpp_parent_scope_chain(node: &Node, source: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        match parent.kind() {
+            "namespace_definition" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    chain.push(node_text(source, &name_node).to_string());
+                }
+            }
+            "class_specifier" | "struct_specifier" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    chain.push(last_scope_segment(node_text(source, &name_node), "::"));
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn template_signature(source: &str, template_node: &Node, item_node: &Node) -> String {
+    format!(
+        "{}\n{}",
+        extract_signature(source, template_node),
+        extract_signature(source, item_node)
+    )
+}
+
+/// Extract symbols from C source.
+fn extract_c_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::C;
+    let capture_names = query.capture_names();
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut fn_name_node = None;
+        let mut fn_def_node = None;
+        let mut struct_name_node = None;
+        let mut struct_def_node = None;
+        let mut enum_name_node = None;
+        let mut enum_def_node = None;
+        let mut type_name_node = None;
+        let mut type_def_node = None;
+        let mut macro_name_node = None;
+        let mut macro_def_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "fn.name" => fn_name_node = Some(cap.node),
+                "fn.def" => fn_def_node = Some(cap.node),
+                "struct.name" => struct_name_node = Some(cap.node),
+                "struct.def" => struct_def_node = Some(cap.node),
+                "enum.name" => enum_name_node = Some(cap.node),
+                "enum.def" => enum_def_node = Some(cap.node),
+                "type.name" => type_name_node = Some(cap.node),
+                "type.def" => type_def_node = Some(cap.node),
+                "macro.name" => macro_name_node = Some(cap.node),
+                "macro.def" => macro_def_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (fn_name_node, fn_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Function,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (struct_name_node, struct_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Struct,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (enum_name_node, enum_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Enum,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (type_name_node, type_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::TypeAlias,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (macro_name_node, macro_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Variable,
+                range: node_range(&def_node),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+    }
+
+    dedup_symbols(&mut symbols);
+    Ok(symbols)
+}
+
+/// Extract symbols from C++ source.
+fn extract_cpp_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::Cpp;
+    let capture_names = query.capture_names();
+
+    let mut type_names = HashSet::new();
+    {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, *root, source.as_bytes());
+        while let Some(m) = {
+            matches.advance();
+            matches.get()
+        } {
+            for cap in m.captures {
+                let Some(&name) = capture_names.get(cap.index as usize) else {
+                    continue;
+                };
+                match name {
+                    "class.name"
+                    | "struct.name"
+                    | "template.class.name"
+                    | "template.struct.name" => {
+                        type_names.insert(last_scope_segment(node_text(source, &cap.node), "::"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut fn_name_node = None;
+        let mut fn_def_node = None;
+        let mut method_name_node = None;
+        let mut method_def_node = None;
+        let mut qual_scope_node = None;
+        let mut qual_name_node = None;
+        let mut qual_def_node = None;
+        let mut class_name_node = None;
+        let mut class_def_node = None;
+        let mut struct_name_node = None;
+        let mut struct_def_node = None;
+        let mut enum_name_node = None;
+        let mut enum_def_node = None;
+        let mut namespace_name_node = None;
+        let mut namespace_def_node = None;
+        let mut template_class_name_node = None;
+        let mut template_class_def_node = None;
+        let mut template_class_item_node = None;
+        let mut template_struct_name_node = None;
+        let mut template_struct_def_node = None;
+        let mut template_struct_item_node = None;
+        let mut template_fn_name_node = None;
+        let mut template_fn_def_node = None;
+        let mut template_fn_item_node = None;
+        let mut template_qual_scope_node = None;
+        let mut template_qual_name_node = None;
+        let mut template_qual_def_node = None;
+        let mut template_qual_item_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "fn.name" => fn_name_node = Some(cap.node),
+                "fn.def" => fn_def_node = Some(cap.node),
+                "method.name" => method_name_node = Some(cap.node),
+                "method.def" => method_def_node = Some(cap.node),
+                "qual.scope" => qual_scope_node = Some(cap.node),
+                "qual.name" => qual_name_node = Some(cap.node),
+                "qual.def" => qual_def_node = Some(cap.node),
+                "class.name" => class_name_node = Some(cap.node),
+                "class.def" => class_def_node = Some(cap.node),
+                "struct.name" => struct_name_node = Some(cap.node),
+                "struct.def" => struct_def_node = Some(cap.node),
+                "enum.name" => enum_name_node = Some(cap.node),
+                "enum.def" => enum_def_node = Some(cap.node),
+                "namespace.name" => namespace_name_node = Some(cap.node),
+                "namespace.def" => namespace_def_node = Some(cap.node),
+                "template.class.name" => template_class_name_node = Some(cap.node),
+                "template.class.def" => template_class_def_node = Some(cap.node),
+                "template.class.item" => template_class_item_node = Some(cap.node),
+                "template.struct.name" => template_struct_name_node = Some(cap.node),
+                "template.struct.def" => template_struct_def_node = Some(cap.node),
+                "template.struct.item" => template_struct_item_node = Some(cap.node),
+                "template.fn.name" => template_fn_name_node = Some(cap.node),
+                "template.fn.def" => template_fn_def_node = Some(cap.node),
+                "template.fn.item" => template_fn_item_node = Some(cap.node),
+                "template.qual.scope" => template_qual_scope_node = Some(cap.node),
+                "template.qual.name" => template_qual_name_node = Some(cap.node),
+                "template.qual.def" => template_qual_def_node = Some(cap.node),
+                "template.qual.item" => template_qual_item_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (fn_name_node, fn_def_node) {
+            let in_template = def_node
+                .parent()
+                .map(|parent| parent.kind() == "template_declaration")
+                .unwrap_or(false);
+            if !in_template {
+                let scope_chain = cpp_parent_scope_chain(&def_node, source);
+                symbols.push(Symbol {
+                    name: node_text(source, &name_node).to_string(),
+                    kind: SymbolKind::Function,
+                    range: node_range_with_decorators(&def_node, source, lang),
+                    signature: Some(extract_signature(source, &def_node)),
+                    scope_chain: scope_chain.clone(),
+                    exported: false,
+                    parent: scope_chain.last().cloned(),
+                });
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (method_name_node, method_def_node) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Method,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(scope_node), Some(name_node), Some(def_node)) =
+            (qual_scope_node, qual_name_node, qual_def_node)
+        {
+            let in_template = def_node
+                .parent()
+                .map(|parent| parent.kind() == "template_declaration")
+                .unwrap_or(false);
+            if !in_template {
+                let scope_text = node_text(source, &scope_node);
+                let scope_chain = split_scope_text(scope_text, "::");
+                let parent = scope_chain.last().cloned();
+                let kind = if parent
+                    .as_ref()
+                    .map(|segment| type_names.contains(segment))
+                    .unwrap_or(false)
+                {
+                    SymbolKind::Method
+                } else {
+                    SymbolKind::Function
+                };
+
+                symbols.push(Symbol {
+                    name: node_text(source, &name_node).to_string(),
+                    kind,
+                    range: node_range_with_decorators(&def_node, source, lang),
+                    signature: Some(extract_signature(source, &def_node)),
+                    scope_chain,
+                    exported: false,
+                    parent,
+                });
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (class_name_node, class_def_node) {
+            let in_template = def_node
+                .parent()
+                .map(|parent| parent.kind() == "template_declaration")
+                .unwrap_or(false);
+            if !in_template {
+                let scope_chain = cpp_parent_scope_chain(&def_node, source);
+                let name = last_scope_segment(node_text(source, &name_node), "::");
+                symbols.push(Symbol {
+                    name: name.clone(),
+                    kind: SymbolKind::Class,
+                    range: node_range_with_decorators(&def_node, source, lang),
+                    signature: Some(extract_signature(source, &def_node)),
+                    scope_chain: scope_chain.clone(),
+                    exported: false,
+                    parent: scope_chain.last().cloned(),
+                });
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (struct_name_node, struct_def_node) {
+            let in_template = def_node
+                .parent()
+                .map(|parent| parent.kind() == "template_declaration")
+                .unwrap_or(false);
+            if !in_template {
+                let scope_chain = cpp_parent_scope_chain(&def_node, source);
+                let name = last_scope_segment(node_text(source, &name_node), "::");
+                symbols.push(Symbol {
+                    name: name.clone(),
+                    kind: SymbolKind::Struct,
+                    range: node_range_with_decorators(&def_node, source, lang),
+                    signature: Some(extract_signature(source, &def_node)),
+                    scope_chain: scope_chain.clone(),
+                    exported: false,
+                    parent: scope_chain.last().cloned(),
+                });
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (enum_name_node, enum_def_node) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            let name = last_scope_segment(node_text(source, &name_node), "::");
+            symbols.push(Symbol {
+                name: name.clone(),
+                kind: SymbolKind::Enum,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (namespace_name_node, namespace_def_node) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::TypeAlias,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node), Some(item_node)) = (
+            template_class_name_node,
+            template_class_def_node,
+            template_class_item_node,
+        ) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            let name = last_scope_segment(node_text(source, &name_node), "::");
+            symbols.push(Symbol {
+                name: name.clone(),
+                kind: SymbolKind::Class,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(template_signature(source, &def_node, &item_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node), Some(item_node)) = (
+            template_struct_name_node,
+            template_struct_def_node,
+            template_struct_item_node,
+        ) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            let name = last_scope_segment(node_text(source, &name_node), "::");
+            symbols.push(Symbol {
+                name: name.clone(),
+                kind: SymbolKind::Struct,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(template_signature(source, &def_node, &item_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node), Some(item_node)) = (
+            template_fn_name_node,
+            template_fn_def_node,
+            template_fn_item_node,
+        ) {
+            let scope_chain = cpp_parent_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Function,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(template_signature(source, &def_node, &item_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(scope_node), Some(name_node), Some(def_node), Some(item_node)) = (
+            template_qual_scope_node,
+            template_qual_name_node,
+            template_qual_def_node,
+            template_qual_item_node,
+        ) {
+            let scope_chain = split_scope_text(node_text(source, &scope_node), "::");
+            let parent = scope_chain.last().cloned();
+            let kind = if parent
+                .as_ref()
+                .map(|segment| type_names.contains(segment))
+                .unwrap_or(false)
+            {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            };
+
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(template_signature(source, &def_node, &item_node)),
+                scope_chain,
+                exported: false,
+                parent,
+            });
+        }
+    }
+
+    dedup_symbols(&mut symbols);
+    Ok(symbols)
+}
+
+/// Extract symbols from Zig source.
+fn extract_zig_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::Zig;
+    let capture_names = query.capture_names();
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut fn_name_node = None;
+        let mut fn_def_node = None;
+        let mut struct_name_node = None;
+        let mut struct_def_node = None;
+        let mut enum_name_node = None;
+        let mut enum_def_node = None;
+        let mut union_name_node = None;
+        let mut union_def_node = None;
+        let mut const_name_node = None;
+        let mut const_def_node = None;
+        let mut test_name_node = None;
+        let mut test_def_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "fn.name" => fn_name_node = Some(cap.node),
+                "fn.def" => fn_def_node = Some(cap.node),
+                "struct.name" => struct_name_node = Some(cap.node),
+                "struct.def" => struct_def_node = Some(cap.node),
+                "enum.name" => enum_name_node = Some(cap.node),
+                "enum.def" => enum_def_node = Some(cap.node),
+                "union.name" => union_name_node = Some(cap.node),
+                "union.def" => union_def_node = Some(cap.node),
+                "const.name" => const_name_node = Some(cap.node),
+                "const.def" => const_def_node = Some(cap.node),
+                "test.name" => test_name_node = Some(cap.node),
+                "test.def" => test_def_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (fn_name_node, fn_def_node) {
+            let scope_chain = zig_container_scope_chain(&def_node, source);
+            let kind = if scope_chain.is_empty() {
+                SymbolKind::Function
+            } else {
+                SymbolKind::Method
+            };
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (struct_name_node, struct_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Struct,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (enum_name_node, enum_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Enum,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (union_name_node, union_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::TypeAlias,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (const_name_node, const_def_node) {
+            let signature = extract_signature(source, &def_node);
+            let is_container = signature.contains("= struct")
+                || signature.contains("= enum")
+                || signature.contains("= union")
+                || signature.contains("= opaque");
+            let is_const = signature.trim_start().starts_with("const ");
+            let name = node_text(source, &name_node).to_string();
+            let already_captured = symbols.iter().any(|symbol| symbol.name == name);
+            if is_const && !is_container && !already_captured {
+                symbols.push(Symbol {
+                    name,
+                    kind: SymbolKind::Variable,
+                    range: node_range_with_decorators(&def_node, source, lang),
+                    signature: Some(signature),
+                    scope_chain: vec![],
+                    exported: false,
+                    parent: None,
+                });
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (test_name_node, test_def_node) {
+            let scope_chain = zig_container_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).trim_matches('"').to_string(),
+                kind: SymbolKind::Function,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+    }
+
+    dedup_symbols(&mut symbols);
+    Ok(symbols)
+}
+
+/// Extract symbols from C# source.
+fn extract_csharp_symbols(
+    source: &str,
+    root: &Node,
+    query: &Query,
+) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::CSharp;
+    let capture_names = query.capture_names();
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut class_name_node = None;
+        let mut class_def_node = None;
+        let mut interface_name_node = None;
+        let mut interface_def_node = None;
+        let mut struct_name_node = None;
+        let mut struct_def_node = None;
+        let mut enum_name_node = None;
+        let mut enum_def_node = None;
+        let mut method_name_node = None;
+        let mut method_def_node = None;
+        let mut property_name_node = None;
+        let mut property_def_node = None;
+        let mut namespace_name_node = None;
+        let mut namespace_def_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "class.name" => class_name_node = Some(cap.node),
+                "class.def" => class_def_node = Some(cap.node),
+                "interface.name" => interface_name_node = Some(cap.node),
+                "interface.def" => interface_def_node = Some(cap.node),
+                "struct.name" => struct_name_node = Some(cap.node),
+                "struct.def" => struct_def_node = Some(cap.node),
+                "enum.name" => enum_name_node = Some(cap.node),
+                "enum.def" => enum_def_node = Some(cap.node),
+                "method.name" => method_name_node = Some(cap.node),
+                "method.def" => method_def_node = Some(cap.node),
+                "property.name" => property_name_node = Some(cap.node),
+                "property.def" => property_def_node = Some(cap.node),
+                "namespace.name" => namespace_name_node = Some(cap.node),
+                "namespace.def" => namespace_def_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (class_name_node, class_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Class,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (interface_name_node, interface_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Interface,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (struct_name_node, struct_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Struct,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (enum_name_node, enum_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Enum,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (method_name_node, method_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Method,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (property_name_node, property_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Variable,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+
+        if let (Some(name_node), Some(def_node)) = (namespace_name_node, namespace_def_node) {
+            let scope_chain = csharp_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::TypeAlias,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: scope_chain.clone(),
+                exported: false,
+                parent: scope_chain.last().cloned(),
+            });
+        }
+    }
+
+    dedup_symbols(&mut symbols);
+    Ok(symbols)
+}
+
 /// Recursively find the first type_identifier node in a subtree.
 fn find_type_identifier_recursive(node: &Node, source: &str) -> Option<String> {
     if node.kind() == "type_identifier" {
@@ -1450,6 +2562,13 @@ impl TreeSitterProvider {
         Self {
             parser: RefCell::new(FileParser::new()),
         }
+    }
+
+    /// Merge a pre-warmed symbol cache into the parser.
+    /// Called from the main loop when the background indexer completes.
+    pub fn merge_warm_cache(&self, cache: SymbolCache) {
+        let mut parser = self.parser.borrow_mut();
+        parser.set_warm_cache(cache);
     }
 
     fn resolve_symbol_inner(
@@ -1853,6 +2972,10 @@ impl crate::language::LanguageProvider for TreeSitterProvider {
     fn list_symbols(&self, file: &Path) -> Result<Vec<Symbol>, AftError> {
         self.parser.borrow_mut().extract_symbols(file)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1912,6 +3035,51 @@ mod tests {
     #[test]
     fn detect_go() {
         assert_eq!(detect_language(Path::new("foo.go")), Some(LangId::Go));
+    }
+
+    #[test]
+    fn detect_c() {
+        assert_eq!(detect_language(Path::new("foo.c")), Some(LangId::C));
+    }
+
+    #[test]
+    fn detect_h() {
+        assert_eq!(detect_language(Path::new("foo.h")), Some(LangId::C));
+    }
+
+    #[test]
+    fn detect_cc() {
+        assert_eq!(detect_language(Path::new("foo.cc")), Some(LangId::Cpp));
+    }
+
+    #[test]
+    fn detect_cpp() {
+        assert_eq!(detect_language(Path::new("foo.cpp")), Some(LangId::Cpp));
+    }
+
+    #[test]
+    fn detect_cxx() {
+        assert_eq!(detect_language(Path::new("foo.cxx")), Some(LangId::Cpp));
+    }
+
+    #[test]
+    fn detect_hpp() {
+        assert_eq!(detect_language(Path::new("foo.hpp")), Some(LangId::Cpp));
+    }
+
+    #[test]
+    fn detect_hh() {
+        assert_eq!(detect_language(Path::new("foo.hh")), Some(LangId::Cpp));
+    }
+
+    #[test]
+    fn detect_zig() {
+        assert_eq!(detect_language(Path::new("foo.zig")), Some(LangId::Zig));
+    }
+
+    #[test]
+    fn detect_cs() {
+        assert_eq!(detect_language(Path::new("foo.cs")), Some(LangId::CSharp));
     }
 
     #[test]
@@ -2771,5 +3939,96 @@ mod tests {
                 symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
             );
         }
+    }
+
+    // --- Symbol cache tests ---
+
+    #[test]
+    fn symbol_cache_returns_cached_results_on_second_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "pub fn hello() {}\npub fn world() {}").unwrap();
+
+        let mut parser = FileParser::new();
+
+        let symbols1 = parser.extract_symbols(&file).unwrap();
+        assert_eq!(symbols1.len(), 2);
+
+        // Second call should return cached result
+        let symbols2 = parser.extract_symbols(&file).unwrap();
+        assert_eq!(symbols2.len(), 2);
+        assert_eq!(symbols1[0].name, symbols2[0].name);
+
+        // Verify cache is populated
+        assert!(parser.symbol_cache.contains_key(&file));
+    }
+
+    #[test]
+    fn symbol_cache_invalidates_on_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "pub fn hello() {}").unwrap();
+
+        let mut parser = FileParser::new();
+
+        let symbols1 = parser.extract_symbols(&file).unwrap();
+        assert_eq!(symbols1.len(), 1);
+        assert_eq!(symbols1[0].name, "hello");
+
+        // Wait to ensure mtime changes (filesystem resolution can be 1s on some OS)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Modify file — add a second function
+        std::fs::write(&file, "pub fn hello() {}\npub fn goodbye() {}").unwrap();
+
+        // Should detect mtime change and re-extract
+        let symbols2 = parser.extract_symbols(&file).unwrap();
+        assert_eq!(symbols2.len(), 2);
+        assert!(symbols2.iter().any(|s| s.name == "goodbye"));
+    }
+
+    #[test]
+    fn symbol_cache_invalidate_method_clears_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "pub fn hello() {}").unwrap();
+
+        let mut parser = FileParser::new();
+        parser.extract_symbols(&file).unwrap();
+        assert!(parser.symbol_cache.contains_key(&file));
+
+        parser.invalidate_symbols(&file);
+        assert!(!parser.symbol_cache.contains_key(&file));
+        // Parse tree cache should also be cleared
+        assert!(!parser.cache.contains_key(&file));
+    }
+
+    #[test]
+    fn symbol_cache_works_for_multiple_languages() {
+        let dir = tempfile::tempdir().unwrap();
+        let rs_file = dir.path().join("lib.rs");
+        let ts_file = dir.path().join("app.ts");
+        let py_file = dir.path().join("main.py");
+
+        std::fs::write(&rs_file, "pub fn rust_fn() {}").unwrap();
+        std::fs::write(&ts_file, "export function tsFn() {}").unwrap();
+        std::fs::write(&py_file, "def py_fn():\n    pass").unwrap();
+
+        let mut parser = FileParser::new();
+
+        let rs_syms = parser.extract_symbols(&rs_file).unwrap();
+        let ts_syms = parser.extract_symbols(&ts_file).unwrap();
+        let py_syms = parser.extract_symbols(&py_file).unwrap();
+
+        assert!(rs_syms.iter().any(|s| s.name == "rust_fn"));
+        assert!(ts_syms.iter().any(|s| s.name == "tsFn"));
+        assert!(py_syms.iter().any(|s| s.name == "py_fn"));
+
+        // All should be cached now
+        assert_eq!(parser.symbol_cache.len(), 3);
+
+        // Re-extract should return same results from cache
+        let rs_syms2 = parser.extract_symbols(&rs_file).unwrap();
+        assert_eq!(rs_syms.len(), rs_syms2.len());
     }
 }

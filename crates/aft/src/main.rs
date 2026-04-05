@@ -267,14 +267,24 @@ fn drain_search_index_events(ctx: &AppContext) {
         };
 
         let mut latest = None;
-        while let Ok(index) = rx.try_recv() {
-            latest = Some(index);
+        while let Ok(pair) = rx.try_recv() {
+            latest = Some(pair);
         }
         latest
     };
 
-    if let Some(index) = latest {
+    if let Some((index, symbol_cache)) = latest {
         *ctx.search_index().borrow_mut() = Some(index);
+        // Merge pre-warmed symbol cache into the provider's parser
+        if symbol_cache.len() > 0 {
+            if let Some(tsp) = ctx
+                .provider()
+                .as_any()
+                .downcast_ref::<aft::parser::TreeSitterProvider>()
+            {
+                tsp.merge_warm_cache(symbol_cache);
+            }
+        }
     }
 }
 

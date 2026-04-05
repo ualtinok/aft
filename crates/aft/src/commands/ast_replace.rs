@@ -17,7 +17,7 @@ use crate::protocol::{RawRequest, Response};
 /// Params:
 ///   - `pattern` (string, required) — ast-grep pattern, e.g. `console.log($MSG)`
 ///   - `rewrite` (string, required) — replacement template, e.g. `logger.info($MSG)`
-///   - `lang` (string, required) — language: typescript, tsx, javascript, python, rust, go
+///   - `lang` (string, required) — language: typescript, tsx, javascript, python, rust, go, c, cpp, zig, csharp
 ///   - `paths` (array of strings, optional) — restrict to these paths
 ///   - `globs` (array of strings, optional) — include/exclude glob patterns
 ///   - `dry_run` (bool, optional, default true) — preview without writing
@@ -68,7 +68,7 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
                 &req.id,
                 "invalid_request",
                 format!(
-                    "ast_replace: unsupported language '{}'. Supported: typescript, tsx, javascript, python, rust, go",
+                    "ast_replace: unsupported language '{}'. Supported: typescript, tsx, javascript, python, rust, go, c, cpp, zig, csharp",
                     lang_str
                 ),
             );

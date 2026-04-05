@@ -12,8 +12,7 @@ use crate::search_index::{
 };
 
 const DEFAULT_MAX_RESULTS: usize = 100;
-const MAX_RAW_LINE_CHARS: usize = 2000;
-const MAX_COMPRESSED_LINE_CHARS: usize = 200;
+const MAX_LINE_CHARS: usize = 200;
 const MAX_MATCHES_PER_FILE: usize = 10;
 const MAX_DISPLAY_MATCHES_PER_FILE: usize = 5;
 
@@ -109,7 +108,7 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
                         return Response::success(
                             &req.id,
                             serde_json::json!({
-                                "text": format_grep_text(&result, ctx.config().compress_tool_output),
+                                "text": format_grep_text(&result, &project_root),
                                 "matches": result.matches.iter().map(match_to_json).collect::<Vec<_>>(),
                                 "total_matches": result.total_matches,
                                 "files_searched": result.files_searched,
@@ -135,7 +134,7 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
     let search_ms = search_start.elapsed().as_secs_f64() * 1000.0;
-    let text = format_grep_text(&result, ctx.config().compress_tool_output);
+    let text = format_grep_text(&result, &project_root);
 
     Response::success(
         &req.id,
@@ -384,97 +383,24 @@ fn current_index_status(ctx: &AppContext) -> IndexStatus {
     }
 }
 
-fn format_grep_text(result: &GrepResult, compress_tool_output: bool) -> String {
-    if compress_tool_output {
-        return format_compressed_grep_text(result);
-    }
-
-    format_raw_grep_text(result)
-}
-
-fn format_raw_grep_text(result: &GrepResult) -> String {
-    if result.matches.is_empty() {
-        return "No files found".to_string();
-    }
-
-    let mut lines = Vec::new();
-
-    // Header: match OpenCode's "Found N matches" / "Found N matches (showing first 100)"
-    if result.truncated {
-        lines.push(format!(
-            "Found {} matches (showing first {})",
-            result.total_matches,
-            result.matches.len()
-        ));
-    } else {
-        lines.push(format!("Found {} matches", result.total_matches));
-    }
-
-    // Group matches by file, preserving the input order (already sorted by mtime)
-    let mut groups: Vec<(String, Vec<&GrepMatch>)> = Vec::new();
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-    for grep_match in &result.matches {
-        let file_key = grep_match.file.display().to_string();
-        if let Some(&idx) = seen.get(&file_key) {
-            groups[idx].1.push(grep_match);
-        } else {
-            seen.insert(file_key.clone(), groups.len());
-            groups.push((file_key, vec![grep_match]));
-        }
-    }
-
-    let mut current_file = String::new();
-    for (file, file_matches) in &groups {
-        if current_file != *file {
-            if !current_file.is_empty() {
-                lines.push(String::new());
-            }
-            current_file = file.clone();
-            lines.push(format!("{}:", file));
-        }
-        for grep_match in file_matches {
-            lines.push(format!(
-                "  Line {}: {}",
-                grep_match.line,
-                truncate_raw_line_text(&grep_match.line_text)
-            ));
-        }
-    }
-
-    // Truncation footer: match OpenCode's exact wording
-    if result.truncated {
-        lines.push(String::new());
-        lines.push(format!(
-            "(Results truncated: showing {} of {} matches ({} hidden). Consider using a more specific path or pattern.)",
-            result.matches.len(),
-            result.total_matches,
-            result.total_matches - result.matches.len()
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn format_compressed_grep_text(result: &GrepResult) -> String {
+fn format_grep_text(result: &GrepResult, project_root: &Path) -> String {
     let mut groups: BTreeMap<String, Vec<&GrepMatch>> = BTreeMap::new();
 
     for grep_match in &result.matches {
-        groups
-            .entry(grep_match.file.display().to_string())
-            .or_default()
-            .push(grep_match);
+        // Use relative path within project, absolute otherwise
+        let display_path = grep_match
+            .file
+            .strip_prefix(project_root)
+            .unwrap_or(&grep_match.file)
+            .display()
+            .to_string();
+        groups.entry(display_path).or_default().push(grep_match);
     }
 
     let mut sections = Vec::new();
 
     for (file, matches) in groups {
-        let match_word = if matches.len() == 1 {
-            "match"
-        } else {
-            "matches"
-        };
-        let mut section = format!("── {} ({} {}) ──", file, matches.len(), match_word);
+        let mut section = file.clone();
         let display_count = if matches.len() > MAX_MATCHES_PER_FILE {
             MAX_DISPLAY_MATCHES_PER_FILE
         } else {
@@ -483,15 +409,15 @@ fn format_compressed_grep_text(result: &GrepResult) -> String {
 
         for grep_match in matches.iter().take(display_count) {
             section.push_str(&format!(
-                "\n  {}: {}",
+                "\n{}: {}",
                 grep_match.line,
-                truncate_line_text(&grep_match.line_text, MAX_COMPRESSED_LINE_CHARS)
+                truncate_line_text(&grep_match.line_text)
             ));
         }
 
         if matches.len() > MAX_MATCHES_PER_FILE {
             section.push_str(&format!(
-                "\n  ... and {} more matches",
+                "\n... and {} more matches",
                 matches.len() - MAX_DISPLAY_MATCHES_PER_FILE
             ));
         }
@@ -513,26 +439,13 @@ fn format_compressed_grep_text(result: &GrepResult) -> String {
     }
 }
 
-fn truncate_raw_line_text(text: &str) -> String {
-    truncate_line_text_with_suffix(text, MAX_RAW_LINE_CHARS, "...")
-}
-
-fn truncate_line_text(text: &str, max_chars: usize) -> String {
-    truncate_line_text_with_suffix(text, max_chars.saturating_sub(1), "…")
-}
-
-fn truncate_line_text_with_suffix(text: &str, max_chars: usize, suffix: &str) -> String {
+fn truncate_line_text(text: &str) -> String {
     let char_count = text.chars().count();
-    if char_count <= max_chars {
+    if char_count <= MAX_LINE_CHARS {
         return text.to_string();
     }
-
-    if max_chars == 0 {
-        return String::new();
-    }
-
-    let truncated = text.chars().take(max_chars).collect::<String>();
-    format!("{}{}", truncated, suffix)
+    let truncated: String = text.chars().take(MAX_LINE_CHARS).collect();
+    format!("{}…", truncated)
 }
 
 fn index_status_label(status: IndexStatus) -> &'static str {
@@ -609,19 +522,23 @@ mod tests {
         }
     }
 
+    fn root() -> PathBuf {
+        PathBuf::from("/project")
+    }
+
     #[test]
-    fn compressed_grep_groups_truncates_and_adds_footer() {
+    fn grep_groups_truncates_and_adds_footer() {
         let long_line = format!("{}xyz", "a".repeat(220));
         let result = GrepResult {
             matches: vec![
                 grep_match(
-                    "crates/aft/src/commands/grep.rs",
+                    "/project/crates/aft/src/commands/grep.rs",
                     14,
                     "pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {",
                 ),
-                grep_match("crates/aft/src/commands/grep.rs", 116, &long_line),
+                grep_match("/project/crates/aft/src/commands/grep.rs", 116, &long_line),
                 grep_match(
-                    "crates/aft/src/main.rs",
+                    "/project/crates/aft/src/main.rs",
                     116,
                     "        \"grep\" => aft::commands::grep::handle_grep(&req, ctx),",
                 ),
@@ -633,21 +550,23 @@ mod tests {
             truncated: false,
         };
 
-        let text = format_grep_text(&result, true);
+        let text = format_grep_text(&result, &root());
 
-        assert!(text.contains("── crates/aft/src/commands/grep.rs (2 matches) ──"));
-        assert!(text.contains(
-            "  14: pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {"
-        ));
-        assert!(text.contains("  116: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"));
-        assert!(text.contains("── crates/aft/src/main.rs (1 match) ──"));
+        // Relative paths, no decorators, no match count in header
+        assert!(text.contains("crates/aft/src/commands/grep.rs\n"));
+        assert!(text
+            .contains("14: pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {"));
+        // Long line truncated at 200 chars
+        assert!(text.contains("116: aaaaaaa"));
+        assert!(text.contains("…"));
+        assert!(text.contains("crates/aft/src/main.rs\n"));
         assert!(text.ends_with("Found 3 match(es) across 2 file(s). [index: ready]"));
     }
 
     #[test]
-    fn compressed_grep_caps_large_file_sections() {
+    fn grep_caps_large_file_sections() {
         let matches = (1..=11)
-            .map(|line| grep_match("src/large.rs", line, &format!("line {line}")))
+            .map(|line| grep_match("/project/src/large.rs", line, &format!("line {line}")))
             .collect::<Vec<_>>();
         let result = GrepResult {
             matches,
@@ -658,65 +577,17 @@ mod tests {
             truncated: false,
         };
 
-        let text = format_grep_text(&result, true);
+        let text = format_grep_text(&result, &root());
 
-        assert!(text.contains("── src/large.rs (11 matches) ──"));
-        assert!(text.contains("  1: line 1"));
-        assert!(text.contains("  5: line 5"));
-        assert!(!text.contains("  6: line 6"));
-        assert!(text.contains("  ... and 6 more matches"));
+        assert!(text.contains("src/large.rs\n"));
+        assert!(text.contains("1: line 1"));
+        assert!(text.contains("5: line 5"));
+        assert!(!text.contains("6: line 6"));
+        assert!(text.contains("... and 6 more matches"));
     }
 
     #[test]
-    fn raw_grep_matches_opencode_format() {
-        let result = GrepResult {
-            matches: vec![
-                grep_match(
-                    "/absolute/path/to/file.rs",
-                    14,
-                    "pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {",
-                ),
-                grep_match("/absolute/path/to/file.rs", 116, "another match"),
-                grep_match("/absolute/path/to/main.rs", 42, "dispatch call"),
-            ],
-            total_matches: 3,
-            files_searched: 2,
-            files_with_matches: 2,
-            index_status: IndexStatus::Fallback,
-            truncated: false,
-        };
-
-        let text = format_grep_text(&result, false);
-
-        // Must match OpenCode's exact format: header, filepath:, indented Line N: text
-        assert_eq!(
-            text,
-            "Found 3 matches\n/absolute/path/to/file.rs:\n  Line 14: pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {\n  Line 116: another match\n\n/absolute/path/to/main.rs:\n  Line 42: dispatch call"
-        );
-    }
-
-    #[test]
-    fn raw_grep_truncates_lines_at_two_thousand_chars() {
-        let result = GrepResult {
-            matches: vec![grep_match("src/main.rs", 42, &"a".repeat(2005))],
-            total_matches: 1,
-            files_searched: 1,
-            files_with_matches: 1,
-            index_status: IndexStatus::Fallback,
-            truncated: false,
-        };
-
-        let text = format_grep_text(&result, false);
-
-        let expected = format!(
-            "Found 1 matches\nsrc/main.rs:\n  Line 42: {}...",
-            "a".repeat(2000)
-        );
-        assert_eq!(text, expected);
-    }
-
-    #[test]
-    fn raw_grep_returns_no_files_found_for_zero_results() {
+    fn grep_returns_zero_results_footer() {
         let result = GrepResult {
             matches: Vec::new(),
             total_matches: 0,
@@ -726,8 +597,11 @@ mod tests {
             truncated: false,
         };
 
-        let text = format_grep_text(&result, false);
+        let text = format_grep_text(&result, &root());
 
-        assert_eq!(text, "No files found");
+        assert_eq!(
+            text,
+            "Found 0 match(es) across 0 file(s). [index: fallback]"
+        );
     }
 }

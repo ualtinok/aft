@@ -73,7 +73,8 @@ pub struct AppContext {
     config: RefCell<Config>,
     callgraph: RefCell<Option<CallGraph>>,
     search_index: RefCell<Option<SearchIndex>>,
-    search_index_rx: RefCell<Option<crossbeam_channel::Receiver<SearchIndex>>>,
+    search_index_rx:
+        RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>,
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
@@ -130,8 +131,11 @@ impl AppContext {
         &self.search_index
     }
 
-    /// Access the search-index build receiver.
-    pub fn search_index_rx(&self) -> &RefCell<Option<crossbeam_channel::Receiver<SearchIndex>>> {
+    /// Access the search-index build receiver (returns index + pre-warmed symbol cache).
+    pub fn search_index_rx(
+        &self,
+    ) -> &RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>
+    {
         &self.search_index_rx
     }
 

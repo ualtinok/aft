@@ -68,8 +68,6 @@ const plugin: Plugin = async (input) => {
     configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root;
   if (aftConfig.experimental_search_index !== undefined)
     configOverrides.experimental_search_index = aftConfig.experimental_search_index;
-  if (aftConfig.compress_tool_output !== undefined)
-    configOverrides.compress_tool_output = aftConfig.compress_tool_output;
 
   // Track which binary version we already attempted to upgrade from.
   // Prevents the loop: mismatch → fire-and-forget download → replaceBinary kills bridge →

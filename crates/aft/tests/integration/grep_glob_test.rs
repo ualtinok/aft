@@ -34,19 +34,6 @@ fn configure_with_index(aft: &mut AftProcess, root: &Path) {
     assert_eq!(resp["success"], true, "configure should succeed: {resp:?}");
 }
 
-fn configure_with_compression(aft: &mut AftProcess, root: &Path, compress_tool_output: bool) {
-    let resp = send(
-        aft,
-        json!({
-            "id": "cfg-compression",
-            "command": "configure",
-            "project_root": root.display().to_string(),
-            "compress_tool_output": compress_tool_output,
-        }),
-    );
-    assert_eq!(resp["success"], true, "configure should succeed: {resp:?}");
-}
-
 fn send(aft: &mut AftProcess, request: Value) -> Value {
     aft.send(&serde_json::to_string(&request).expect("serialize request"))
 }
@@ -183,7 +170,7 @@ fn grep_uses_index_when_configured() {
 }
 
 #[test]
-fn grep_text_is_compressed_by_default() {
+fn grep_text_uses_relative_paths_and_compact_format() {
     let project = setup_project(&[
         ("src/one.rs", "fn alpha() { println!(\"alpha\"); }\n"),
         ("src/two.rs", "fn beta() { println!(\"alpha\"); }\n"),
@@ -194,7 +181,7 @@ fn grep_text_is_compressed_by_default() {
     let response = send(
         &mut aft,
         json!({
-            "id": "grep-compressed",
+            "id": "grep-format",
             "command": "grep",
             "pattern": r#""alpha""#,
             "include": ["src/**/*.rs"],
@@ -206,10 +193,14 @@ fn grep_text_is_compressed_by_default() {
         "grep should succeed: {response:?}"
     );
     let text = response["text"].as_str().expect("grep text");
-    // Compressed format: decorative headers with absolute paths + summary footer
-    assert!(text.contains("(1 match) ──"));
-    assert!(text.contains("src/one.rs"));
-    assert!(text.contains("src/two.rs"));
+    // New format: relative paths, no decorators, line:text format
+    assert!(text.contains("src/one.rs\n"));
+    assert!(text.contains("src/two.rs\n"));
+    // No decorators
+    assert!(!text.contains("──"));
+    // No "Line" prefix, no indentation
+    assert!(text.contains("1: fn alpha()"));
+    assert!(text.contains("1: fn beta()"));
     assert!(text.ends_with("Found 2 match(es) across 2 file(s). [index: fallback]"));
 
     let status = aft.shutdown();
@@ -217,36 +208,7 @@ fn grep_text_is_compressed_by_default() {
 }
 
 #[test]
-fn grep_text_can_disable_compression() {
-    let project = setup_project(&[("src/one.rs", "fn alpha() { println!(\"alpha\"); }\n")]);
-    let mut aft = AftProcess::spawn();
-    configure_with_compression(&mut aft, project.path(), false);
-
-    let response = send(
-        &mut aft,
-        json!({
-            "id": "grep-raw",
-            "command": "grep",
-            "pattern": r#""alpha""#,
-            "include": ["src/**/*.rs"],
-        }),
-    );
-
-    assert_eq!(
-        response["success"], true,
-        "grep should succeed: {response:?}"
-    );
-    // Raw grep format: "Found N matches" header + absolute path + plain file: format
-    let expected_path = canonical_path_string(&project.path().join("src/one.rs"));
-    let expected_text = format!("Found 1 matches\n{}:\n  Line 1: fn alpha() {{ println!(\"alpha\"); }}", expected_path);
-    assert_eq!(response["text"], Value::String(expected_text));
-
-    let status = aft.shutdown();
-    assert!(status.success());
-}
-
-#[test]
-fn glob_text_is_compressed_by_default() {
+fn glob_text_uses_relative_paths() {
     let project = setup_project(&[
         ("src/keep.rs", "fn keep() {}\n"),
         ("src/other.rs", "fn other() {}\n"),
@@ -257,7 +219,7 @@ fn glob_text_is_compressed_by_default() {
     let response = send(
         &mut aft,
         json!({
-            "id": "glob-compressed",
+            "id": "glob-format",
             "command": "glob",
             "pattern": "src/**/*.rs",
         }),
@@ -267,49 +229,12 @@ fn glob_text_is_compressed_by_default() {
         response["success"], true,
         "glob should succeed: {response:?}"
     );
-    assert_eq!(
-        response["text"],
-        Value::String(format!(
-            "2 files matching src/**/*.rs\n\n{}\n{}",
-            canonical_path_string(&project.path().join("src/other.rs")),
-            canonical_path_string(&project.path().join("src/keep.rs"))
-        ))
-    );
-
-    let status = aft.shutdown();
-    assert!(status.success());
-}
-
-#[test]
-fn glob_text_can_disable_compression() {
-    let project = setup_project(&[
-        ("src/keep.rs", "fn keep() {}\n"),
-        ("src/other.rs", "fn other() {}\n"),
-    ]);
-    let mut aft = AftProcess::spawn();
-    configure_with_compression(&mut aft, project.path(), false);
-
-    let response = send(
-        &mut aft,
-        json!({
-            "id": "glob-raw",
-            "command": "glob",
-            "pattern": "src/**/*.rs",
-        }),
-    );
-
-    assert_eq!(
-        response["success"], true,
-        "glob should succeed: {response:?}"
-    );
-    assert_eq!(
-        response["text"],
-        Value::String(format!(
-            "{}\n{}",
-            canonical_path_string(&project.path().join("src/other.rs")),
-            canonical_path_string(&project.path().join("src/keep.rs"))
-        ))
-    );
+    let text = response["text"].as_str().expect("glob text");
+    // Relative paths in text
+    assert!(text.contains("src/keep.rs") || text.contains("src/other.rs"));
+    // No absolute paths
+    assert!(!text.contains("/private/"));
+    assert!(text.starts_with("2 files matching src/**/*.rs"));
 
     let status = aft.shutdown();
     assert!(status.success());

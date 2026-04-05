@@ -36,8 +36,6 @@ pub struct Config {
     pub experimental_search_index: bool,
     /// Maximum file size to fully index in bytes (default: 1MB).
     pub search_index_max_file_size: u64,
-    /// Whether grep/glob text output should use compressed summaries (default: true).
-    pub compress_tool_output: bool,
 }
 
 impl Default for Config {
@@ -58,7 +56,6 @@ impl Default for Config {
             restrict_to_project_root: false,
             experimental_search_index: false,
             search_index_max_file_size: 1_048_576,
-            compress_tool_output: true,
         }
     }
 }

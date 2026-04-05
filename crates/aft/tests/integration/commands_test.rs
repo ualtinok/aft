@@ -1,8 +1,18 @@
 //! Integration tests for the outline command through the binary protocol.
 
-use std::fs::File;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 use super::helpers::{fixture_path, AftProcess};
+
+fn write_temp_file(root: &Path, relative: &str, content: &str) -> PathBuf {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent directories");
+    }
+    fs::write(&path, content).expect("write temp file");
+    path
+}
 
 #[test]
 fn test_outline_typescript_nested_structure() {
@@ -398,6 +408,114 @@ fn test_zoom_empty_annotations_arrays() {
         .expect("calls_out should be array, not null");
     // It's fine if calls_out has items — what matters is it's an array
     let _ = calls_out;
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn test_zoom_supports_c_symbols() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let file = write_temp_file(
+        dir.path(),
+        "src/sample.c",
+        "int compute(int value) {\n    return value + 1;\n}\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"zoom-c","command":"zoom","file":"{}","symbol":"compute"}}"#,
+        file.display()
+    ));
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    let content = resp["content"].as_str().expect("content string");
+    assert!(content.contains("int compute(int value)"));
+    assert!(content.contains("return value + 1;"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn test_zoom_supports_cpp_symbols() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let file = write_temp_file(
+        dir.path(),
+        "src/sample.cpp",
+        "class Worker {\npublic:\n    void run() {}\n};\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"zoom-cpp","command":"zoom","file":"{}","symbol":"Worker"}}"#,
+        file.display()
+    ));
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    let content = resp["content"].as_str().expect("content string");
+    assert!(content.contains("class Worker"));
+    assert!(content.contains("void run()"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn test_zoom_supports_zig_symbols() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let file = write_temp_file(
+        dir.path(),
+        "src/sample.zig",
+        "fn greet(name: []const u8) void {\n    _ = name;\n}\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"zoom-zig","command":"zoom","file":"{}","symbol":"greet"}}"#,
+        file.display()
+    ));
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    let content = resp["content"].as_str().expect("content string");
+    assert!(content.contains("fn greet(name: []const u8) void"));
+    assert!(content.contains("_ = name;"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn test_zoom_supports_csharp_symbols() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let file = write_temp_file(
+        dir.path(),
+        "src/Sample.cs",
+        "public class Worker\n{\n    public void Run()\n    {\n    }\n}\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"zoom-csharp","command":"zoom","file":"{}","symbol":"Worker"}}"#,
+        file.display()
+    ));
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    let content = resp["content"].as_str().expect("content string");
+    assert!(content.contains("public class Worker"));
+    assert!(content.contains("public void Run()"));
 
     let status = aft.shutdown();
     assert!(status.success());

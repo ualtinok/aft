@@ -83,7 +83,7 @@ pub fn handle_glob(req: &RawRequest, ctx: &AppContext) -> Response {
     Response::success(
         &req.id,
         serde_json::json!({
-            "text": format_glob_text(&files, pattern, ctx.config().compress_tool_output, truncated),
+            "text": format_glob_text(&files, pattern, &project_root, truncated),
             "files": files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             "total": total,
             "truncated": truncated,
@@ -110,113 +110,103 @@ fn fallback_glob(
 fn format_glob_text(
     files: &[PathBuf],
     pattern: &str,
-    compress_tool_output: bool,
+    project_root: &Path,
     truncated: bool,
 ) -> String {
-    let text = if compress_tool_output {
-        format_compressed_glob_text(files, pattern)
-    } else if files.is_empty() {
-        "No files found".to_string()
-    } else {
-        files
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    // Convert to relative paths within project
+    let relative_files: Vec<PathBuf> = files
+        .iter()
+        .map(|p| p.strip_prefix(project_root).unwrap_or(p).to_path_buf())
+        .collect();
 
-    if truncated {
-        if text.is_empty() {
-            GLOB_TRUNCATED_MESSAGE.to_string()
-        } else {
-            format!("{}\n\n{}", text, GLOB_TRUNCATED_MESSAGE)
-        }
-    } else {
-        text
-    }
-}
-
-fn format_compressed_glob_text(files: &[PathBuf], pattern: &str) -> String {
     let header = format!(
         "{} {} matching {}",
-        files.len(),
-        if files.len() == 1 { "file" } else { "files" },
+        relative_files.len(),
+        if relative_files.len() == 1 {
+            "file"
+        } else {
+            "files"
+        },
         pattern
     );
 
-    if files.is_empty() {
-        return header;
-    }
-
-    if files.len() <= MAX_FLAT_FILES {
-        let body = files
+    let text = if relative_files.is_empty() {
+        header
+    } else if relative_files.len() <= MAX_FLAT_FILES {
+        let body = relative_files
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        return format!("{}\n\n{}", header, body);
-    }
-
-    let grouped = group_files_by_directory(files);
-    let total_directories = grouped.len();
-    let displayed_directories = if total_directories > MAX_DIRECTORY_SECTIONS {
-        MAX_DISPLAY_DIRECTORIES
+        format!("{}\n\n{}", header, body)
     } else {
-        total_directories
+        let grouped = group_files_by_directory(&relative_files);
+        let total_directories = grouped.len();
+        let displayed_directories = if total_directories > MAX_DIRECTORY_SECTIONS {
+            MAX_DISPLAY_DIRECTORIES
+        } else {
+            total_directories
+        };
+
+        let mut sections = Vec::new();
+        for (directory, names) in grouped.iter().take(displayed_directories) {
+            let file_word = if names.len() == 1 { "file" } else { "files" };
+            let names_text = if names.len() > MAX_FILES_PER_DIRECTORY {
+                format!(
+                    "{}, ...",
+                    names
+                        .iter()
+                        .take(MAX_DISPLAY_FILES_PER_DIRECTORY)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                names.join(", ")
+            };
+            sections.push(format!(
+                "{} ({} {})\n  {}",
+                directory,
+                names.len(),
+                file_word,
+                names_text
+            ));
+        }
+
+        let mut body = format!("{}\n\n{}", header, sections.join("\n\n"));
+
+        if total_directories > MAX_DIRECTORY_SECTIONS {
+            let hidden_directories = &grouped[displayed_directories..];
+            let hidden_file_count: usize = hidden_directories
+                .iter()
+                .map(|(_, names)| names.len())
+                .sum();
+            let hidden_directory_count = total_directories - displayed_directories;
+            body.push_str(&format!(
+                "\n\n... and {} more {} in {} {}",
+                hidden_file_count,
+                if hidden_file_count == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                hidden_directory_count,
+                if hidden_directory_count == 1 {
+                    "directory"
+                } else {
+                    "directories"
+                }
+            ));
+        }
+
+        body
     };
 
-    let mut sections = Vec::new();
-    for (directory, names) in grouped.iter().take(displayed_directories) {
-        let file_word = if names.len() == 1 { "file" } else { "files" };
-        let names_text = if names.len() > MAX_FILES_PER_DIRECTORY {
-            format!(
-                "{}, ...",
-                names
-                    .iter()
-                    .take(MAX_DISPLAY_FILES_PER_DIRECTORY)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else {
-            names.join(", ")
-        };
-        sections.push(format!(
-            "{} ({} {})\n  {}",
-            directory,
-            names.len(),
-            file_word,
-            names_text
-        ));
+    if truncated {
+        format!("{}\n\n{}", text, GLOB_TRUNCATED_MESSAGE)
+    } else {
+        text
     }
-
-    let mut text = format!("{}\n\n{}", header, sections.join("\n\n"));
-
-    if total_directories > MAX_DIRECTORY_SECTIONS {
-        let hidden_directories = &grouped[displayed_directories..];
-        let hidden_file_count: usize = hidden_directories
-            .iter()
-            .map(|(_, names)| names.len())
-            .sum();
-        let hidden_directory_count = total_directories - displayed_directories;
-        text.push_str(&format!(
-            "\n\n... and {} more {} in {} {}",
-            hidden_file_count,
-            if hidden_file_count == 1 {
-                "file"
-            } else {
-                "files"
-            },
-            hidden_directory_count,
-            if hidden_directory_count == 1 {
-                "directory"
-            } else {
-                "directories"
-            }
-        ));
-    }
-
-    text
 }
 
 fn group_files_by_directory(files: &[PathBuf]) -> Vec<(String, Vec<String>)> {
@@ -251,15 +241,19 @@ mod tests {
         paths.iter().map(PathBuf::from).collect()
     }
 
+    fn root() -> PathBuf {
+        PathBuf::from("/project")
+    }
+
     #[test]
-    fn compressed_glob_uses_flat_list_for_small_results() {
-        let text = format_glob_text(&files(&["src/a.rs", "src/b.rs"]), "**/*.rs", true, false);
+    fn glob_uses_flat_list_for_small_results() {
+        let text = format_glob_text(&files(&["src/a.rs", "src/b.rs"]), "**/*.rs", &root(), false);
 
         assert_eq!(text, "2 files matching **/*.rs\n\nsrc/a.rs\nsrc/b.rs");
     }
 
     #[test]
-    fn compressed_glob_groups_directories_and_summarizes_overflow() {
+    fn glob_groups_directories_and_summarizes_overflow() {
         let text = format_glob_text(
             &files(&[
                 "dir1/a.rs",
@@ -287,7 +281,7 @@ mod tests {
                 "dir9/a.rs",
             ]),
             "**/*.rs",
-            true,
+            &root(),
             false,
         );
 
@@ -299,19 +293,12 @@ mod tests {
     }
 
     #[test]
-    fn raw_glob_preserves_newline_joined_paths() {
-        let text = format_glob_text(&files(&["src/a.rs", "src/b.rs"]), "**/*.rs", false, false);
-
-        assert_eq!(text, "src/a.rs\nsrc/b.rs");
-    }
-
-    #[test]
     fn glob_appends_truncation_message() {
-        let text = format_glob_text(&files(&["src/a.rs"]), "**/*.rs", false, true);
+        let text = format_glob_text(&files(&["src/a.rs"]), "**/*.rs", &root(), true);
 
         assert_eq!(
             text,
-            "src/a.rs\n\n(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)"
+            "1 file matching **/*.rs\n\nsrc/a.rs\n\n(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)"
         );
     }
 }

@@ -444,3 +444,211 @@ fn ast_search_and_replace_support_python_patterns() {
     let status = aft.shutdown();
     assert!(status.success());
 }
+
+#[test]
+fn ast_search_and_replace_support_c_patterns() {
+    let project = setup_project(&[(
+        "sample.c",
+        "int add(int left, int right) {\n    return left + right;\n}\n",
+    )]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "c-search",
+            "command": "ast_search",
+            "pattern": "int $NAME($$$PARAMS) { $$$BODY }",
+            "lang": "c",
+        }),
+    );
+
+    assert_eq!(
+        search["success"], true,
+        "c ast_search should succeed: {search:?}"
+    );
+    assert_eq!(search["total_matches"], 1);
+    assert_eq!(search["matches"][0]["meta_variables"]["$NAME"], "add");
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "c-replace",
+            "command": "ast_replace",
+            "pattern": "int $NAME($$$PARAMS) { $$$BODY }",
+            "rewrite": "long $NAME($$$PARAMS) { $$$BODY }",
+            "lang": "c",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], true,
+        "c ast_replace should succeed: {replace:?}"
+    );
+    assert_eq!(replace["total_replacements"], 1);
+
+    let updated = read_file(project.path(), "sample.c");
+    assert!(updated.contains("long add(int left, int right)"));
+    assert!(!updated.contains("int add(int left, int right)"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_search_and_replace_support_cpp_patterns() {
+    let project = setup_project(&[("sample.cpp", "int measure() {\n    return 42;\n}\n")]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "cpp-search",
+            "command": "ast_search",
+            "pattern": "int $NAME() { return 42; }",
+            "lang": "cpp",
+        }),
+    );
+
+    assert_eq!(
+        search["success"], true,
+        "cpp ast_search should succeed: {search:?}"
+    );
+    assert_eq!(search["total_matches"], 1);
+    assert_eq!(search["matches"][0]["meta_variables"]["$NAME"], "measure");
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "cpp-replace",
+            "command": "ast_replace",
+            "pattern": "int $NAME() { return 42; }",
+            "rewrite": "long $NAME() { return 42; }",
+            "lang": "cpp",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], true,
+        "cpp ast_replace should succeed: {replace:?}"
+    );
+    assert_eq!(replace["total_replacements"], 1);
+
+    let updated = read_file(project.path(), "sample.cpp");
+    assert!(updated.contains("long measure()"));
+    assert!(!updated.contains("int measure()"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_search_and_replace_support_zig_patterns() {
+    let project = setup_project(&[(
+        "sample.zig",
+        "const answer = 41;\n\nfn greet(name: []const u8) void {\n    _ = name;\n}\n",
+    )]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "zig-search",
+            "command": "ast_search",
+            "pattern": "fn greet(name: []const u8) void { $$$ }",
+            "lang": "zig",
+        }),
+    );
+
+    assert_eq!(
+        search["success"], true,
+        "zig ast_search should succeed: {search:?}"
+    );
+    assert_eq!(search["total_matches"], 1);
+    assert!(search["matches"][0]["text"]
+        .as_str()
+        .expect("zig match text")
+        .contains("fn greet(name: []const u8) void"));
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "zig-replace",
+            "command": "ast_replace",
+            "pattern": "fn greet(name: []const u8) void { _ = name; }",
+            "rewrite": "pub fn greet(name: []const u8) void { _ = name; }",
+            "lang": "zig",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], true,
+        "zig ast_replace should succeed: {replace:?}"
+    );
+    assert_eq!(replace["total_replacements"], 1);
+
+    let updated = read_file(project.path(), "sample.zig");
+    assert!(updated.contains("pub fn greet(name: []const u8) void"));
+    assert!(!updated.contains("\nfn greet(name: []const u8) void"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_search_and_replace_support_csharp_patterns() {
+    let project = setup_project(&[(
+        "Sample.cs",
+        "public class Worker\n{\n    private int count = 1;\n\n    public void Run()\n    {\n    }\n}\n",
+    )]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "csharp-search",
+            "command": "ast_search",
+            "pattern": "public class $NAME { $$$BODY }",
+            "lang": "csharp",
+        }),
+    );
+
+    assert_eq!(
+        search["success"], true,
+        "csharp ast_search should succeed: {search:?}"
+    );
+    assert_eq!(search["total_matches"], 1);
+    assert_eq!(search["matches"][0]["meta_variables"]["$NAME"], "Worker");
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "csharp-replace",
+            "command": "ast_replace",
+            "pattern": "public class $NAME { $$$BODY }",
+            "rewrite": "public sealed class $NAME { $$$BODY }",
+            "lang": "csharp",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], true,
+        "csharp ast_replace should succeed: {replace:?}"
+    );
+    assert_eq!(replace["total_replacements"], 1);
+
+    let updated = read_file(project.path(), "Sample.cs");
+    assert!(updated.contains("public sealed class Worker"));
+    assert!(!updated.contains("public class Worker"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}

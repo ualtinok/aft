@@ -22,8 +22,5 @@
   },
 
   // Enable experimental indexed search for grep and glob hoisting
-  "experimental_search_index": true,
-
-  // Compress grep/glob output to reduce token usage
-  "compress_tool_output": true
+  "experimental_search_index": true
 }

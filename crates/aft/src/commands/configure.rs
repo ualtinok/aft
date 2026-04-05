@@ -89,13 +89,6 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     }
     if let Some(v) = req
         .params
-        .get("compress_tool_output")
-        .and_then(|v| v.as_bool())
-    {
-        ctx.config_mut().compress_tool_output = v;
-    }
-    if let Some(v) = req
-        .params
         .get("search_index_max_file_size")
         .and_then(|v| v.as_u64())
     {
@@ -134,7 +127,23 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                 baseline,
             );
             index.write_to_disk(&cache_dir, index.stored_git_head());
-            let _ = tx.send(index);
+
+            // Pre-warm symbol cache from indexed files
+            let mut symbol_cache = crate::parser::SymbolCache::new();
+            let mut parser = crate::parser::FileParser::new();
+            for file_entry in &index.files {
+                if let Ok(mtime) = std::fs::metadata(&file_entry.path).and_then(|m| m.modified()) {
+                    if let Ok(symbols) = parser.extract_symbols(&file_entry.path) {
+                        symbol_cache.insert(file_entry.path.clone(), mtime, symbols);
+                    }
+                }
+            }
+            log::info!(
+                "[aft] pre-warmed symbol cache: {} files",
+                symbol_cache.len()
+            );
+
+            let _ = tx.send((index, symbol_cache));
         });
     }
 

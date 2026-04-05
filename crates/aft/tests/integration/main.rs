@@ -23,6 +23,7 @@ mod lsp_rename_test;
 mod markdown_test;
 mod member_test;
 mod move_symbol_test;
+mod outline_languages_test;
 mod outline_zoom_test;
 mod protocol_test;
 mod safety_test;

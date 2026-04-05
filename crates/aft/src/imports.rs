@@ -118,6 +118,7 @@ pub fn parse_imports(source: &str, tree: &Tree, lang: LangId) -> ImportBlock {
         LangId::Python => parse_py_imports(source, tree),
         LangId::Rust => parse_rs_imports(source, tree),
         LangId::Go => parse_go_imports(source, tree),
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => ImportBlock::empty(),
         LangId::Markdown => ImportBlock::empty(),
     }
 }
@@ -290,6 +291,7 @@ pub fn generate_import_line(
         LangId::Python => generate_py_import_line(module_path, names, default_import),
         LangId::Rust => generate_rs_import_line(module_path, names, type_only),
         LangId::Go => generate_go_import_line(module_path, default_import, false),
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => String::new(),
         LangId::Markdown => String::new(),
     }
 }
@@ -323,6 +325,7 @@ pub fn classify_group(lang: LangId, module_path: &str) -> ImportGroup {
         LangId::Python => classify_group_py(module_path),
         LangId::Rust => classify_group_rs(module_path),
         LangId::Go => classify_group_go(module_path),
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => ImportGroup::External,
         LangId::Markdown => ImportGroup::External,
     }
 }

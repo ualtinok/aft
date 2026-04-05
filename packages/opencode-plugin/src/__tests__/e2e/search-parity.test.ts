@@ -186,7 +186,6 @@ function defineSearchParitySuite(
         expect(typeof response.text).toBe("string");
 
         const aftMatches = parseAftMatches(response);
-        const aftTextMatches = parseAftTextMatches(response);
         const rgMatches = ripgrep(grepCase.pattern, h.tempDir, {
           caseSensitive: grepCase.caseSensitive ?? true,
           args: grepCase.ripgrepArgs,
@@ -194,7 +193,6 @@ function defineSearchParitySuite(
         });
 
         expect(aftMatches).toEqual(rgMatches);
-        expect(aftTextMatches).toEqual(rgMatches);
       });
     }
 
@@ -288,7 +286,6 @@ async function configureBridge(
   const response = await harness.bridge.send("configure", {
     project_root: harness.tempDir,
     experimental_search_index: options.experimentalSearchIndex,
-    compress_tool_output: false,
   });
 
   if (response.success !== true) {
@@ -377,29 +374,34 @@ function parseAftTextMatches(response: Record<string, unknown>): ParsedGrepMatch
   let currentFile = "";
 
   for (const line of text.split("\n")) {
-    const groupedHeader = line.match(/^(.*):$/);
-    if (groupedHeader) {
-      currentFile = normalizePath(groupedHeader[1]);
-      continue;
-    }
-
-    const groupedMatch = line.match(/^\s+Line\s+(\d+):\s?(.*)$/);
-    if (groupedMatch && currentFile) {
+    // New format: file header is just a path (relative), no colon, no decorators
+    // Match lines are: "65: text here" (no indentation, no Line prefix)
+    const matchLine = line.match(/^(\d+):\s?(.*)$/);
+    if (matchLine && currentFile) {
       matches.push({
         file: currentFile,
-        line: Number.parseInt(groupedMatch[1], 10),
-        text: groupedMatch[2].trim(),
+        line: Number.parseInt(matchLine[1], 10),
+        text: matchLine[2].trim(),
       });
       continue;
     }
 
-    const flatMatch = line.match(/^(.*?):(\d+):\s?(.*)$/);
-    if (flatMatch) {
-      matches.push({
-        file: normalizePath(flatMatch[1]),
-        line: Number.parseInt(flatMatch[2], 10),
-        text: flatMatch[3].trim(),
-      });
+    // Skip footer lines, empty lines, and "... and N more matches" lines
+    if (line.startsWith("Found ") || line.startsWith("... and ") || line.trim() === "") {
+      continue;
+    }
+
+    // Everything else is a file header — resolve relative to project root
+    // The text output uses relative paths within project; resolve to absolute for comparison
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.includes(": ")) {
+      // This is a file path header — resolve to absolute using the project root from response
+      const projectRoot = String((response as Record<string, unknown>)._projectRoot ?? "");
+      if (projectRoot) {
+        currentFile = normalizePath(realpathSync(join(projectRoot, trimmed)));
+      } else {
+        currentFile = normalizePath(trimmed);
+      }
     }
   }
 
