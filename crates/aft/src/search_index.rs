@@ -957,12 +957,18 @@ pub(crate) fn current_git_head(root: &Path) -> Option<String> {
 pub(crate) fn project_cache_key(project_root: &Path) -> String {
     use sha2::{Digest, Sha256};
 
-    let canonical_root = canonicalize_or_normalize(project_root);
     let mut hasher = Sha256::new();
-    hasher.update(canonical_root.to_string_lossy().as_bytes());
+
     if let Some(root_commit) = run_git(project_root, &["rev-list", "--max-parents=0", "HEAD"]) {
+        // Git repo: root commit is the unique identity.
+        // Same repo cloned anywhere produces the same key.
         hasher.update(root_commit.as_bytes());
+    } else {
+        // Non-git project: use the canonical filesystem path as identity.
+        let canonical_root = canonicalize_or_normalize(project_root);
+        hasher.update(canonical_root.to_string_lossy().as_bytes());
     }
+
     let digest = format!("{:x}", hasher.finalize());
     digest[..16].to_string()
 }
@@ -1491,7 +1497,8 @@ mod tests {
 
         assert_eq!(source_key.len(), 16);
         assert_eq!(clone_key.len(), 16);
-        assert_ne!(source_key, clone_key);
+        // Same repo (same root commit) → same cache key regardless of clone path
+        assert_eq!(source_key, clone_key);
     }
 
     #[test]
