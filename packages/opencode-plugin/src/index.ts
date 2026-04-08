@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
 
 import { loadAftConfig } from "./config.js";
@@ -18,6 +20,7 @@ import { readingTools } from "./tools/reading.js";
 import { refactoringTools } from "./tools/refactoring.js";
 import { safetyTools } from "./tools/safety.js";
 import { searchTools } from "./tools/search.js";
+import { semanticTools } from "./tools/semantic.js";
 import { structureTools } from "./tools/structure.js";
 import type { PluginContext } from "./types.js";
 
@@ -68,6 +71,13 @@ const plugin: Plugin = async (input) => {
     configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root;
   if (aftConfig.experimental_search_index !== undefined)
     configOverrides.experimental_search_index = aftConfig.experimental_search_index;
+  if (aftConfig.experimental_semantic_search !== undefined)
+    configOverrides.experimental_semantic_search = aftConfig.experimental_semantic_search;
+
+  // Compute XDG-compliant storage dir for persistent indexes (trigram, semantic)
+  // Pattern: ~/.local/share/opencode/storage/plugin/aft/
+  const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+  configOverrides.storage_dir = join(dataHome, "opencode", "storage", "plugin", "aft");
 
   // Track which binary version we already attempted to upgrade from.
   // Prevents the loop: mismatch → fire-and-forget download → replaceBinary kills bridge →
@@ -150,6 +160,9 @@ const plugin: Plugin = async (input) => {
     ...navigationTools(ctx),
     // AST tools: recommended+
     ...(surface !== "minimal" && astTools(ctx)),
+    ...(surface !== "minimal" &&
+      aftConfig.experimental_semantic_search === true &&
+      semanticTools(ctx)),
     // Indexed search tools: recommended+ and opt-in
     ...(surface !== "minimal" && aftConfig.experimental_search_index === true && searchTools(ctx)),
     ...refactoringTools(ctx),

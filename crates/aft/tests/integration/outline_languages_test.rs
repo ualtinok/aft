@@ -127,6 +127,104 @@ inline void math::Worker::run() {}
 }
 
 #[test]
+fn outline_html_symbols_include_heading_hierarchy() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "index.html",
+        r#"<!DOCTYPE html>
+<html>
+<head><title>Test Page</title></head>
+<body>
+  <h1>Main Title</h1>
+  <p>Introduction text</p>
+  <h2>First Section</h2>
+  <p>Content here</p>
+  <h3>Subsection A</h3>
+  <p>More content</p>
+  <h2>Second Section</h2>
+  <article>
+    <h3>Nested Article</h3>
+    <p>Article content</p>
+  </article>
+</body>
+</html>
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let text = outline_text(&mut aft, &file);
+    // Should have all headings
+    for expected in [
+        "Main Title",
+        "First Section",
+        "Subsection A",
+        "Second Section",
+        "Nested Article",
+    ] {
+        assert!(
+            text.contains(expected),
+            "missing {expected} in outline: {text}"
+        );
+    }
+    // Should show heading kind abbreviation
+    assert!(
+        text.contains(" h "),
+        "should contain heading kind 'h': {text}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn zoom_html_heading_returns_content_with_context() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "page.html",
+        r#"<html>
+<body>
+  <h1>Welcome</h1>
+  <p>Intro paragraph</p>
+  <h2>Features</h2>
+  <p>Feature list here</p>
+  <h2>About</h2>
+  <p>About section</p>
+</body>
+</html>
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "zoom-html",
+            "command": "zoom",
+            "file": file,
+            "symbol": "Features",
+        }),
+    );
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    assert_eq!(resp["name"], "Features");
+    assert_eq!(resp["kind"], "heading");
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("Features"),
+        "content should contain heading text: {content}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn outline_zig_symbols_include_containers_consts_tests_and_functions() {
     let dir = TempDir::new().unwrap();
     let file = write_file(

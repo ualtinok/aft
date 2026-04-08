@@ -458,7 +458,12 @@ fn find_scope_container(
                 }
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Markdown => {}
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Html
+        | LangId::Markdown => {}
     }
 
     (None, available)

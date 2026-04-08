@@ -1,4 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { error, getLogFilePath, log, warn } from "./logger.js";
 
 // ## Note on TypeScript `as` type assertions
@@ -135,9 +137,6 @@ export class BinaryBridge {
                 );
               }
               this.configured = true;
-            } catch (err) {
-              // Configure failed — leave configured=false so next call retries
-              throw err;
             } finally {
               this._configurePromise = null;
             }
@@ -251,6 +250,15 @@ export class BinaryBridge {
     const child = spawn(this.binaryPath, [], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // Store fastembed model files alongside the semantic index, not the project cwd
+        FASTEMBED_CACHE_DIR:
+          process.env.FASTEMBED_CACHE_DIR ||
+          (typeof this.configOverrides.storage_dir === "string"
+            ? join(this.configOverrides.storage_dir, "semantic", "models")
+            : join(homedir() || "", ".cache", "fastembed")),
+      },
     });
 
     child.stdout?.on("data", (chunk: Buffer) => {

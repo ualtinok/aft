@@ -34,6 +34,7 @@ pub mod lsp_hints;
 pub mod parser;
 pub mod protocol;
 pub mod search_index;
+pub mod semantic_index;
 pub mod symbols;
 
 #[cfg(test)]

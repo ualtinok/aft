@@ -368,7 +368,7 @@ function parseAftMatches(response: Record<string, unknown>): ParsedGrepMatch[] {
     .sort(compareGrepMatches);
 }
 
-function parseAftTextMatches(response: Record<string, unknown>): ParsedGrepMatch[] {
+function _parseAftTextMatches(response: Record<string, unknown>): ParsedGrepMatch[] {
   const text = typeof response.text === "string" ? response.text : "";
   const matches: ParsedGrepMatch[] = [];
   let currentFile = "";

@@ -260,6 +260,7 @@ pub fn detect_formatter(
         LangId::Cpp => "cpp",
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
+        LangId::Html => "html",
         LangId::Markdown => "markdown",
     };
     let project_root = config.project_root.as_deref();
@@ -349,6 +350,7 @@ pub fn detect_formatter(
             }
         }
         LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
+        LangId::Html => None,
         LangId::Markdown => None,
     }
 }
@@ -617,6 +619,7 @@ pub fn detect_type_checker(
         LangId::Cpp => "cpp",
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
+        LangId::Html => "html",
         LangId::Markdown => "markdown",
     };
     if let Some(preferred) = config.checker.get(lang_key) {
@@ -707,6 +710,7 @@ pub fn detect_type_checker(
             }
         }
         LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
+        LangId::Html => None,
         LangId::Markdown => None,
     }
 }

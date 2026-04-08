@@ -4,6 +4,8 @@ use std::sync::mpsc;
 
 use notify::RecommendedWatcher;
 
+use fastembed::TextEmbedding;
+
 use crate::backup::BackupStore;
 use crate::callgraph::CallGraph;
 use crate::checkpoint::CheckpointStore;
@@ -11,6 +13,20 @@ use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
 use crate::search_index::SearchIndex;
+use crate::semantic_index::SemanticIndex;
+
+#[derive(Debug, Clone)]
+pub enum SemanticIndexStatus {
+    Disabled,
+    Building,
+    Ready,
+    Failed(String),
+}
+
+pub enum SemanticIndexEvent {
+    Ready(SemanticIndex),
+    Failed(String),
+}
 
 /// Normalize a path by resolving `.` and `..` components lexically,
 /// without touching the filesystem. This prevents path traversal
@@ -75,6 +91,10 @@ pub struct AppContext {
     search_index: RefCell<Option<SearchIndex>>,
     search_index_rx:
         RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>,
+    semantic_index: RefCell<Option<SemanticIndex>>,
+    semantic_index_rx: RefCell<Option<crossbeam_channel::Receiver<SemanticIndexEvent>>>,
+    semantic_index_status: RefCell<SemanticIndexStatus>,
+    semantic_embedding_model: RefCell<Option<TextEmbedding>>,
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
@@ -90,6 +110,10 @@ impl AppContext {
             callgraph: RefCell::new(None),
             search_index: RefCell::new(None),
             search_index_rx: RefCell::new(None),
+            semantic_index: RefCell::new(None),
+            semantic_index_rx: RefCell::new(None),
+            semantic_index_status: RefCell::new(SemanticIndexStatus::Disabled),
+            semantic_embedding_model: RefCell::new(None),
             watcher: RefCell::new(None),
             watcher_rx: RefCell::new(None),
             lsp_manager: RefCell::new(LspManager::new()),
@@ -137,6 +161,27 @@ impl AppContext {
     ) -> &RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>
     {
         &self.search_index_rx
+    }
+
+    /// Access the semantic search index.
+    pub fn semantic_index(&self) -> &RefCell<Option<SemanticIndex>> {
+        &self.semantic_index
+    }
+
+    /// Access the semantic-index build receiver.
+    pub fn semantic_index_rx(
+        &self,
+    ) -> &RefCell<Option<crossbeam_channel::Receiver<SemanticIndexEvent>>> {
+        &self.semantic_index_rx
+    }
+
+    pub fn semantic_index_status(&self) -> &RefCell<SemanticIndexStatus> {
+        &self.semantic_index_status
+    }
+
+    /// Access the cached semantic embedding model.
+    pub fn semantic_embedding_model(&self) -> &RefCell<Option<TextEmbedding>> {
+        &self.semantic_embedding_model
     }
 
     /// Access the file watcher handle (kept alive to continue watching).

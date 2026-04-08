@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, BufWriter, Write};
 
 use aft::config::Config;
-use aft::context::AppContext;
+use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, RawRequest, Response};
@@ -57,6 +57,7 @@ fn main() {
                 // If reversed, watcher updates applied to the old index would be lost
                 // when the background-built index replaces it.
                 drain_search_index_events(&ctx);
+                drain_semantic_index_events(&ctx);
                 drain_watcher_events(&ctx);
                 drain_lsp_events(&ctx);
                 dispatch(req, &ctx)
@@ -117,6 +118,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "configure" => aft::commands::configure::handle_configure(&req, ctx),
         "glob" => aft::commands::glob::handle_glob(&req, ctx),
         "grep" => aft::commands::grep::handle_grep(&req, ctx),
+        "semantic_search" => aft::commands::semantic_search::handle_semantic_search(&req, ctx),
         "call_tree" => aft::commands::call_tree::handle_call_tree(&req, ctx),
         "callers" => aft::commands::callers::handle_callers(&req, ctx),
         "trace_to" => aft::commands::trace_to::handle_trace_to(&req, ctx),
@@ -256,6 +258,17 @@ fn drain_watcher_events(ctx: &AppContext) {
         }
     }
 
+    let mut semantic_index_ref = ctx.semantic_index().borrow_mut();
+    if let Some(index) = semantic_index_ref.as_mut() {
+        for path in &changed {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if SOURCE_EXTENSIONS.contains(&ext) {
+                    index.invalidate_file(path);
+                }
+            }
+        }
+    }
+
     log::info!("invalidated {} files", changed.len());
 }
 
@@ -283,6 +296,35 @@ fn drain_search_index_events(ctx: &AppContext) {
                 .downcast_ref::<aft::parser::TreeSitterProvider>()
             {
                 tsp.merge_warm_cache(symbol_cache);
+            }
+        }
+    }
+}
+
+fn drain_semantic_index_events(ctx: &AppContext) {
+    let latest = {
+        let rx_ref = ctx.semantic_index_rx().borrow();
+        let Some(rx) = rx_ref.as_ref() else {
+            return;
+        };
+
+        let mut latest = None;
+        while let Ok(event) = rx.try_recv() {
+            latest = Some(event);
+        }
+        latest
+    };
+
+    if let Some(event) = latest {
+        *ctx.semantic_index_rx().borrow_mut() = None;
+        match event {
+            SemanticIndexEvent::Ready(index) => {
+                *ctx.semantic_index().borrow_mut() = Some(index);
+                *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Ready;
+            }
+            SemanticIndexEvent::Failed(error) => {
+                *ctx.semantic_index().borrow_mut() = None;
+                *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Failed(error);
             }
         }
     }

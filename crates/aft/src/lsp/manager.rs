@@ -489,6 +489,7 @@ fn language_id_for_extension(ext: &str) -> &'static str {
         "py" | "pyi" => "python",
         "rs" => "rust",
         "go" => "go",
+        "html" | "htm" => "html",
         _ => "plaintext",
     }
 }

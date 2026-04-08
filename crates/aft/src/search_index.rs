@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -21,6 +21,10 @@ const LOOKUP_MAGIC: &[u8; 8] = b"AFTLKP01";
 const INDEX_VERSION: u32 = 1;
 const PREVIEW_BYTES: usize = 8 * 1024;
 const EOF_SENTINEL: u8 = 0;
+const MAX_ENTRIES: usize = 10_000_000;
+const MIN_FILE_ENTRY_BYTES: usize = 25;
+const LOOKUP_ENTRY_BYTES: usize = 16;
+const POSTING_BYTES: usize = 6;
 
 #[derive(Clone, Debug)]
 pub struct SearchIndex {
@@ -671,6 +675,10 @@ impl SearchIndex {
 
         let mut postings_reader = BufReader::new(File::open(postings_path).ok()?);
         let mut lookup_reader = BufReader::new(File::open(lookup_path).ok()?);
+        let postings_len_total =
+            usize::try_from(postings_reader.get_ref().metadata().ok()?.len()).ok()?;
+        let lookup_len_total =
+            usize::try_from(lookup_reader.get_ref().metadata().ok()?.len()).ok()?;
 
         let mut magic = [0u8; 8];
         postings_reader.read_exact(&mut magic).ok()?;
@@ -685,13 +693,27 @@ impl SearchIndex {
         let root_len = read_u32(&mut postings_reader).ok()? as usize;
         let max_file_size = read_u64(&mut postings_reader).ok()?;
         let file_count = read_u32(&mut postings_reader).ok()? as usize;
+        if file_count > MAX_ENTRIES {
+            return None;
+        }
+        let remaining_postings = remaining_bytes(&mut postings_reader, postings_len_total)?;
+        let minimum_file_bytes = file_count.checked_mul(MIN_FILE_ENTRY_BYTES)?;
+        if minimum_file_bytes > remaining_postings {
+            return None;
+        }
 
+        if head_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+            return None;
+        }
         let mut head_bytes = vec![0u8; head_len];
         postings_reader.read_exact(&mut head_bytes).ok()?;
         let git_head = String::from_utf8(head_bytes)
             .ok()
             .filter(|head| !head.is_empty());
 
+        if root_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+            return None;
+        }
         let mut root_bytes = vec![0u8; root_len];
         postings_reader.read_exact(&mut root_bytes).ok()?;
         let project_root = PathBuf::from(String::from_utf8(root_bytes).ok()?);
@@ -707,6 +729,12 @@ impl SearchIndex {
             let size = read_u64(&mut postings_reader).ok()?;
             let secs = read_u64(&mut postings_reader).ok()?;
             let nanos = read_u32(&mut postings_reader).ok()?;
+            if nanos >= 1_000_000_000 {
+                return None;
+            }
+            if path_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+                return None;
+            }
             let mut path_bytes = vec![0u8; path_len];
             postings_reader.read_exact(&mut path_bytes).ok()?;
             let relative_path = PathBuf::from(String::from_utf8(path_bytes).ok()?);
@@ -725,6 +753,13 @@ impl SearchIndex {
         }
 
         let postings_len = read_u64(&mut postings_reader).ok()? as usize;
+        let max_postings_bytes = MAX_ENTRIES.checked_mul(POSTING_BYTES)?;
+        if postings_len > max_postings_bytes {
+            return None;
+        }
+        if postings_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+            return None;
+        }
         let mut postings_blob = vec![0u8; postings_len];
         postings_reader.read_exact(&mut postings_blob).ok()?;
 
@@ -737,6 +772,14 @@ impl SearchIndex {
             return None;
         }
         let entry_count = read_u32(&mut lookup_reader).ok()? as usize;
+        if entry_count > MAX_ENTRIES {
+            return None;
+        }
+        let remaining_lookup = remaining_bytes(&mut lookup_reader, lookup_len_total)?;
+        let minimum_lookup_bytes = entry_count.checked_mul(LOOKUP_ENTRY_BYTES)?;
+        if minimum_lookup_bytes > remaining_lookup {
+            return None;
+        }
 
         let mut postings = HashMap::new();
         let mut file_trigrams: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -745,7 +788,10 @@ impl SearchIndex {
             let trigram = read_u32(&mut lookup_reader).ok()?;
             let offset = read_u64(&mut lookup_reader).ok()? as usize;
             let count = read_u32(&mut lookup_reader).ok()? as usize;
-            let bytes_len = count.checked_mul(6)?;
+            if count > MAX_ENTRIES {
+                return None;
+            }
+            let bytes_len = count.checked_mul(POSTING_BYTES)?;
             let end = offset.checked_add(bytes_len)?;
             if end > postings_blob.len() {
                 return None;
@@ -1120,13 +1166,18 @@ pub fn extract_trigrams(content: &[u8]) -> Vec<(u32, u8, usize)> {
     trigrams
 }
 
-pub fn resolve_cache_dir(project_root: &Path) -> PathBuf {
-    // Respect AFT_CACHE_DIR for testing — prevents tests from polluting the user's cache
+pub fn resolve_cache_dir(project_root: &Path, storage_dir: Option<&Path>) -> PathBuf {
+    // Respect AFT_CACHE_DIR for testing — prevents tests from polluting the user's storage
     if let Some(override_dir) = std::env::var_os("AFT_CACHE_DIR") {
         return PathBuf::from(override_dir)
             .join("index")
             .join(project_cache_key(project_root));
     }
+    // Use configured storage dir (from plugin, XDG-compliant)
+    if let Some(dir) = storage_dir {
+        return dir.join("index").join(project_cache_key(project_root));
+    }
+    // Fallback to ~/.cache/aft/ (legacy, for standalone binary usage)
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -1593,6 +1644,11 @@ fn write_u64<W: Write>(writer: &mut W, value: u64) -> std::io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
+fn remaining_bytes<R: Seek>(reader: &mut R, total_len: usize) -> Option<usize> {
+    let pos = usize::try_from(reader.stream_position().ok()?).ok()?;
+    total_len.checked_sub(pos)
+}
+
 fn run_git(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -1981,5 +2037,38 @@ mod tests {
             files,
             vec![fs::canonicalize(hidden_file).expect("canonicalize binary file")]
         );
+    }
+
+    #[test]
+    fn read_from_disk_rejects_invalid_nanos() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let cache_dir = dir.path().join("cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+
+        let mut postings = Vec::new();
+        postings.extend_from_slice(INDEX_MAGIC);
+        postings.extend_from_slice(&INDEX_VERSION.to_le_bytes());
+        postings.extend_from_slice(&0u32.to_le_bytes());
+        postings.extend_from_slice(&1u32.to_le_bytes());
+        postings.extend_from_slice(&DEFAULT_MAX_FILE_SIZE.to_le_bytes());
+        postings.extend_from_slice(&1u32.to_le_bytes());
+        postings.extend_from_slice(b"/");
+        postings.push(0u8);
+        postings.extend_from_slice(&1u32.to_le_bytes());
+        postings.extend_from_slice(&0u64.to_le_bytes());
+        postings.extend_from_slice(&0u64.to_le_bytes());
+        postings.extend_from_slice(&1_000_000_000u32.to_le_bytes());
+        postings.extend_from_slice(b"a");
+        postings.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut lookup = Vec::new();
+        lookup.extend_from_slice(LOOKUP_MAGIC);
+        lookup.extend_from_slice(&INDEX_VERSION.to_le_bytes());
+        lookup.extend_from_slice(&0u32.to_le_bytes());
+
+        fs::write(cache_dir.join("postings.bin"), postings).expect("write postings");
+        fs::write(cache_dir.join("lookup.bin"), lookup).expect("write lookup");
+
+        assert!(SearchIndex::read_from_disk(&cache_dir).is_none());
     }
 }

@@ -68,6 +68,8 @@ export const AftConfigSchema = z.object({
   restrict_to_project_root: z.boolean().optional(),
   /** Enable experimental indexed search for grep and glob hoisting. Default: false. */
   experimental_search_index: z.boolean().optional(),
+  /** Enable experimental semantic search. Default: false. */
+  experimental_semantic_search: z.boolean().optional(),
 });
 
 export type AftConfig = z.infer<typeof AftConfigSchema>;

@@ -197,7 +197,12 @@ pub fn is_entry_point(name: &str, kind: &SymbolKind, exported: bool, lang: LangI
             // starts with Test (case-sensitive)
             name.starts_with("Test")
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Markdown => false,
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Html
+        | LangId::Markdown => false,
     }
 }
 

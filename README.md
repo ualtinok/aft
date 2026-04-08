@@ -219,6 +219,7 @@ instant cold starts and stays fresh via file watcher and mtime verification.
 - **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
 - **Git conflict viewer** — show all merge conflicts across the repository in a single call with line-numbered regions
 - **Indexed search** *(experimental)* — trigram-indexed `grep` and `glob` that hoist opencode's built-ins, with background index building, disk persistence, and compressed output mode
+- **Semantic search** *(experimental)* — search code by meaning using local embeddings (fastembed + all-MiniLM-L6-v2), with cAST-style symbol chunking, cosine similarity ranking, and disk persistence
 - **Inline diagnostics** — write and edit return LSP errors detected after the change
 - **UI metadata** — the OpenCode desktop shows file paths and diff previews (`+N/-N`) for every edit
 - **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
@@ -259,6 +260,7 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 | `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]` |
 | `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
 | `aft_conflicts` | Show all git merge conflicts with line-numbered regions | *(none)* |
+| `aft_search` | Semantic code search by meaning *(experimental)* | `query`, `topK` |
 | `aft_safety` | Undo, history, checkpoints, restore | `op`, `filePath`, `name` |
 
 **All tier** (set `tool_surface: "all"`):
@@ -603,6 +605,42 @@ Parameters: `pattern` (required), `path` (optional — scope to subdirectory or 
 
 ---
 
+### aft_search *(experimental)*
+
+Semantic code search — find code by describing what it does in natural language. Requires
+`experimental_semantic_search: true`. Uses a local embedding model (all-MiniLM-L6-v2, ~22MB,
+downloaded on first use) to embed all symbols in the project and match queries by cosine
+similarity. No API keys or external services needed.
+
+```json
+{ "query": "authentication middleware that validates JWT tokens" }
+```
+
+Returns ranked results with relevance scores and code snippets:
+
+```
+crates/aft/src/commands/configure.rs
+  handle_configure (function, exported) 17:253 [0.42]
+    pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
+      let root = match req.params.get("project_root")...
+      ...
+
+packages/opencode-plugin/src/bridge.ts
+  checkVersion (function) 150:175 [0.38]
+    private async checkVersion(): Promise<void> {
+      ...
+
+Found 10 results [semantic index: ready]
+```
+
+The index is built in a background thread at session start, persisted to disk for fast cold
+start, and uses cAST-style enrichment (file path + kind + name + signature + body snippet)
+for better embedding quality.
+
+Parameters: `query` (required — natural language description), `topK` (optional — default 10).
+
+---
+
 ### aft_delete
 
 Delete a file with an in-memory backup. The backup survives for the session and can be restored
@@ -800,6 +838,7 @@ Both files are JSONC (comments allowed).
   // minimal:     aft_outline, aft_zoom, aft_safety only (no hoisting)
   // recommended: minimal + hoisted tools + lsp_diagnostics + ast_grep + aft_import + aft_conflicts
   //              + grep/glob (when experimental_search_index is enabled)
+  //              + aft_search (when experimental_semantic_search is enabled)
   // all:         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
   "tool_surface": "recommended",
 
@@ -813,6 +852,12 @@ Both files are JSONC (comments allowed).
   // Falls back to direct scanning when the index isn't ready or for out-of-project paths.
   // Default: false
   "experimental_search_index": false,
+
+  // Enable semantic code search (aft_search tool).
+  // Builds embeddings for all symbols using a local model (all-MiniLM-L6-v2, ~22MB).
+  // The model is downloaded on first use. Index persists to disk for fast cold start.
+  // Default: false
+  "experimental_semantic_search": false,
 
   // Restrict all file operations to the project root directory.
   // Default: false (matches opencode's permission-based model — operations prompt via ctx.ask)
@@ -839,7 +884,7 @@ OpenCode agent
      v
 @cortexkit/aft-opencode (TypeScript plugin)
   - Hoists enhanced read/write/edit/apply_patch/ast_grep_*/lsp_diagnostics/grep/glob
-  - Registers aft_outline/navigate/import/transform/refactor/safety/delete/move
+  - Registers aft_outline/navigate/import/transform/refactor/safety/delete/move/search
   - Manages a BridgePool (one aft process per session)
   - Resolves the binary path (cache → npm → PATH → cargo → download)
      |
@@ -851,12 +896,13 @@ aft binary (Rust)
   - Format-on-edit (shells out to biome / rustfmt / etc.)
   - Backup/checkpoint management
   - Trigram search index (experimental: background thread, disk persistence, file watcher)
-  - ~7 MB, zero runtime dependencies
+  - Semantic search with local embeddings (experimental: fastembed + all-MiniLM-L6-v2)
+  - Persistent storage at ~/.local/share/opencode/storage/plugin/aft/
 ```
 
 The binary speaks a simple request/response protocol: the plugin writes a JSON object to stdin,
-the binary writes a JSON object to stdout. One process per working directory stays alive for the
-session — warm parse trees, no re-spawn overhead per call.
+the binary writes a JSON object to stdout. One process per session stays alive for the session
+lifetime — warm parse trees, isolated undo history, no re-spawn overhead per call.
 
 ---
 

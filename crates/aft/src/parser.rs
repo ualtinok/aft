@@ -318,6 +318,7 @@ pub enum LangId {
     Cpp,
     Zig,
     CSharp,
+    Html,
     Markdown,
 }
 
@@ -335,6 +336,7 @@ pub fn detect_language(path: &Path) -> Option<LangId> {
         "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some(LangId::Cpp),
         "zig" => Some(LangId::Zig),
         "cs" => Some(LangId::CSharp),
+        "html" | "htm" => Some(LangId::Html),
         "md" | "markdown" | "mdx" => Some(LangId::Markdown),
         _ => None,
     }
@@ -353,6 +355,7 @@ pub fn grammar_for(lang: LangId) -> Language {
         LangId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         LangId::Zig => tree_sitter_zig::LANGUAGE.into(),
         LangId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        LangId::Html => tree_sitter_html::LANGUAGE.into(),
         LangId::Markdown => tree_sitter_md::LANGUAGE.into(),
     }
 }
@@ -369,6 +372,7 @@ fn query_for(lang: LangId) -> Option<&'static str> {
         LangId::Cpp => Some(CPP_QUERY),
         LangId::Zig => Some(ZIG_QUERY),
         LangId::CSharp => Some(CSHARP_QUERY),
+        LangId::Html => None, // HTML uses direct tree walking like Markdown
         LangId::Markdown => None,
     }
 }
@@ -552,8 +556,10 @@ impl FileParser {
         let (tree, lang) = self.parse(path)?;
         let root = tree.root_node();
 
-        // Markdown uses direct tree walking, not query patterns
-        let symbols = if lang == LangId::Markdown {
+        // HTML and Markdown use direct tree walking, not query patterns
+        let symbols = if lang == LangId::Html {
+            extract_html_symbols(&source, &root)?
+        } else if lang == LangId::Markdown {
             extract_md_symbols(&source, &root)?
         } else {
             let query_src = query_for(lang).ok_or_else(|| AftError::InvalidRequest {
@@ -578,7 +584,7 @@ impl FileParser {
                 LangId::Cpp => extract_cpp_symbols(&source, &root, &query)?,
                 LangId::Zig => extract_zig_symbols(&source, &root, &query)?,
                 LangId::CSharp => extract_csharp_symbols(&source, &root, &query)?,
-                LangId::Markdown => vec![],
+                LangId::Html | LangId::Markdown => vec![],
             }
         };
 
@@ -650,7 +656,7 @@ pub(crate) fn node_range_with_decorators(node: &Node, source: &str, lang: LangId
                 // Decorators are handled by decorated_definition capture
                 false
             }
-            LangId::Markdown => false,
+            LangId::Html | LangId::Markdown => false,
         };
 
         if should_include {
@@ -2434,6 +2440,117 @@ fn find_type_identifier_recursive(node: &Node, source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract HTML headings (h1-h6) as symbols.
+/// Each heading becomes a symbol with kind `Heading`, and its range covers
+/// the element itself. Headings are nested based on their level.
+fn extract_html_symbols(source: &str, root: &Node) -> Result<Vec<Symbol>, AftError> {
+    let mut headings: Vec<(u8, Symbol)> = Vec::new();
+    collect_html_headings(source, root, &mut headings);
+
+    // Build hierarchy: assign scope_chain and parent based on heading level
+    let mut scope_stack: Vec<(u8, String)> = Vec::new(); // (level, name)
+    for (level, symbol) in headings.iter_mut() {
+        // Pop scope entries that are at the same level or deeper
+        while scope_stack.last().is_some_and(|(l, _)| *l >= *level) {
+            scope_stack.pop();
+        }
+        symbol.scope_chain = scope_stack.iter().map(|(_, name)| name.clone()).collect();
+        symbol.parent = scope_stack.last().map(|(_, name)| name.clone());
+        scope_stack.push((*level, symbol.name.clone()));
+    }
+
+    Ok(headings.into_iter().map(|(_, s)| s).collect())
+}
+
+/// Recursively collect h1-h6 elements from the HTML tree.
+fn collect_html_headings(source: &str, node: &Node, headings: &mut Vec<(u8, Symbol)>) {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+
+    loop {
+        let child = cursor.node();
+        if child.kind() == "element" {
+            // Check if this element's start tag is h1-h6
+            if let Some(start_tag) = child
+                .child_by_field_name("start_tag")
+                .or_else(|| child.child(0).filter(|c| c.kind() == "start_tag"))
+            {
+                if let Some(tag_name_node) = start_tag
+                    .child_by_field_name("tag_name")
+                    .or_else(|| start_tag.child(1).filter(|c| c.kind() == "tag_name"))
+                {
+                    let tag_name = node_text(source, &tag_name_node).to_lowercase();
+                    if let Some(level) = match tag_name.as_str() {
+                        "h1" => Some(1u8),
+                        "h2" => Some(2),
+                        "h3" => Some(3),
+                        "h4" => Some(4),
+                        "h5" => Some(5),
+                        "h6" => Some(6),
+                        _ => None,
+                    } {
+                        // Extract text content from the element
+                        let text = extract_element_text(source, &child).trim().to_string();
+                        if !text.is_empty() {
+                            let range = node_range(&child);
+                            let signature = format!("<h{}> {}", level, text);
+                            headings.push((
+                                level,
+                                Symbol {
+                                    name: text,
+                                    kind: SymbolKind::Heading,
+                                    range,
+                                    signature: Some(signature),
+                                    scope_chain: vec![], // filled later
+                                    exported: false,
+                                    parent: None, // filled later
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            // Recurse into element children (nested headings)
+            collect_html_headings(source, &child, headings);
+        } else {
+            // Recurse into other node types (document, body, etc.)
+            collect_html_headings(source, &child, headings);
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// Extract text content from an HTML element, stripping tags.
+fn extract_element_text(source: &str, node: &Node) -> String {
+    let mut text = String::new();
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return text;
+    }
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "text" => {
+                text.push_str(node_text(source, &child));
+            }
+            "element" => {
+                // Recurse into nested elements (e.g., <strong>, <em>, <a>)
+                text.push_str(&extract_element_text(source, &child));
+            }
+            _ => {}
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    text
 }
 
 /// Extract markdown headings as symbols.

@@ -34,8 +34,14 @@ pub struct Config {
     pub restrict_to_project_root: bool,
     /// Enable the experimental trigram search index (default: false).
     pub experimental_search_index: bool,
+    /// Enable the experimental semantic search index (default: false).
+    pub experimental_semantic_search: bool,
     /// Maximum file size to fully index in bytes (default: 1MB).
     pub search_index_max_file_size: u64,
+    /// Persistent storage directory for indexes (trigram, semantic).
+    /// Set by the plugin to the XDG-compliant path (e.g. ~/.local/share/opencode/storage/plugin/aft/).
+    /// Falls back to ~/.cache/aft/ if not set.
+    pub storage_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -55,7 +61,9 @@ impl Default for Config {
             // The plugin opts into root restriction explicitly when desired.
             restrict_to_project_root: false,
             experimental_search_index: false,
+            experimental_semantic_search: false,
             search_index_max_file_size: 1_048_576,
+            storage_dir: None,
         }
     }
 }
