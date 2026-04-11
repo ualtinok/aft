@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { DiagnosticReport } from "./diagnostics.js";
@@ -8,7 +8,12 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function sanitizeLogContent(content: string): string {
+/**
+ * Strip personally identifiable path segments from arbitrary text.
+ * Used on both log contents and the full doctor --issue body so diagnostic
+ * reports never leak usernames or home directory paths.
+ */
+export function sanitizeContent(content: string): string {
   const username = userInfo().username;
   const home = homedir();
 
@@ -16,14 +21,20 @@ export function sanitizeLogContent(content: string): string {
   if (home) {
     sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "~");
   }
-  sanitized = sanitized.replace(/\/Users\/[^/]+\//g, "/Users/<USER>/");
-  sanitized = sanitized.replace(/\/home\/[^/]+\//g, "/home/<USER>/");
-  sanitized = sanitized.replace(/C:\\\\Users\\\\[^\\\\]+\\\\/g, "C:\\\\Users\\\\<USER>\\\\");
+  sanitized = sanitized.replace(/\/Users\/[^/\s"']+/g, "/Users/<USER>");
+  sanitized = sanitized.replace(/\/home\/[^/\s"']+/g, "/home/<USER>");
+  sanitized = sanitized.replace(/C:\\\\Users\\\\[^\\\\"'\s]+/g, "C:\\\\Users\\\\<USER>");
+  sanitized = sanitized.replace(/C:\\Users\\[^\\"'\s]+/g, "C:\\Users\\<USER>");
   if (username) {
     sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
   }
   return sanitized;
 }
+
+/**
+ * @deprecated Use sanitizeContent. Kept as an alias for backward compatibility.
+ */
+export const sanitizeLogContent = sanitizeContent;
 
 function formatTimestamp(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -46,10 +57,10 @@ export async function bundleIssueReport(
   const logLines = report.logFile.exists
     ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
     : [];
-  const recentLog = sanitizeLogContent(logLines.slice(-200).join("\n")).trim();
+  const recentLog = logLines.slice(-200).join("\n").trim();
   const configBody = JSON.stringify(report.aftConfig.flags, null, 2);
 
-  const bodyMarkdown = [
+  const rawBody = [
     "## Description",
     description,
     "",
@@ -61,7 +72,7 @@ export async function bundleIssueReport(
     `- OpenCode: ${report.opencodeVersion ?? "not installed"}`,
     "",
     "## Configuration",
-    `Enabled flags from \`${report.configPaths.aftConfig.replace(homedir(), "~")}\`:`,
+    `Enabled flags from \`${report.configPaths.aftConfig}\`:`,
     "```jsonc",
     configBody,
     "```",
@@ -69,11 +80,17 @@ export async function bundleIssueReport(
     "## Diagnostics",
     renderDiagnosticsMarkdown(report),
     "",
-    "## Log (last 200 lines, sanitized)",
+    "## Log (last 200 lines)",
     "```",
     recentLog || "<no log output>",
     "```",
+    "",
+    "_Username and home paths have been stripped from this report._",
   ].join("\n");
+
+  // Sanitize the entire body in one pass — covers diagnostics, config paths,
+  // environment lines, and log contents uniformly.
+  const bodyMarkdown = sanitizeContent(rawBody);
 
   const path = join(process.cwd(), `aft-issue-${formatTimestamp(new Date())}.md`);
   writeFileSync(path, `${bodyMarkdown}\n`);
