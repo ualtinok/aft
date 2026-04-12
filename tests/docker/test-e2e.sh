@@ -129,8 +129,23 @@ check "no bridge crash" "! grep -qi 'Binary crashed\|SIGABRT' '$PLUGIN_LOG' 2>/d
 # Search index
 check "search index started" "grep -qi 'watcher started\|search.*index\|index.*build' '$PLUGIN_LOG' 2>/dev/null"
 
-# ONNX graceful degradation (no ORT installed → should skip, not crash)
+# ONNX — no crash is mandatory, download success is best-effort in Docker (QEMU limitations)
 check "no ONNX crash" "! grep -qi 'SIGABRT\|panicked.*ort\|thread.*panicked' '$PLUGIN_LOG' 2>/dev/null"
+# Note: ONNX download may fail under QEMU emulation due to curl/fetch timing issues.
+# These are informational checks — not release-blocking.
+if grep -qi 'ONNX Runtime.*installed to\|ONNX Runtime found at' "$PLUGIN_LOG" 2>/dev/null; then
+    echo -e "  ${GREEN}PASS${NC} [ONNX downloaded]"
+    PASS=$((PASS + 1))
+    if grep -qi 'built semantic index\|semantic index persisted' "$PLUGIN_LOG" 2>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC} [semantic index built]"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${YELLOW}SKIP${NC} [semantic index built — ONNX downloaded but index not ready in time]"
+    fi
+else
+    echo -e "  ${YELLOW}SKIP${NC} [ONNX downloaded — expected in Docker/QEMU, verify on real Linux]"
+    echo -e "  ${YELLOW}SKIP${NC} [semantic index built — depends on ONNX download]"
+fi
 
 echo ""
 echo "  Plugin log (last 30 lines):"

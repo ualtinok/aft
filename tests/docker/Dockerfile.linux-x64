@@ -81,10 +81,20 @@ RUN mkdir -p /root/.cache/opencode/packages && \
 # Build this binary first: docker build -t aft-build-linux -f tests/docker/Dockerfile.build-linux .
 # Then extract: docker cp $(docker create aft-build-linux true):/build/target/release/aft /tmp/aft-linux-x64
 COPY tests/docker/fixtures/aft-linux-x64 /tmp/aft-local-binary
-RUN mkdir -p /root/.cache/aft/bin/v0.11.1 && \
-    cp /tmp/aft-local-binary /root/.cache/aft/bin/v0.11.1/aft && \
-    chmod +x /root/.cache/aft/bin/v0.11.1/aft && \
+RUN AFT_VER=$(cat /root/.cache/opencode/packages/node_modules/@cortexkit/aft-opencode/package.json 2>/dev/null | grep '"version"' | head -1 | sed 's/.*"version": *"//;s/".*//' || echo "0.11.2") && \
+    mkdir -p /root/.cache/aft/bin/v${AFT_VER} && \
+    cp /tmp/aft-local-binary /root/.cache/aft/bin/v${AFT_VER}/aft && \
+    chmod +x /root/.cache/aft/bin/v${AFT_VER}/aft && \
     rm /tmp/aft-local-binary
+
+# Inject locally-built plugin dist (overrides npm plugin for testing local changes)
+# This ensures TypeScript-side fixes (like onnx-runtime.ts) are tested too
+COPY packages/opencode-plugin/dist/ /tmp/aft-plugin-dist/
+RUN PLUGIN_DIR=$(find /root/.cache/opencode/packages -path '*/node_modules/@cortexkit/aft-opencode/dist' -type d 2>/dev/null | head -1) && \
+    if [ -n "$PLUGIN_DIR" ]; then \
+      cp -r /tmp/aft-plugin-dist/* "$PLUGIN_DIR/"; \
+    fi && \
+    rm -rf /tmp/aft-plugin-dist
 
 # Set NODE_PATH so aimock global install is accessible via require()
 ENV NODE_PATH="/usr/lib/node_modules"

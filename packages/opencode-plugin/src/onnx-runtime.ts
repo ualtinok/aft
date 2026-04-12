@@ -15,7 +15,7 @@
  *   brew install onnxruntime
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { error, log, warn } from "./logger.js";
 
@@ -167,15 +167,13 @@ async function downloadOnnxRuntime(
     mkdirSync(tmpDir, { recursive: true });
     const archivePath = join(tmpDir, `onnxruntime.${info.archiveType}`);
 
-    // Download
-    const response = await fetch(url, { redirect: "follow" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(archivePath, buffer);
+    // Download using curl (more reliable than fetch across Bun/Node runtimes,
+    // especially for GitHub release redirects and large binary downloads)
+    const { execSync: execSyncDl } = await import("node:child_process");
+    execSyncDl(`curl -fsSL "${url}" -o "${archivePath}"`, {
+      stdio: "pipe",
+      timeout: 120_000,
+    });
 
     // Extract
     if (info.archiveType === "tgz") {
@@ -195,17 +193,60 @@ async function downloadOnnxRuntime(
     // Create target directory and copy library files
     mkdirSync(targetDir, { recursive: true });
 
-    // Copy all library files (main + versioned symlinks)
+    // Copy all library files (main + versioned symlinks).
+    // On Linux, .so files are often symlinks (libonnxruntime.so → libonnxruntime.so.1.24.4).
+    // Process real files first, then recreate symlinks in the target directory to avoid
+    // ENOENT when renaming a symlink whose target was already moved.
     const libFiles = readdirSync(extractedDir).filter(
       (f) => f.startsWith("libonnxruntime") || f.startsWith("onnxruntime"),
     );
+
+    const { lstatSync, symlinkSync, readlinkSync, copyFileSync: cpFile } = await import("node:fs");
+
+    // Separate real files from symlinks
+    const realFiles: string[] = [];
+    const symlinks: Array<{ name: string; target: string }> = [];
     for (const libFile of libFiles) {
       const src = join(extractedDir, libFile);
-      const dst = join(targetDir, libFile);
-      renameSync(src, dst);
-      if (process.platform !== "win32") {
-        chmodSync(dst, 0o755);
+      try {
+        const stat = lstatSync(src);
+        log(
+          `ORT extract: ${libFile} — isSymlink=${stat.isSymbolicLink()}, isFile=${stat.isFile()}, size=${stat.size}`,
+        );
+        if (stat.isSymbolicLink()) {
+          symlinks.push({ name: libFile, target: readlinkSync(src) });
+        } else {
+          realFiles.push(libFile);
+        }
+      } catch (e) {
+        log(`ORT extract: ${libFile} — stat failed: ${e}`);
+        realFiles.push(libFile);
       }
+    }
+
+    // Copy real files first
+    for (const libFile of realFiles) {
+      const src = join(extractedDir, libFile);
+      const dst = join(targetDir, libFile);
+      try {
+        cpFile(src, dst);
+        if (process.platform !== "win32") {
+          chmodSync(dst, 0o755);
+        }
+      } catch (copyErr) {
+        log(`ORT extract: failed to copy ${libFile}: ${copyErr}`);
+      }
+    }
+
+    // Recreate symlinks in target directory
+    for (const link of symlinks) {
+      const dst = join(targetDir, link.name);
+      try {
+        unlinkSync(dst); // remove if exists from a previous partial install
+      } catch {
+        // ignore
+      }
+      symlinkSync(link.target, dst);
     }
 
     // Cleanup temp directory

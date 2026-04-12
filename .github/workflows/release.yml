@@ -112,18 +112,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl
+          targets: aarch64-unknown-linux-gnu
 
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
 
+      # Use gnu target (not musl) so dlopen works for ONNX Runtime loading.
+      # musl produces static binaries where dlopen is a stub that always fails.
       - name: Build
-        run: cross build --release --target aarch64-unknown-linux-musl
+        run: cross build --release --target aarch64-unknown-linux-gnu
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-arm64
-          path: target/aarch64-unknown-linux-musl/release/aft
+          path: target/aarch64-unknown-linux-gnu/release/aft
           if-no-files-found: error
 
   build-linux-x64:
@@ -134,19 +136,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
 
-      - name: Install cross
-        run: cargo install cross --version 0.2.5 --locked
-
+      # Native x64 build on Ubuntu runner — no cross-compilation needed.
+      # Uses gnu target (not musl) so dlopen works for ONNX Runtime loading.
       - name: Build
-        run: cross build --release --target x86_64-unknown-linux-musl
+        run: cargo build --release
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: target/x86_64-unknown-linux-musl/release/aft
+          path: target/release/aft
           if-no-files-found: error
 
   build-win32-x64:
