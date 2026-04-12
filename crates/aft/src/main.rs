@@ -213,7 +213,8 @@ const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "py", "rs", "go"]
 /// RefCell borrow conflicts. Events are deduplicated by PathBuf — notify
 /// fires multiple events per file write (Create, Modify, etc.).
 fn drain_watcher_events(ctx: &AppContext) {
-    // Phase 1: collect changed paths from the receiver
+    // Phase 1: collect changed paths from the receiver, filtering out
+    // non-project directories that cause excessive invalidation noise.
     let changed: HashSet<std::path::PathBuf> = {
         let rx_ref = ctx.watcher_rx().borrow();
         let rx = match rx_ref.as_ref() {
@@ -224,7 +225,28 @@ fn drain_watcher_events(ctx: &AppContext) {
         let mut paths = HashSet::new();
         while let Ok(event_result) = rx.try_recv() {
             if let Ok(event) = event_result {
+                // Only process events that indicate actual file content changes.
+                // Skip Access events — on Linux with atime enabled, reading a file
+                // during update_file triggers an access event, creating a feedback loop.
+                use notify::EventKind;
+                match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
+                    _ => continue,
+                }
                 for path in event.paths {
+                    // Skip internal directories that generate frequent non-source events.
+                    let path_str = path.to_string_lossy();
+                    if path_str.contains("/.git/")
+                        || path_str.contains("\\.git\\")
+                        || path_str.contains("/.opencode/")
+                        || path_str.contains("\\.opencode\\")
+                        || path_str.contains("/node_modules/")
+                        || path_str.contains("\\node_modules\\")
+                        || path_str.contains("/target/")
+                        || path_str.contains("\\target\\")
+                    {
+                        continue;
+                    }
                     paths.insert(path);
                 }
             }

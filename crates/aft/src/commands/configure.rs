@@ -237,6 +237,24 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                     let filters = build_path_filters(&[], &[]).unwrap_or_default();
                     let files = walk_project_files(&root_clone, &filters);
 
+                    // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
+                    // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
+                    // on constrained systems when indexing tens of thousands of files.
+                    const MAX_SEMANTIC_FILES: usize = 10_000;
+                    if files.len() > MAX_SEMANTIC_FILES {
+                        log::warn!(
+                            "[aft] skipping semantic index: {} files exceeds limit of {}. \
+                             Open a specific project directory instead of a large root.",
+                            files.len(),
+                            MAX_SEMANTIC_FILES
+                        );
+                        return Err(format!(
+                            "too many files ({}) for semantic indexing (max {})",
+                            files.len(),
+                            MAX_SEMANTIC_FILES
+                        ));
+                    }
+
                     let mut model = crate::semantic_index::initialize_text_embedding()?;
 
                     let mut embed = |texts: Vec<String>| {

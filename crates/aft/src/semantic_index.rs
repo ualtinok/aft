@@ -409,6 +409,12 @@ impl SemanticIndex {
 
     /// Write the semantic index to disk using atomic temp+rename pattern
     pub fn write_to_disk(&self, storage_dir: &Path, project_key: &str) {
+        // Don't persist empty indexes — they would be loaded on next startup
+        // and prevent a fresh build that might find files.
+        if self.entries.is_empty() {
+            log::info!("[aft] skipping semantic index persistence (0 entries)");
+            return;
+        }
         let dir = storage_dir.join("semantic").join(project_key);
         if let Err(e) = fs::create_dir_all(&dir) {
             log::warn!("[aft] failed to create semantic cache dir: {}", e);
@@ -474,6 +480,11 @@ impl SemanticIndex {
         let bytes = fs::read(&data_path).ok()?;
         match Self::from_bytes(&bytes) {
             Ok(index) => {
+                if index.entries.is_empty() {
+                    log::info!("[aft] cached semantic index is empty, will rebuild");
+                    let _ = fs::remove_file(&data_path);
+                    return None;
+                }
                 log::info!(
                     "[aft] loaded semantic index from disk: {} entries",
                     index.entries.len()

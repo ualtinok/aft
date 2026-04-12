@@ -85,7 +85,9 @@ bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 echo "  bun test..."
 bun run test 2>&1 || { echo "Error: Plugin tests failed"; exit 1; }
 
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+if [ "${SKIP_DOCKER_E2E:-}" = "1" ]; then
+  echo "  (skipping docker e2e — SKIP_DOCKER_E2E=1)"
+elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
   echo "  docker e2e (Linux x64)..."
   # Build Linux x64 binary in Docker
   docker build --platform linux/amd64 -t aft-build-linux -f tests/docker/Dockerfile.build-linux . --quiet 2>&1 || { echo "Error: Docker Linux build failed"; exit 1; }
