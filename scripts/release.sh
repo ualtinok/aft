@@ -85,6 +85,25 @@ bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 echo "  bun test..."
 bun run test 2>&1 || { echo "Error: Plugin tests failed"; exit 1; }
 
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+  echo "  docker e2e (Linux x64)..."
+  # Build Linux x64 binary in Docker
+  docker build --platform linux/amd64 -t aft-build-linux -f tests/docker/Dockerfile.build-linux . --quiet 2>&1 || { echo "Error: Docker Linux build failed"; exit 1; }
+  # Extract binary to fixtures
+  CID=$(docker create --platform linux/amd64 aft-build-linux true)
+  docker cp "$CID:/build/target/release/aft" tests/docker/fixtures/aft-linux-x64
+  docker rm "$CID" > /dev/null
+  # Build E2E test image
+  docker build --platform linux/amd64 -t aft-e2e-linux-x64 -f tests/docker/Dockerfile.linux-x64 . --quiet 2>&1 || { echo "Error: Docker E2E image build failed"; exit 1; }
+  # Run E2E test
+  docker run --rm --platform linux/amd64 aft-e2e-linux-x64 2>&1 || { echo "Error: Docker E2E tests failed"; exit 1; }
+  # Clean up extracted binary (don't commit it)
+  rm -f tests/docker/fixtures/aft-linux-x64
+  echo "  ✓ Docker E2E passed"
+else
+  echo "  (skipping docker e2e — Docker not available)"
+fi
+
 echo "  ✓ All checks passed"
 echo ""
 

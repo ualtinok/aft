@@ -1,11 +1,11 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import path, { dirname } from "node:path";
 import { parse, stringify } from "comment-json";
 import { ensureTuiPluginEntry } from "../shared/tui-config.js";
 import { clearPluginCache } from "./cache.js";
 import { detectConfigPaths } from "./config-paths.js";
-import { collectDiagnostics } from "./diagnostics.js";
+import { collectDiagnostics, type DiagnosticReport } from "./diagnostics.js";
 import { bundleIssueReport } from "./logs.js";
 import { getOpenCodeVersion, isGhInstalled, isOpenCodeInstalled } from "./opencode-helpers.js";
 import { confirm, intro, log, outro, spinner, text } from "./prompts.js";
@@ -106,6 +106,83 @@ function summarizeFlags(flags: Record<string, unknown>): string {
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
   return entries.length > 0 ? entries.join(", ") : "using defaults";
+}
+
+const REQUIRED_ORT_MAJOR = 1;
+const REQUIRED_ORT_MIN_MINOR = 20;
+
+function detectOrtVersion(libDir: string): string | null {
+  try {
+    const entries = readdirSync(libDir);
+    for (const entry of entries) {
+      if (!entry.startsWith("libonnxruntime")) continue;
+      // Match patterns: libonnxruntime.so.1.19.0, libonnxruntime.1.24.4.dylib
+      const match = entry.match(/(\d+\.\d+\.\d+)/);
+      if (match) return match[1];
+    }
+  } catch {
+    // directory doesn't exist or not readable
+  }
+  return null;
+}
+
+function checkOrtVersion(report: DiagnosticReport): number {
+  let issues = 0;
+
+  // Check our auto-downloaded cache first
+  if (report.onnxRuntime.cachedPath) {
+    const cachedDir = path.dirname(report.onnxRuntime.cachedPath);
+    const version = detectOrtVersion(cachedDir);
+    if (version) {
+      log.success(`ONNX Runtime v${version} (auto-downloaded) at ${report.onnxRuntime.cachedPath}`);
+      return 0;
+    }
+  }
+
+  // Check system path
+  const systemPaths =
+    process.platform === "darwin"
+      ? ["/opt/homebrew/lib", "/usr/local/lib"]
+      : ["/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"];
+
+  for (const dir of systemPaths) {
+    const version = detectOrtVersion(dir);
+    if (version) {
+      const parts = version.split(".").map(Number);
+      const [major, minor] = [parts[0], parts[1]];
+
+      if (major === REQUIRED_ORT_MAJOR && minor >= REQUIRED_ORT_MIN_MINOR) {
+        log.success(`ONNX Runtime v${version} (compatible) at ${dir}`);
+        return 0;
+      }
+
+      // Version mismatch — this is the issue #4 scenario
+      log.error(
+        `ONNX Runtime v${version} found at ${dir} — INCOMPATIBLE (need v1.${REQUIRED_ORT_MIN_MINOR}+)`,
+      );
+      log.info("This version mismatch causes AFT to crash when semantic search initializes.");
+      log.info("Solutions:");
+      if (process.platform === "linux") {
+        log.info(`  1. Remove old version: sudo rm ${dir}/libonnxruntime* && sudo ldconfig`);
+        log.info("     Then restart OpenCode — AFT auto-downloads the correct version.");
+      } else {
+        log.info(`  1. Remove old version: sudo rm ${dir}/libonnxruntime*`);
+        log.info("     Then restart OpenCode — AFT auto-downloads the correct version.");
+      }
+      log.info(
+        "  2. Or install v1.24: https://github.com/microsoft/onnxruntime/releases/tag/v1.24.0",
+      );
+      issues++;
+      return issues;
+    }
+  }
+
+  // No system ORT found — check if auto-download is expected to handle it
+  if (report.onnxRuntime.required && !report.onnxRuntime.cachedPath) {
+    log.warn("ONNX Runtime not found — AFT will attempt auto-download on startup");
+  }
+
+  return issues;
 }
 
 function warnAboutLinuxLdconfig(systemPath: string | null): boolean {
@@ -295,14 +372,8 @@ export async function runDoctor(
   }
 
   if (report.onnxRuntime.required) {
-    if (report.onnxRuntime.cachedPath) {
-      log.success(`ONNX Runtime cached at ${report.onnxRuntime.cachedPath}`);
-    } else if (report.onnxRuntime.systemPath) {
-      log.success(`ONNX Runtime found at ${report.onnxRuntime.systemPath}`);
-    } else {
-      log.warn(`ONNX Runtime missing - install hint: ${report.onnxRuntime.installHint}`);
-      issues++;
-    }
+    // Version-aware ORT check — detects incompatible versions (issue #4)
+    issues += checkOrtVersion(report);
 
     if (warnAboutLinuxLdconfig(report.onnxRuntime.systemPath)) {
       issues++;

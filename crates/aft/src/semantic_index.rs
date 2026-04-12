@@ -17,7 +17,140 @@ const HEADER_BYTES: usize = 9;
 const ONNX_RUNTIME_INSTALL_HINT: &str =
     "ONNX Runtime not found. Install via: brew install onnxruntime (macOS) or apt install libonnxruntime (Linux).";
 
+/// Pre-validate ONNX Runtime by attempting a raw dlopen before ort touches it.
+/// This catches broken/incompatible .so files without risking a panic in the ort crate.
+/// Also checks the runtime version via OrtGetApiBase if available.
+pub fn pre_validate_onnx_runtime() -> Result<(), String> {
+    let dylib_path = std::env::var("ORT_DYLIB_PATH").ok();
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        #[cfg(target_os = "linux")]
+        let default_name = "libonnxruntime.so";
+        #[cfg(target_os = "macos")]
+        let default_name = "libonnxruntime.dylib";
+
+        let lib_name = dylib_path.as_deref().unwrap_or(default_name);
+
+        unsafe {
+            let c_name = std::ffi::CString::new(lib_name)
+                .map_err(|e| format!("invalid library path: {}", e))?;
+            let handle = libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW);
+            if handle.is_null() {
+                let err = libc::dlerror();
+                let msg = if err.is_null() {
+                    "unknown dlopen error".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                };
+                return Err(format!(
+                    "ONNX Runtime not found. dlopen('{}') failed: {}. \
+                     Run `bunx @cortexkit/aft-opencode@latest doctor` to diagnose.",
+                    lib_name, msg
+                ));
+            }
+
+            // Try to detect the runtime version from the file path or soname.
+            // libonnxruntime.so.1.19.0, libonnxruntime.1.24.4.dylib, etc.
+            let detected_version = detect_ort_version_from_path(lib_name);
+
+            libc::dlclose(handle);
+
+            // Check version compatibility — we need 1.24.x
+            if let Some(ref version) = detected_version {
+                let parts: Vec<&str> = version.split('.').collect();
+                if let (Some(major), Some(minor)) = (
+                    parts.first().and_then(|s| s.parse::<u32>().ok()),
+                    parts.get(1).and_then(|s| s.parse::<u32>().ok()),
+                ) {
+                    if major != 1 || minor < 20 {
+                        return Err(format!(
+                            "ONNX Runtime version mismatch: found v{} at '{}', but AFT requires v1.20+. \
+                             Solutions:\n\
+                             1. Remove the old library and restart (AFT auto-downloads the correct version):\n\
+                             {}\n\
+                             2. Or install ONNX Runtime 1.24: https://github.com/microsoft/onnxruntime/releases/tag/v1.24.0\n\
+                             3. Run `bunx @cortexkit/aft-opencode@latest doctor` for full diagnostics.",
+                            version,
+                            lib_name,
+                            suggest_removal_command(lib_name),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, skip pre-validation — let ort handle LoadLibrary
+        let _ = dylib_path;
+    }
+
+    Ok(())
+}
+
+/// Try to extract the ORT version from the library filename or resolved symlink.
+/// Examples: "libonnxruntime.so.1.19.0" → "1.19.0", "libonnxruntime.1.24.4.dylib" → "1.24.4"
+fn detect_ort_version_from_path(lib_path: &str) -> Option<String> {
+    let path = std::path::Path::new(lib_path);
+
+    // Try the path as given, then follow symlinks
+    for candidate in [Some(path.to_path_buf()), std::fs::canonicalize(path).ok()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = candidate.file_name().and_then(|n| n.to_str()) {
+            if let Some(version) = extract_version_from_filename(name) {
+                return Some(version);
+            }
+        }
+    }
+
+    // Also check for versioned siblings in the same directory
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("libonnxruntime") {
+                        if let Some(version) = extract_version_from_filename(name) {
+                            return Some(version);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract version from filenames like "libonnxruntime.so.1.19.0" or "libonnxruntime.1.24.4.dylib"
+fn extract_version_from_filename(name: &str) -> Option<String> {
+    // Match patterns: .so.X.Y.Z or .X.Y.Z.dylib or .X.Y.Z.so
+    let re = regex::Regex::new(r"(\d+\.\d+\.\d+)").ok()?;
+    re.find(name).map(|m| m.as_str().to_string())
+}
+
+fn suggest_removal_command(lib_path: &str) -> String {
+    if lib_path.starts_with("/usr/local/lib")
+        || lib_path == "libonnxruntime.so"
+        || lib_path == "libonnxruntime.dylib"
+    {
+        #[cfg(target_os = "linux")]
+        return "   sudo rm /usr/local/lib/libonnxruntime* && sudo ldconfig".to_string();
+        #[cfg(target_os = "macos")]
+        return "   sudo rm /usr/local/lib/libonnxruntime*".to_string();
+        #[cfg(target_os = "windows")]
+        return "   Delete the ONNX Runtime DLL from your PATH".to_string();
+    }
+    format!("   rm '{}'", lib_path)
+}
+
 pub fn initialize_text_embedding() -> Result<TextEmbedding, String> {
+    // Pre-validate before ort can panic on a bad library
+    pre_validate_onnx_runtime()?;
+
     TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
         .map_err(format_embedding_init_error)
 }

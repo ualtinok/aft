@@ -49,3 +49,6 @@ benchmarks/configs/
 .opencode/dumps
 codedb.snapshot
 benchmarks/search-bench-results.json
+
+# Docker E2E test artifacts (cross-compiled binary, not committed)
+tests/docker/fixtures/aft-linux-x64

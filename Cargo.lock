@@ -20,6 +20,7 @@ dependencies = [
  "glob",
  "globset",
  "ignore",
+ "libc",
  "log",
  "lsp-types",
  "memchr",
