@@ -130,7 +130,11 @@ jobs:
 
   build-linux-x64:
     name: Build Linux x64
-    runs-on: ubuntu-latest
+    # Build on Ubuntu 22.04 to link against GLIBC 2.35 — compatible with
+    # Ubuntu 22.04 LTS (supported until 2027), Pop!OS 22.04, Debian 12+,
+    # and any distro with GLIBC >= 2.35. Using ubuntu-latest (24.04) would
+    # require GLIBC 2.39 and break older LTS users.
+    runs-on: ubuntu-22.04
     needs: [test]
     steps:
       - uses: actions/checkout@v4
