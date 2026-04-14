@@ -305,6 +305,14 @@ const CSHARP_QUERY: &str = r#"
   name: (_) @namespace.name) @namespace.def
 "#;
 
+// --- Bash query ---
+
+const BASH_QUERY: &str = r#"
+;; function definitions (both `function foo()` and `foo()` styles)
+(function_definition
+  name: (word) @fn.name) @fn.def
+"#;
+
 /// Supported language identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LangId {
@@ -318,6 +326,7 @@ pub enum LangId {
     Cpp,
     Zig,
     CSharp,
+    Bash,
     Html,
     Markdown,
 }
@@ -336,6 +345,7 @@ pub fn detect_language(path: &Path) -> Option<LangId> {
         "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some(LangId::Cpp),
         "zig" => Some(LangId::Zig),
         "cs" => Some(LangId::CSharp),
+        "sh" | "bash" | "zsh" => Some(LangId::Bash),
         "html" | "htm" => Some(LangId::Html),
         "md" | "markdown" | "mdx" => Some(LangId::Markdown),
         _ => None,
@@ -355,6 +365,7 @@ pub fn grammar_for(lang: LangId) -> Language {
         LangId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         LangId::Zig => tree_sitter_zig::LANGUAGE.into(),
         LangId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        LangId::Bash => tree_sitter_bash::LANGUAGE.into(),
         LangId::Html => tree_sitter_html::LANGUAGE.into(),
         LangId::Markdown => tree_sitter_md::LANGUAGE.into(),
     }
@@ -372,6 +383,7 @@ fn query_for(lang: LangId) -> Option<&'static str> {
         LangId::Cpp => Some(CPP_QUERY),
         LangId::Zig => Some(ZIG_QUERY),
         LangId::CSharp => Some(CSHARP_QUERY),
+        LangId::Bash => Some(BASH_QUERY),
         LangId::Html => None, // HTML uses direct tree walking like Markdown
         LangId::Markdown => None,
     }
@@ -594,6 +606,7 @@ impl FileParser {
                 LangId::Cpp => extract_cpp_symbols(&source, &root, &query)?,
                 LangId::Zig => extract_zig_symbols(&source, &root, &query)?,
                 LangId::CSharp => extract_csharp_symbols(&source, &root, &query)?,
+                LangId::Bash => extract_bash_symbols(&source, &root, &query)?,
                 LangId::Html | LangId::Markdown => vec![],
             }
         };
@@ -658,7 +671,7 @@ pub(crate) fn node_range_with_decorators(node: &Node, source: &str, lang: LangId
                     || (kind == "comment"
                         && node_text(source, &prev).starts_with("/**"))
             }
-            LangId::Go | LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => {
+            LangId::Go | LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => {
                 // Include doc comments only if immediately above (no blank line gap)
                 kind == "comment" && is_adjacent_line(&prev, &current, source)
             }
@@ -2455,6 +2468,48 @@ fn find_type_identifier_recursive(node: &Node, source: &str) -> Option<String> {
 /// Extract HTML headings (h1-h6) as symbols.
 /// Each heading becomes a symbol with kind `Heading`, and its range covers
 /// the element itself. Headings are nested based on their level.
+fn extract_bash_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::Bash;
+    let capture_names = query.capture_names();
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut fn_name_node = None;
+        let mut fn_def_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "fn.name" => fn_name_node = Some(cap.node),
+                "fn.def" => fn_def_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        if let (Some(name_node), Some(def_node)) = (fn_name_node, fn_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Function,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: false,
+                parent: None,
+            });
+        }
+    }
+
+    Ok(symbols)
+}
+
 fn extract_html_symbols(source: &str, root: &Node) -> Result<Vec<Symbol>, AftError> {
     let mut headings: Vec<(u8, Symbol)> = Vec::new();
     collect_html_headings(source, root, &mut headings);

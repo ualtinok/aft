@@ -409,3 +409,60 @@ fn outline_supports_requested_new_extensions() {
     let status = aft.shutdown();
     assert!(status.success());
 }
+
+#[test]
+fn outline_bash_symbols_include_functions() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "scripts/deploy.sh",
+        r#"#!/bin/bash
+
+APP_NAME="my-app"
+export LOG_LEVEL="info"
+
+function setup_environment() {
+    local dir="$1"
+    mkdir -p "$dir"
+}
+
+cleanup() {
+    rm -rf /tmp/cache
+}
+
+main() {
+    setup_environment "/tmp/app"
+    echo "Starting $APP_NAME"
+}
+
+main "$@"
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+    let text = outline_text(&mut aft, &file);
+
+    // Should find all three function definitions
+    assert!(
+        text.contains("setup_environment"),
+        "missing setup_environment in bash outline: {text}"
+    );
+    assert!(
+        text.contains("cleanup"),
+        "missing cleanup in bash outline: {text}"
+    );
+    assert!(
+        text.contains("main"),
+        "missing main in bash outline: {text}"
+    );
+
+    // Functions should be marked as functions
+    assert!(
+        text.contains("fn"),
+        "bash functions should have 'fn' kind marker: {text}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}

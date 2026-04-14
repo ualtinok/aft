@@ -18,6 +18,7 @@ pub fn call_node_kinds(lang: LangId) -> Vec<&'static str> {
         | LangId::Cpp
         | LangId::Zig
         | LangId::CSharp
+        | LangId::Bash
         | LangId::Html
         | LangId::Markdown => vec![],
     }

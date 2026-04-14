@@ -260,6 +260,7 @@ pub fn detect_formatter(
         LangId::Cpp => "cpp",
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
+        LangId::Bash => "bash",
         LangId::Html => "html",
         LangId::Markdown => "markdown",
     };
@@ -349,7 +350,7 @@ pub fn detect_formatter(
                 None
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => None,
         LangId::Html => None,
         LangId::Markdown => None,
     }
@@ -619,6 +620,7 @@ pub fn detect_type_checker(
         LangId::Cpp => "cpp",
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
+        LangId::Bash => "bash",
         LangId::Html => "html",
         LangId::Markdown => "markdown",
     };
@@ -709,7 +711,7 @@ pub fn detect_type_checker(
                 None
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp => None,
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => None,
         LangId::Html => None,
         LangId::Markdown => None,
     }

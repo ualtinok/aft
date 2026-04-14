@@ -201,6 +201,7 @@ pub fn is_entry_point(name: &str, kind: &SymbolKind, exported: bool, lang: LangI
         | LangId::Cpp
         | LangId::Zig
         | LangId::CSharp
+        | LangId::Bash
         | LangId::Html
         | LangId::Markdown => false,
     }

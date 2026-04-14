@@ -41,6 +41,7 @@ impl AstGrepLang {
             LangId::Cpp => Some(Self::Cpp),
             LangId::Zig => Some(Self::Zig),
             LangId::CSharp => Some(Self::CSharp),
+            LangId::Bash => None, // ast-grep doesn't support Bash
             // Markdown, CSS, HTML etc. don't have meaningful AST patterns
             _ => None,
         }
