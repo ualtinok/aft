@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import { z } from "zod";
@@ -190,8 +191,13 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
 // ---------------------------------------------------------------------------
 
 function getOpenCodeConfigDir(): string {
-  // XDG_CONFIG_HOME or ~/.config, then /opencode
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(process.env.HOME || "~", ".config");
+  const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
+  if (envDir) {
+    return envDir;
+  }
+
+  // XDG_CONFIG_HOME or homedir()/.config, then /opencode
+  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(xdgConfig, "opencode");
 }
 

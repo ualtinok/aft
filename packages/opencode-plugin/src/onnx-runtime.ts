@@ -180,8 +180,7 @@ async function downloadOnnxRuntime(
       const { execSync } = await import("node:child_process");
       execSync(`tar xzf "${archivePath}" -C "${tmpDir}"`, { stdio: "pipe" });
     } else {
-      const { execSync } = await import("node:child_process");
-      execSync(`unzip -q "${archivePath}" -d "${tmpDir}"`, { stdio: "pipe" });
+      await extractZipArchive(archivePath, tmpDir);
     }
 
     // Find and copy the library file
@@ -266,6 +265,53 @@ async function downloadOnnxRuntime(
     }
     return null;
   }
+}
+
+async function extractZipArchive(archivePath: string, destinationDir: string): Promise<void> {
+  const { execFileSync } = await import("node:child_process");
+
+  if (process.platform === "win32") {
+    let powershellError: unknown;
+
+    try {
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "& { Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force }",
+          archivePath,
+          destinationDir,
+        ],
+        { stdio: "pipe", timeout: 120_000 },
+      );
+      return;
+    } catch (err) {
+      powershellError = err;
+      warn(`PowerShell Expand-Archive failed, falling back to cmd/tar: ${String(err)}`);
+    }
+
+    try {
+      execFileSync(
+        "cmd.exe",
+        ["/d", "/s", "/c", `tar -xf "${archivePath}" -C "${destinationDir}"`],
+        { stdio: "pipe", timeout: 120_000 },
+      );
+      return;
+    } catch (cmdError) {
+      throw new Error(
+        `ZIP extraction failed via PowerShell and cmd/tar. PowerShell: ${String(powershellError)} | cmd/tar: ${String(cmdError)}`,
+      );
+    }
+  }
+
+  execFileSync("unzip", ["-q", archivePath, "-d", destinationDir], {
+    stdio: "pipe",
+    timeout: 120_000,
+  });
 }
 
 /**
