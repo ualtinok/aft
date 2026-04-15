@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { rpcPortFilePath } from "./rpc-utils.js";
+import { rpcPortFilePath } from "./rpc-utils";
 
 const MAX_RETRIES = 10;
 const RETRY_DELAY_MS = 500;

@@ -1,8 +1,8 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { log, warn } from "../logger.js";
-import { rpcPortFilePath } from "./rpc-utils.js";
+import { log, warn } from "../logger";
+import { rpcPortFilePath } from "./rpc-utils";
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 

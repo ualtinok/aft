@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
-import { log } from "../logger.js";
-import { getOpenCodeConfigPaths } from "./opencode-config-dir.js";
+import { log } from "../logger";
+import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
 const PLUGIN_NAME = "@cortexkit/aft-opencode";
 const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;

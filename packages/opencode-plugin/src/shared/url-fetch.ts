@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { log, warn } from "../logger.js";
+import { log, warn } from "../logger";
 
 /** Max response body size (10 MB) */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
