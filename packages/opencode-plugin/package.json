@@ -28,7 +28,6 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@clack/prompts": "^1.2.0",
     "@opencode-ai/plugin": "^1.2.26",
     "@opencode-ai/sdk": "^1.2.26",
     "comment-json": "^4.6.2",
