@@ -29,6 +29,39 @@
 
 ## Get Started
 
+### Claude Code
+
+Run the install script to set up AFT hooks for Claude Code:
+
+```bash
+./scripts/install-claude-hooks.sh
+```
+
+This installs:
+- **Tool interception** — Read, Grep, Glob tools route through AFT for indexed performance
+- **CLI wrapper** — `aft` command for semantic commands (outline, zoom, call_tree, callers, etc.)
+- **Instructions** — Claude learns when to use AFT commands for context savings
+
+After installation, restart Claude Code. Then use semantic commands via Bash:
+
+```bash
+aft outline src/              # File structure (~10% of full read tokens)
+aft zoom main.go main         # Inspect function with call graph
+aft callers api.ts handler    # Find all callers
+aft call_tree service.ts run  # What does run() call?
+```
+
+<details>
+<summary>Uninstall</summary>
+
+```bash
+./scripts/uninstall-claude-hooks.sh
+```
+</details>
+
+---
+
+
 ### OpenCode
 
 Run the setup wizard — it registers AFT in your OpenCode and TUI config and asks which experimental features to enable:
@@ -1013,7 +1046,7 @@ opencode-aft/
 
 ## Roadmap
 
-- MCP server for Claude Code, Cursor, and other MCP-compatible hosts
+- Cursor support via hooks
 - LSP integration for type-aware symbol resolution (partially implemented)
 - Streaming responses for large call trees
 - Watch mode for live outline updates
