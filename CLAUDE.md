@@ -6,7 +6,9 @@ Tree-sitter powered code analysis for massive context savings (60-90% token redu
 
 **CRITICAL**: AFT semantic commands are the DEFAULT, not optional. Grep/Read with limited context (e.g., 3 lines) misses the bigger picture. We want to SEE the full picture, not shoot in the dark.
 
-**Before ANY code exploration:**
+**AFT applies to ALL file types** — not just code. Markdown, config, docs, JSON, YAML all benefit. Even for "just checking what files are" — outline first.
+
+**Before reading ANY files:**
 1. `aft outline` FIRST - understand structure before diving in
 2. `aft zoom` for symbols - never read full files when you need one function
 3. `aft callers`/`aft call_tree` for flow - grep misses cross-file relationships
@@ -48,10 +50,13 @@ aft glob <pattern> [path]              # File pattern matching
 ## Decision Tree
 
 ```
-Need to understand code?
+Need to understand files?
     |
     +-- Don't know the file structure?
     |       -> aft outline <dir>
+    |
+    +-- Checking what files contain (docs, config, etc.)?
+    |       -> aft outline <dir>, then selective reads
     |
     +-- Know the file, need specific symbol?
     |       -> aft zoom <file> <symbol>
@@ -74,6 +79,7 @@ Need to understand code?
 | Task | Command | Token Savings |
 |------|---------|---------------|
 | Understanding file structure | `aft outline` | ~90% vs full read |
+| Checking what docs/configs contain | `aft outline` + selective read | ~80% vs read all |
 | Finding function definition | `aft zoom file symbol` | Exact code only |
 | Understanding dependencies | `aft call_tree` | Structured graph |
 | Finding usage sites | `aft callers` | All call sites |
@@ -87,6 +93,7 @@ Need to understand code?
 3. **ALWAYS use call graphs** - For understanding code flow, `call_tree` and `callers` reveal what grep cannot
 4. **ALWAYS impact before refactor** - Run `aft impact` before making changes to understand blast radius
 5. **NEVER grep with limited context** - If you need more than the symbol name, use AFT semantic commands
+6. **ALWAYS outline before sampling** - Even for "just checking what files are" tasks, outline first
 
 ## Context Protection
 
