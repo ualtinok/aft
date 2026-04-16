@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { error, getLogFilePath, log, warn } from "./logger.js";
 
+const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
+const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
+
 // ## Note on TypeScript `as` type assertions
 //
 // Bridge responses use `as string`, `as string[]` etc. in several places.
@@ -25,6 +28,42 @@ function compareSemver(a: string, b: string): number {
     if (diff !== 0) return diff;
   }
   return 0;
+}
+
+function clampSemanticTimeout(
+  configOverrides: Record<string, unknown>,
+  bridgeTimeoutMs: number,
+): Record<string, unknown> {
+  const semantic = configOverrides.semantic;
+  if (!semantic || typeof semantic !== "object" || Array.isArray(semantic)) {
+    return configOverrides;
+  }
+
+  const timeoutMs = (semantic as { timeout_ms?: unknown }).timeout_ms;
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs)) {
+    return configOverrides;
+  }
+
+  const maxSemanticTimeoutMs =
+    bridgeTimeoutMs > SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS
+      ? bridgeTimeoutMs - SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS
+      : Math.max(1, bridgeTimeoutMs - 1);
+
+  if (timeoutMs <= maxSemanticTimeoutMs) {
+    return configOverrides;
+  }
+
+  warn(
+    `semantic.timeout_ms=${timeoutMs} exceeds bridge timeout budget; clamping to ${maxSemanticTimeoutMs}ms (bridge timeout: ${bridgeTimeoutMs}ms)`,
+  );
+
+  return {
+    ...configOverrides,
+    semantic: {
+      ...semantic,
+      timeout_ms: maxSemanticTimeoutMs,
+    },
+  };
 }
 
 interface PendingRequest {
@@ -77,9 +116,9 @@ export class BinaryBridge {
   ) {
     this.binaryPath = binaryPath;
     this.cwd = cwd;
-    this.timeoutMs = options?.timeoutMs ?? 30_000;
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS;
     this.maxRestarts = options?.maxRestarts ?? 3;
-    this.configOverrides = configOverrides ?? {};
+    this.configOverrides = clampSemanticTimeout(configOverrides ?? {}, this.timeoutMs);
     this.minVersion = options?.minVersion;
     this.onVersionMismatch = options?.onVersionMismatch;
   }

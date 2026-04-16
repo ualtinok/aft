@@ -136,8 +136,7 @@ const plugin: Plugin = async (input) => {
     configOverrides.experimental_semantic_search = aftConfig.experimental_semantic_search;
   if (aftConfig.semantic !== undefined) configOverrides.semantic = aftConfig.semantic;
 
-  const isFastembedSemanticBackend =
-    (aftConfig.semantic?.backend ?? "fastembed") === "fastembed";
+  const isFastembedSemanticBackend = (aftConfig.semantic?.backend ?? "fastembed") === "fastembed";
 
   // Compute XDG-compliant storage dir for persistent indexes (trigram, semantic)
   // Pattern: ~/.local/share/opencode/storage/plugin/aft/
@@ -266,7 +265,11 @@ const plugin: Plugin = async (input) => {
 
   rpcServer.handle("get-warnings", async () => {
     const warnings: string[] = [];
-    if (aftConfig.experimental_semantic_search && isFastembedSemanticBackend && !configOverrides._ort_dylib_dir) {
+    if (
+      aftConfig.experimental_semantic_search &&
+      isFastembedSemanticBackend &&
+      !configOverrides._ort_dylib_dir
+    ) {
       if (!isOrtAutoDownloadSupported()) {
         warnings.push(`Semantic search requires ONNX Runtime.\nInstall: ${getManualInstallHint()}`);
       }
@@ -304,7 +307,11 @@ const plugin: Plugin = async (input) => {
   }, 8000);
 
   // Warn about ONNX Runtime if semantic search is enabled but ORT is unavailable
-  if (aftConfig.experimental_semantic_search && isFastembedSemanticBackend && !configOverrides._ort_dylib_dir) {
+  if (
+    aftConfig.experimental_semantic_search &&
+    isFastembedSemanticBackend &&
+    !configOverrides._ort_dylib_dir
+  ) {
     // The ensureOnnxRuntime call above is async and may still be in flight.
     // Schedule the warning check after a short delay to let it resolve.
     setTimeout(() => {

@@ -187,19 +187,59 @@ function loadConfigFromPath(configPath: string): AftConfig | null {
 }
 
 // ---------------------------------------------------------------------------
-// Merge configs (project overrides user, simple shallow merge for flat schema)
+// Merge configs (project overrides user, deep-merge nested maps/blocks)
 // ---------------------------------------------------------------------------
+
+function mergeSemanticConfig(
+  baseSemantic: AftConfig["semantic"],
+  overrideSemantic: AftConfig["semantic"],
+): AftConfig["semantic"] {
+  // Only include DEFINED safe fields from the project override.
+  // Undefined fields must NOT overwrite user-level values via spread.
+  const projectSemantic: Record<string, unknown> = {};
+  if (overrideSemantic) {
+    if (overrideSemantic.model !== undefined) projectSemantic.model = overrideSemantic.model;
+    if (overrideSemantic.timeout_ms !== undefined)
+      projectSemantic.timeout_ms = overrideSemantic.timeout_ms;
+    if (overrideSemantic.max_batch_size !== undefined)
+      projectSemantic.max_batch_size = overrideSemantic.max_batch_size;
+  }
+
+  const semantic = {
+    ...baseSemantic,
+    ...projectSemantic,
+  };
+
+  if (Object.values(semantic).every((value) => value === undefined)) {
+    return undefined;
+  }
+
+  return Object.fromEntries(
+    Object.entries(semantic).filter(([, value]) => value !== undefined),
+  ) as AftConfig["semantic"];
+}
 
 function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   // Union disabled_tools from both levels (user + project)
   const disabledTools = [...(base.disabled_tools ?? []), ...(override.disabled_tools ?? [])];
+  const formatter = { ...base.formatter, ...override.formatter };
+  const checker = { ...base.checker, ...override.checker };
+  const semantic = mergeSemanticConfig(base.semantic, override.semantic);
+
+  // SECURITY: Strip sensitive semantic fields from override before spreading.
+  // Without this, if mergeSemanticConfig returns undefined (all safe fields absent),
+  // the ...override spread would leak project-level backend/base_url/api_key_env.
+  const { semantic: _stripSemantic, ...safeOverride } = override;
 
   return {
     ...base,
-    ...override,
+    ...safeOverride,
     // Deep-merge language-scoped maps instead of replacing
-    formatter: { ...base.formatter, ...override.formatter },
-    checker: { ...base.checker, ...override.checker },
+    ...(Object.keys(formatter).length > 0 ? { formatter } : {}),
+    ...(Object.keys(checker).length > 0 ? { checker } : {}),
+    // Always set semantic to the merge result (even if undefined) to prevent
+    // override.semantic from leaking through the spread above.
+    semantic,
     // Union — both levels contribute to the disabled set
     ...(disabledTools.length > 0 ? { disabled_tools: [...new Set(disabledTools)] } : {}),
   };
@@ -254,6 +294,15 @@ export function loadAftConfig(projectDirectory: string): AftConfig {
   // Override with project config
   const projectConfig = loadConfigFromPath(projectConfigPath);
   if (projectConfig) {
+    if (
+      projectConfig.semantic?.backend !== undefined ||
+      projectConfig.semantic?.base_url !== undefined ||
+      projectConfig.semantic?.api_key_env !== undefined
+    ) {
+      warn(
+        "Ignoring semantic.backend/base_url/api_key_env from project config (security: use user config for external backends)",
+      );
+    }
     config = mergeConfigs(config, projectConfig);
   }
 

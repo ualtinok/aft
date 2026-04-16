@@ -47,7 +47,9 @@ impl Default for SemanticBackendConfig {
             model: DEFAULT_SEMANTIC_MODEL.to_string(),
             base_url: None,
             api_key_env: None,
-            timeout_ms: 60_000,
+            // Keep the default below the plugin bridge timeout to avoid bridge-killed
+            // semantic_search requests when callers do not set an explicit timeout.
+            timeout_ms: 25_000,
             max_batch_size: 64,
         }
     }

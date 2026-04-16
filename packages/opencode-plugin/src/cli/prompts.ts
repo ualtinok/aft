@@ -49,15 +49,20 @@ export async function text(
   options: {
     placeholder?: string;
     defaultValue?: string;
-    validate?: (value: string) => string | undefined;
+    validate?: (value: string) => string | Error | undefined;
   } = {},
 ): Promise<string> {
-  const result = await clackText({
+  const promptOptions: Parameters<typeof clackText>[0] = {
     message,
     ...(options.placeholder ? { placeholder: options.placeholder } : {}),
     ...(options.defaultValue !== undefined ? { defaultValue: options.defaultValue } : {}),
-    ...(options.validate ? { validate: options.validate } : {}),
-  } as any);
+    ...(options.validate
+      ? {
+          validate: (value) => options.validate?.(value ?? ""),
+        }
+      : {}),
+  };
+  const result = await clackText(promptOptions);
   handleCancel(result);
   return result as string;
 }

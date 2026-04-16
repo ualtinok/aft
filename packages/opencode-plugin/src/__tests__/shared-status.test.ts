@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { coerceAftStatus, formatStatusDialogMessage, formatStatusMarkdown } from "../shared/status.js";
+import {
+  coerceAftStatus,
+  formatStatusDialogMessage,
+  formatStatusMarkdown,
+} from "../shared/status.js";
 
 const baseResponse = Object.freeze({
   version: "0.0.0-test",

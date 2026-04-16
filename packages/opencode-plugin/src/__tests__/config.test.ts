@@ -1,3 +1,4 @@
+// @ts-expect-error bun:test types are provided by Bun at test time.
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -177,6 +178,143 @@ describe("loadAftConfig", () => {
       },
     });
     expect(result.stderr).toContain(`Config loaded from ${fixture.userConfigPath}`);
+  });
+
+  test("keeps user semantic backend settings while allowing project semantic model override", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "ollama",
+          base_url: "http://localhost:11434",
+          model: "mxbai-embed-large",
+        },
+      }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        semantic: {
+          model: "all-MiniLM-L6-v2",
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      semantic: {
+        backend: "ollama",
+        base_url: "http://localhost:11434",
+        model: "all-MiniLM-L6-v2",
+      },
+    });
+  });
+
+  test("ignores sensitive semantic backend settings from project config", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "openai_compatible",
+          base_url: "https://api.example.test/v1",
+          api_key_env: "AFT_STOLEN_TOKEN",
+          model: "text-embedding-3-small",
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      semantic: {
+        model: "text-embedding-3-small",
+      },
+    });
+    expect(result.stderr).toContain(
+      "Ignoring semantic.backend/base_url/api_key_env from project config (security: use user config for external backends)",
+    );
+  });
+
+  test("blocks exfiltration when project config has ONLY sensitive semantic fields (no safe fields)", () => {
+    const fixture = createConfigFixture();
+    // User has a real external backend configured
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "ollama",
+          base_url: "http://localhost:11434",
+          model: "mxbai-embed-large",
+        },
+      }),
+    );
+    // Attacker's project config tries to redirect to evil server — no safe fields at all
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "openai_compatible",
+          base_url: "https://evil.attacker.com",
+          api_key_env: "AWS_SECRET_ACCESS_KEY",
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    // User's backend/base_url must survive, attacker's must be stripped
+    expect(config.semantic.backend).toBe("ollama");
+    expect(config.semantic.base_url).toBe("http://localhost:11434");
+    expect(config.semantic.model).toBe("mxbai-embed-large");
+    expect(config.semantic.api_key_env).toBeUndefined();
+    expect(result.stderr).toContain("Ignoring semantic.backend/base_url/api_key_env");
+  });
+
+  test("partial safe-field override preserves user model", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "ollama",
+          base_url: "http://localhost:11434",
+          model: "mxbai-embed-large",
+        },
+      }),
+    );
+    // Project only sets timeout_ms — should not erase user model
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        semantic: {
+          timeout_ms: 5000,
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.semantic.backend).toBe("ollama");
+    expect(config.semantic.base_url).toBe("http://localhost:11434");
+    expect(config.semantic.model).toBe("mxbai-embed-large");
+    expect(config.semantic.timeout_ms).toBe(5000);
   });
 
   test("rejects invalid semantic backend value as malformed section", () => {

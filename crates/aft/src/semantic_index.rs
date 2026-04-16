@@ -1,17 +1,17 @@
+use crate::config::{SemanticBackend, SemanticBackendConfig};
 use crate::parser::FileParser;
 use crate::symbols::{Symbol, SymbolKind};
-use crate::config::{SemanticBackend, SemanticBackendConfig};
 
 use fastembed::{EmbeddingModel as FastembedEmbeddingModel, InitOptions, TextEmbedding};
-use serde::{Deserialize, Serialize};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use std::time::Duration;
+use std::time::SystemTime;
 use url::Url;
 
 const DEFAULT_DIMENSION: usize = 384;
@@ -27,9 +27,12 @@ const SEMANTIC_INDEX_VERSION_V1: u8 = 1;
 const SEMANTIC_INDEX_VERSION_V2: u8 = 2;
 const DEFAULT_OPENAI_EMBEDDING_PATH: &str = "/embeddings";
 const DEFAULT_OLLAMA_EMBEDDING_PATH: &str = "/api/embed";
-const DEFAULT_OPENAI_EMBEDDING_TIMEOUT_MS: u64 = 60_000;
+// Must stay below the bridge timeout (30s) to avoid bridge kills on slow backends.
+const DEFAULT_OPENAI_EMBEDDING_TIMEOUT_MS: u64 = 25_000;
 const DEFAULT_MAX_BATCH_SIZE: usize = 64;
 const FALLBACK_BACKEND: &str = "none";
+const EMBEDDING_REQUEST_MAX_ATTEMPTS: usize = 3;
+const EMBEDDING_REQUEST_BACKOFF_MS: [u64; 2] = [500, 1_000];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticIndexFingerprint {
@@ -42,13 +45,17 @@ pub struct SemanticIndexFingerprint {
 
 impl SemanticIndexFingerprint {
     fn from_config(config: &SemanticBackendConfig, dimension: usize) -> Self {
+        // Use normalized URL for fingerprinting so cosmetic differences
+        // (e.g. "http://host/v1" vs "http://host/v1/") don't cause rebuilds.
+        let base_url = config
+            .base_url
+            .as_ref()
+            .and_then(|u| normalize_base_url(u).ok())
+            .unwrap_or_else(|| FALLBACK_BACKEND.to_string());
         Self {
             backend: config.backend.as_str().to_string(),
             model: config.model.clone(),
-            base_url: config
-                .base_url
-                .clone()
-                .unwrap_or_else(|| FALLBACK_BACKEND.to_string()),
+            base_url,
             dimension,
         }
     }
@@ -90,8 +97,50 @@ pub struct SemanticEmbeddingModel {
 
 pub type EmbeddingModel = SemanticEmbeddingModel;
 
+fn validate_embedding_batch(
+    vectors: &[Vec<f32>],
+    expected_count: usize,
+    context: &str,
+) -> Result<(), String> {
+    if expected_count > 0 && vectors.is_empty() {
+        return Err(format!(
+            "{context} returned no vectors for {expected_count} inputs"
+        ));
+    }
+
+    if vectors.len() != expected_count {
+        return Err(format!(
+            "{context} returned {} vectors for {} inputs",
+            vectors.len(),
+            expected_count
+        ));
+    }
+
+    let Some(first_vector) = vectors.first() else {
+        return Ok(());
+    };
+    let expected_dimension = first_vector.len();
+    for (index, vector) in vectors.iter().enumerate() {
+        if vector.len() != expected_dimension {
+            return Err(format!(
+                "{context} returned inconsistent embedding dimensions: vector 0 has length {expected_dimension}, vector {index} has length {}",
+                vector.len()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn normalize_base_url(raw: &str) -> Result<String, String> {
     let parsed = Url::parse(raw).map_err(|error| format!("invalid base_url '{raw}': {error}"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "unsupported URL scheme '{}' — only http:// and https:// are allowed",
+            scheme
+        ));
+    }
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
@@ -122,6 +171,68 @@ fn normalize_api_key(value: Option<String>) -> Option<String> {
     })
 }
 
+fn is_retryable_embedding_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn is_retryable_embedding_error(error: &reqwest::Error) -> bool {
+    error.is_connect()
+}
+
+fn sleep_before_embedding_retry(attempt_index: usize) {
+    if let Some(delay_ms) = EMBEDDING_REQUEST_BACKOFF_MS.get(attempt_index) {
+        std::thread::sleep(Duration::from_millis(*delay_ms));
+    }
+}
+
+fn send_embedding_request<F>(mut make_request: F, backend_label: &str) -> Result<String, String>
+where
+    F: FnMut() -> reqwest::blocking::RequestBuilder,
+{
+    for attempt_index in 0..EMBEDDING_REQUEST_MAX_ATTEMPTS {
+        let last_attempt = attempt_index + 1 == EMBEDDING_REQUEST_MAX_ATTEMPTS;
+
+        let response = match make_request().send() {
+            Ok(response) => response,
+            Err(error) => {
+                if !last_attempt && is_retryable_embedding_error(&error) {
+                    sleep_before_embedding_retry(attempt_index);
+                    continue;
+                }
+                return Err(format!("{backend_label} request failed: {error}"));
+            }
+        };
+
+        let status = response.status();
+        let raw = match response.text() {
+            Ok(raw) => raw,
+            Err(error) => {
+                if !last_attempt && is_retryable_embedding_error(&error) {
+                    sleep_before_embedding_retry(attempt_index);
+                    continue;
+                }
+                return Err(format!("{backend_label} response read failed: {error}"));
+            }
+        };
+
+        if status.is_success() {
+            return Ok(raw);
+        }
+
+        if !last_attempt && is_retryable_embedding_status(status) {
+            sleep_before_embedding_retry(attempt_index);
+            continue;
+        }
+
+        return Err(format!(
+            "{backend_label} request failed (HTTP {}): {}",
+            status, raw
+        ));
+    }
+
+    unreachable!("embedding request retries exhausted without returning")
+}
+
 impl SemanticEmbeddingModel {
     pub fn from_config(config: &SemanticBackendConfig) -> Result<Self, String> {
         let timeout_ms = if config.timeout_ms == 0 {
@@ -141,28 +252,24 @@ impl SemanticEmbeddingModel {
 
         let client = Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("failed to configure embedding client: {error}"))?;
 
         let engine = match config.backend {
-            SemanticBackend::Fastembed => SemanticEmbeddingEngine::Fastembed(
-                initialize_text_embedding(&model)?,
-            ),
+            SemanticBackend::Fastembed => {
+                SemanticEmbeddingEngine::Fastembed(initialize_text_embedding(&model)?)
+            }
             SemanticBackend::OpenAiCompatible => {
-                let raw = config
-                    .base_url
-                    .as_ref()
-                    .ok_or_else(|| "base_url is required for openai_compatible backend".to_string())?;
+                let raw = config.base_url.as_ref().ok_or_else(|| {
+                    "base_url is required for openai_compatible backend".to_string()
+                })?;
                 let base_url = normalize_base_url(raw)?;
 
                 let api_key = match api_key_env {
-                    Some(var_name) => Some(
-                        env::var(&var_name).map_err(|_| {
-                            format!(
-                                "missing api_key_env '{var_name}' for openai_compatible backend"
-                            )
-                        })?,
-                    ),
+                    Some(var_name) => Some(env::var(&var_name).map_err(|_| {
+                        format!("missing api_key_env '{var_name}' for openai_compatible backend")
+                    })?),
                     None => None,
                 };
 
@@ -219,7 +326,10 @@ impl SemanticEmbeddingModel {
         self.timeout_ms
     }
 
-    pub fn fingerprint(&mut self, config: &SemanticBackendConfig) -> Result<SemanticIndexFingerprint, String> {
+    pub fn fingerprint(
+        &mut self,
+        config: &SemanticBackendConfig,
+    ) -> Result<SemanticIndexFingerprint, String> {
         let dimension = self.dimension()?;
         Ok(SemanticIndexFingerprint::from_config(config, dimension))
     }
@@ -240,14 +350,16 @@ impl SemanticEmbeddingModel {
                     .ok_or_else(|| "embedding backend returned no vectors".to_string())?
             }
             SemanticEmbeddingEngine::OpenAiCompatible { .. } => {
-                let vectors = self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
+                let vectors =
+                    self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
                 vectors
                     .first()
                     .map(|v| v.len())
                     .ok_or_else(|| "embedding backend returned no vectors".to_string())?
             }
             SemanticEmbeddingEngine::Ollama { .. } => {
-                let vectors = self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
+                let vectors =
+                    self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
                 vectors
                     .first()
                     .map(|v| v.len())
@@ -275,34 +387,28 @@ impl SemanticEmbeddingModel {
                 base_url,
                 api_key,
             } => {
+                let expected_text_count = texts.len();
                 let endpoint = build_openai_embeddings_endpoint(base_url);
                 let body = serde_json::json!({
                     "input": texts,
                     "model": model,
                 });
 
-                let mut request = client
-                    .post(&endpoint)
-                    .json(&body)
-                    .header("Content-Type", "application/json");
+                let raw = send_embedding_request(
+                    || {
+                        let mut request = client
+                            .post(&endpoint)
+                            .json(&body)
+                            .header("Content-Type", "application/json");
 
-                if let Some(api_key) = api_key {
-                    request = request.header("Authorization", format!("Bearer {api_key}"));
-                }
+                        if let Some(api_key) = api_key {
+                            request = request.header("Authorization", format!("Bearer {api_key}"));
+                        }
 
-                let response = request
-                    .send()
-                    .map_err(|error| format!("openai compatible request failed: {error}"))?;
-                let status = response.status();
-                let raw = response
-                    .text()
-                    .map_err(|error| format!("openai compatible response read failed: {error}"))?;
-                if !status.is_success() {
-                    return Err(format!(
-                        "openai compatible request failed (HTTP {}): {}",
-                        status, raw
-                    ));
-                }
+                        request
+                    },
+                    "openai compatible",
+                )?;
 
                 #[derive(Deserialize)]
                 struct OpenAiResponse {
@@ -317,19 +423,30 @@ impl SemanticEmbeddingModel {
 
                 let parsed: OpenAiResponse = serde_json::from_str(&raw)
                     .map_err(|error| format!("invalid openai compatible response: {error}"))?;
+                if parsed.data.len() != expected_text_count {
+                    return Err(format!(
+                        "openai compatible response returned {} embeddings for {} inputs",
+                        parsed.data.len(),
+                        expected_text_count
+                    ));
+                }
 
                 let mut vectors = vec![Vec::new(); parsed.data.len()];
-                for item in parsed.data {
-                    let index = item.index.unwrap_or(0) as usize;
+                for (i, item) in parsed.data.into_iter().enumerate() {
+                    let index = item.index.unwrap_or(i as u32) as usize;
                     if index >= vectors.len() {
-                        return Err("openai compatible response contains invalid vector index".to_string());
+                        return Err(
+                            "openai compatible response contains invalid vector index".to_string()
+                        );
                     }
                     vectors[index] = item.embedding;
                 }
 
                 for vector in &vectors {
                     if vector.is_empty() {
-                        return Err("openai compatible response contained missing vectors".to_string());
+                        return Err(
+                            "openai compatible response contained missing vectors".to_string()
+                        );
                     }
                 }
 
@@ -341,6 +458,7 @@ impl SemanticEmbeddingModel {
                 model,
                 base_url,
             } => {
+                let expected_text_count = texts.len();
                 let endpoint = build_ollama_embeddings_endpoint(base_url);
 
                 #[derive(Serialize)]
@@ -354,19 +472,15 @@ impl SemanticEmbeddingModel {
                     input: texts,
                 };
 
-                let response = client
-                    .post(&endpoint)
-                    .json(&payload)
-                    .header("Content-Type", "application/json")
-                    .send()
-                    .map_err(|error| format!("ollama request failed: {error}"))?;
-                let status = response.status();
-                let raw = response
-                    .text()
-                    .map_err(|error| format!("ollama response read failed: {error}"))?;
-                if !status.is_success() {
-                    return Err(format!("ollama request failed (HTTP {}): {}", status, raw));
-                }
+                let raw = send_embedding_request(
+                    || {
+                        client
+                            .post(&endpoint)
+                            .json(&payload)
+                            .header("Content-Type", "application/json")
+                    },
+                    "ollama",
+                )?;
 
                 #[derive(Deserialize)]
                 struct OllamaResponse {
@@ -377,6 +491,13 @@ impl SemanticEmbeddingModel {
                     .map_err(|error| format!("invalid ollama response: {error}"))?;
                 if parsed.embeddings.is_empty() {
                     return Err("ollama response returned no embeddings".to_string());
+                }
+                if parsed.embeddings.len() != expected_text_count {
+                    return Err(format!(
+                        "ollama response returned {} embeddings for {} inputs",
+                        parsed.embeddings.len(),
+                        expected_text_count
+                    ));
                 }
 
                 let vectors = parsed.embeddings;
@@ -529,11 +650,15 @@ pub fn initialize_text_embedding(model: &str) -> Result<TextEmbedding, String> {
 
     let selected_model = match model {
         "all-MiniLM-L6-v2" | "all-minilm-l6-v2" => FastembedEmbeddingModel::AllMiniLML6V2,
-        _ => FastembedEmbeddingModel::AllMiniLML6V2,
+        _ => {
+            return Err(format!(
+                "unsupported fastembed model '{}'. Supported: all-MiniLM-L6-v2",
+                model
+            ))
+        }
     };
 
-    TextEmbedding::try_new(InitOptions::new(selected_model))
-        .map_err(format_embedding_init_error)
+    TextEmbedding::try_new(InitOptions::new(selected_model)).map_err(format_embedding_init_error)
 }
 
 pub fn is_onnx_runtime_unavailable(message: &str) -> bool {
@@ -593,12 +718,14 @@ pub struct SemanticChunk {
 }
 
 /// A stored embedding entry — chunk metadata + vector
+#[derive(Debug)]
 struct EmbeddingEntry {
     chunk: SemanticChunk,
     vector: Vec<f32>,
 }
 
 /// The semantic index — stores embeddings for all symbols in a project
+#[derive(Debug)]
 pub struct SemanticIndex {
     entries: Vec<EmbeddingEntry>,
     /// Track which files are indexed and their mtime for staleness detection
@@ -699,6 +826,7 @@ impl SemanticIndex {
 
         // Embed in batches
         let mut entries: Vec<EmbeddingEntry> = Vec::with_capacity(chunks.len());
+        let mut expected_dimension: Option<usize> = None;
         let batch_size = max_batch_size.max(1);
         for batch_start in (0..chunks.len()).step_by(batch_size) {
             let batch_end = (batch_start + batch_size).min(chunks.len());
@@ -708,6 +836,20 @@ impl SemanticIndex {
                 .collect();
 
             let vectors = embed_fn(batch_texts)?;
+            validate_embedding_batch(&vectors, batch_end - batch_start, "embedding backend")?;
+
+            // Track consistent dimension across all batches
+            if let Some(dim) = vectors.first().map(|v| v.len()) {
+                match expected_dimension {
+                    None => expected_dimension = Some(dim),
+                    Some(expected) if dim != expected => {
+                        return Err(format!(
+                            "embedding dimension changed across batches: expected {expected}, got {dim}"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
 
             for (i, vector) in vectors.into_iter().enumerate() {
                 let chunk_idx = batch_start + i;
@@ -825,13 +967,18 @@ impl SemanticIndex {
     pub fn is_file_stale(&self, file: &Path) -> bool {
         match self.file_mtimes.get(file) {
             None => true,
-            Some(stored_mtime) => {
-                let current_mtime = std::fs::metadata(file)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                *stored_mtime != current_mtime
-            }
+            Some(stored_mtime) => match fs::metadata(file).and_then(|m| m.modified()) {
+                Ok(current_mtime) => *stored_mtime != current_mtime,
+                Err(_) => true,
+            },
         }
+    }
+
+    pub fn count_stale_files(&self) -> usize {
+        self.file_mtimes
+            .keys()
+            .filter(|path| self.is_file_stale(path))
+            .count()
     }
 
     /// Remove entries for a specific file
@@ -954,17 +1101,14 @@ impl SemanticIndex {
     /// Serialize the index to bytes for disk persistence
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        let fingerprint_bytes = self
-            .fingerprint
-            .as_ref()
-            .and_then(|fingerprint| {
-                let encoded = fingerprint.as_string();
-                if encoded.is_empty() {
-                    None
-                } else {
-                    Some(encoded.into_bytes())
-                }
-            });
+        let fingerprint_bytes = self.fingerprint.as_ref().and_then(|fingerprint| {
+            let encoded = fingerprint.as_string();
+            if encoded.is_empty() {
+                None
+            } else {
+                Some(encoded.into_bytes())
+            }
+        });
 
         // Header: version(1) + dimension(4) + entry_count(4) [+ fingerprint_len(4)]
         let version = if fingerprint_bytes.is_some() {
@@ -1665,7 +1809,9 @@ mod tests {
         index.write_to_disk(storage.path(), project_key);
 
         let matching = index.fingerprint().unwrap().as_string();
-        assert!(SemanticIndex::read_from_disk(storage.path(), project_key, Some(&matching)).is_some());
+        assert!(
+            SemanticIndex::read_from_disk(storage.path(), project_key, Some(&matching)).is_some()
+        );
 
         let mismatched = SemanticIndexFingerprint {
             backend: "ollama".to_string(),
@@ -1674,6 +1820,8 @@ mod tests {
             dimension: 3,
         }
         .as_string();
-        assert!(SemanticIndex::read_from_disk(storage.path(), project_key, Some(&mismatched)).is_none());
+        assert!(
+            SemanticIndex::read_from_disk(storage.path(), project_key, Some(&mismatched)).is_none()
+        );
     }
 }

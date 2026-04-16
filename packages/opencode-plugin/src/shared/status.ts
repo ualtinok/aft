@@ -113,12 +113,8 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
     },
     semantic_index: {
       status: readString(semanticIndex.status, "unknown"),
-      backend: readNullableString(
-        semanticIndex.backend ?? semanticConfig.backend,
-      ),
-      model: readNullableString(
-        semanticIndex.model ?? semanticConfig.model,
-      ),
+      backend: readNullableString(semanticIndex.backend ?? semanticConfig.backend),
+      model: readNullableString(semanticIndex.model ?? semanticConfig.model),
       stage: readNullableString(semanticIndex.stage),
       files: readOptionalNumber(semanticIndex.files),
       entries_done: readOptionalNumber(semanticIndex.entries_done),
@@ -192,10 +188,7 @@ export function formatStatusDialogMessage(status: AftStatusSnapshot): string {
   if (status.semantic_index.files != null) {
     lines.push(`- semantic files: ${formatCount(status.semantic_index.files)}`);
   }
-  if (
-    status.semantic_index.entries_done != null ||
-    status.semantic_index.entries_total != null
-  ) {
+  if (status.semantic_index.entries_done != null || status.semantic_index.entries_total != null) {
     lines.push(
       `- semantic progress: ${formatCount(status.semantic_index.entries_done ?? null)} / ${formatCount(status.semantic_index.entries_total ?? null)}`,
     );
@@ -244,10 +237,7 @@ export function formatStatusMarkdown(status: AftStatusSnapshot): string {
   if (status.semantic_index.files != null) {
     lines.push(`- **Files:** ${formatCount(status.semantic_index.files)}`);
   }
-  if (
-    status.semantic_index.entries_done != null ||
-    status.semantic_index.entries_total != null
-  ) {
+  if (status.semantic_index.entries_done != null || status.semantic_index.entries_total != null) {
     lines.push(
       `- **Progress:** ${formatCount(status.semantic_index.entries_done ?? null)} / ${formatCount(status.semantic_index.entries_total ?? null)}`,
     );
