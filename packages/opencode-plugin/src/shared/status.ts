@@ -15,8 +15,15 @@ export interface AftStatusSnapshot {
   };
   semantic_index: {
     status: string;
+    backend?: string | null;
+    model?: string | null;
+    stage?: string | null;
+    files?: number | null;
+    entries_done?: number | null;
+    entries_total?: number | null;
     entries: number | null;
     dimension: number | null;
+    error?: string | null;
   };
   disk: {
     storage_dir: string | null;
@@ -82,6 +89,10 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
   const features = asRecord(response.features);
   const searchIndex = asRecord(response.search_index);
   const semanticIndex = asRecord(response.semantic_index);
+  const semanticConfig = {
+    ...asRecord(response.semantic),
+    ...asRecord((response as { semantic_config?: unknown }).semantic_config),
+  };
   const disk = asRecord(response.disk);
   const symbolCache = asRecord(response.symbol_cache);
 
@@ -102,8 +113,19 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
     },
     semantic_index: {
       status: readString(semanticIndex.status, "unknown"),
+      backend: readNullableString(
+        semanticIndex.backend ?? semanticConfig.backend,
+      ),
+      model: readNullableString(
+        semanticIndex.model ?? semanticConfig.model,
+      ),
+      stage: readNullableString(semanticIndex.stage),
+      files: readOptionalNumber(semanticIndex.files),
+      entries_done: readOptionalNumber(semanticIndex.entries_done),
+      entries_total: readOptionalNumber(semanticIndex.entries_total),
       entries: readOptionalNumber(semanticIndex.entries),
       dimension: readOptionalNumber(semanticIndex.dimension),
+      error: readNullableString(semanticIndex.error),
     },
     disk: {
       storage_dir: readNullableString(disk.storage_dir),
@@ -138,6 +160,12 @@ export function formatStatusDialogMessage(status: AftStatusSnapshot): string {
     `- status: ${status.semantic_index.status}`,
     `- entries: ${formatCount(status.semantic_index.entries)}`,
   ];
+  if (status.semantic_index.backend) {
+    lines.push(`- backend: ${status.semantic_index.backend}`);
+  }
+  if (status.semantic_index.model) {
+    lines.push(`- model: ${status.semantic_index.model}`);
+  }
 
   if (status.semantic_index.dimension != null) {
     lines.push(`- dimension: ${formatCount(status.semantic_index.dimension)}`);
@@ -156,6 +184,24 @@ export function formatStatusDialogMessage(status: AftStatusSnapshot): string {
 
   if (status.storage_dir ?? status.disk.storage_dir) {
     lines.push(`- storage dir: ${status.storage_dir ?? status.disk.storage_dir}`);
+  }
+
+  if (status.semantic_index.stage) {
+    lines.push("", "Semantic stage", status.semantic_index.stage);
+  }
+  if (status.semantic_index.files != null) {
+    lines.push(`- semantic files: ${formatCount(status.semantic_index.files)}`);
+  }
+  if (
+    status.semantic_index.entries_done != null ||
+    status.semantic_index.entries_total != null
+  ) {
+    lines.push(
+      `- semantic progress: ${formatCount(status.semantic_index.entries_done ?? null)} / ${formatCount(status.semantic_index.entries_total ?? null)}`,
+    );
+  }
+  if (status.semantic_index.error) {
+    lines.push("", "Semantic error", status.semantic_index.error);
   }
 
   return lines.join("\n");
@@ -182,9 +228,33 @@ export function formatStatusMarkdown(status: AftStatusSnapshot): string {
     `- **Status:** \`${status.semantic_index.status}\``,
     `- **Entries:** ${formatCount(status.semantic_index.entries)}`,
   ];
+  if (status.semantic_index.backend) {
+    lines.push(`- **Backend:** ${status.semantic_index.backend}`);
+  }
+  if (status.semantic_index.model) {
+    lines.push(`- **Model:** ${status.semantic_index.model}`);
+  }
 
   if (status.semantic_index.dimension != null) {
     lines.push(`- **Dimension:** ${formatCount(status.semantic_index.dimension)}`);
+  }
+  if (status.semantic_index.stage) {
+    lines.push(`- **Stage:** ${status.semantic_index.stage}`);
+  }
+  if (status.semantic_index.files != null) {
+    lines.push(`- **Files:** ${formatCount(status.semantic_index.files)}`);
+  }
+  if (
+    status.semantic_index.entries_done != null ||
+    status.semantic_index.entries_total != null
+  ) {
+    lines.push(
+      `- **Progress:** ${formatCount(status.semantic_index.entries_done ?? null)} / ${formatCount(status.semantic_index.entries_total ?? null)}`,
+    );
+  }
+
+  if (status.semantic_index.error) {
+    lines.push(`- **Error:** ${status.semantic_index.error}`);
   }
 
   lines.push(

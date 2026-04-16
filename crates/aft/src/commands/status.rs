@@ -1,6 +1,7 @@
 //! AFT status command — returns the current state of indexes, features, and configuration.
 
 use crate::context::AppContext;
+use crate::context::SemanticIndexStatus;
 use crate::protocol::{RawRequest, Response};
 
 pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
@@ -40,15 +41,43 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
                     "status": idx.status_label(),
                     "entries": idx.entry_count(),
                     "dimension": idx.dimension(),
+                    "backend": idx.backend_label().unwrap_or(config.semantic_backend_label()),
+                    "model": idx.model_label().unwrap_or(config.semantic.model.as_str()),
                 })
             }
             None => {
-                let status = if ctx.config().experimental_semantic_search {
-                    "loading"
-                } else {
-                    "disabled"
-                };
-                serde_json::json!({ "status": status })
+                match &*ctx.semantic_index_status().borrow() {
+                    SemanticIndexStatus::Disabled => serde_json::json!({
+                        "status": "disabled",
+                        "backend": config.semantic_backend_label(),
+                        "model": config.semantic.model.as_str(),
+                    }),
+                    SemanticIndexStatus::Building {
+                        stage,
+                        files,
+                        entries_done,
+                        entries_total,
+                    } => serde_json::json!({
+                        "status": "loading",
+                        "stage": stage,
+                        "files": files,
+                        "entries_done": entries_done,
+                        "entries_total": entries_total,
+                        "backend": config.semantic_backend_label(),
+                        "model": config.semantic.model.as_str(),
+                    }),
+                    SemanticIndexStatus::Ready => serde_json::json!({
+                        "status": "ready",
+                        "backend": config.semantic_backend_label(),
+                        "model": config.semantic.model.as_str(),
+                    }),
+                    SemanticIndexStatus::Failed(error) => serde_json::json!({
+                        "status": "failed",
+                        "error": error,
+                        "backend": config.semantic_backend_label(),
+                        "model": config.semantic.model.as_str(),
+                    }),
+                }
             }
         }
     };

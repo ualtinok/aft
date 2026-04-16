@@ -4,7 +4,63 @@ use std::path::PathBuf;
 ///
 /// Holds project-scoped settings and tuning knobs. Values are set at startup
 /// and remain immutable for the lifetime of the process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticBackend {
+    Fastembed,
+    OpenAiCompatible,
+    Ollama,
+}
+
+impl SemanticBackend {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fastembed => "fastembed",
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::Ollama => "ollama",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "fastembed" => Some(Self::Fastembed),
+            "openai_compatible" => Some(Self::OpenAiCompatible),
+            "ollama" => Some(Self::Ollama),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticBackendConfig {
+    pub backend: SemanticBackend,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub timeout_ms: u64,
+    pub max_batch_size: usize,
+}
+
+impl Default for SemanticBackendConfig {
+    fn default() -> Self {
+        Self {
+            backend: SemanticBackend::Fastembed,
+            model: DEFAULT_SEMANTIC_MODEL.to_string(),
+            base_url: None,
+            api_key_env: None,
+            timeout_ms: 60_000,
+            max_batch_size: 64,
+        }
+    }
+}
+
+pub const DEFAULT_SEMANTIC_MODEL: &str = "all-MiniLM-L6-v2";
+
+impl Config {
+    pub fn semantic_backend_label(&self) -> &'static str {
+        self.semantic.backend.as_str()
+    }
+}
+
 pub struct Config {
     /// Root directory of the project being analyzed. `None` if not scoped.
     pub project_root: Option<PathBuf>,
@@ -38,6 +94,7 @@ pub struct Config {
     pub experimental_semantic_search: bool,
     /// Maximum file size to fully index in bytes (default: 1MB).
     pub search_index_max_file_size: u64,
+    pub semantic: SemanticBackendConfig,
     /// Persistent storage directory for indexes (trigram, semantic).
     /// Set by the plugin to the XDG-compliant path (e.g. ~/.local/share/opencode/storage/plugin/aft/).
     /// Falls back to ~/.cache/aft/ if not set.
@@ -63,6 +120,7 @@ impl Default for Config {
             experimental_search_index: false,
             experimental_semantic_search: false,
             search_index_max_file_size: 1_048_576,
+            semantic: SemanticBackendConfig::default(),
             storage_dir: None,
         }
     }

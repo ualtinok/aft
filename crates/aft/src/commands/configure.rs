@@ -7,6 +7,7 @@ use crossbeam_channel::unbounded;
 use notify::{RecursiveMode, Watcher};
 
 use crate::callgraph::CallGraph;
+use crate::config::{SemanticBackend, SemanticBackendConfig};
 use crate::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
@@ -47,6 +48,68 @@ fn validate_storage_dir(raw: &str) -> Result<PathBuf, String> {
     }
 
     Ok(normalized)
+}
+
+fn parse_semantic_config(
+    value: &serde_json::Value,
+    current: &SemanticBackendConfig,
+) -> Result<SemanticBackendConfig, String> {
+    let Some(obj) = value.as_object() else {
+        return Err("configure: semantic must be an object".to_string());
+    };
+
+    let mut semantic = current.clone();
+
+    if let Some(raw) = obj.get("backend") {
+        let name = raw
+            .as_str()
+            .ok_or_else(|| "configure: semantic.backend must be a string".to_string())?
+            .trim();
+        semantic.backend = SemanticBackend::from_name(name)
+            .ok_or_else(|| format!("configure: unsupported semantic.backend '{name}'"))?;
+    }
+    if let Some(raw) = obj.get("model") {
+        semantic.model = raw
+            .as_str()
+            .ok_or_else(|| "configure: semantic.model must be a string".to_string())?
+            .trim()
+            .to_string();
+    }
+    if let Some(raw) = obj.get("base_url") {
+        let base_url = raw
+            .as_str()
+            .ok_or_else(|| "configure: semantic.base_url must be a string".to_string())?
+            .trim()
+            .to_string();
+        semantic.base_url = if base_url.is_empty() { None } else { Some(base_url) };
+    }
+    if let Some(raw) = obj.get("api_key_env") {
+        let api_key_env = raw
+            .as_str()
+            .ok_or_else(|| "configure: semantic.api_key_env must be a string".to_string())?
+            .trim()
+            .to_string();
+        semantic.api_key_env = if api_key_env.is_empty() {
+            None
+        } else {
+            Some(api_key_env)
+        };
+    }
+    if let Some(raw) = obj.get("timeout_ms") {
+        let timeout_ms = raw
+            .as_u64()
+            .ok_or_else(|| "configure: semantic.timeout_ms must be an unsigned integer".to_string())?;
+        semantic.timeout_ms = timeout_ms;
+    }
+    if let Some(raw) = obj.get("max_batch_size") {
+        let max_batch_size = raw
+            .as_u64()
+            .ok_or_else(|| "configure: semantic.max_batch_size must be an unsigned integer".to_string())?;
+        semantic.max_batch_size = usize::try_from(max_batch_size)
+            .map_err(|_| "configure: semantic.max_batch_size is too large".to_string())?;
+    }
+
+    Ok(semantic)
 }
 
 /// Handle a `configure` request.
@@ -150,16 +213,28 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         ctx.config_mut().storage_dir = Some(storage_dir.clone());
         ctx.backup().borrow_mut().set_storage_dir(storage_dir);
     }
+    if let Some(v) = req.params.get("semantic") {
+        let current = ctx.config().semantic.clone();
+        let semantic = match parse_semantic_config(v, &current) {
+            Ok(config) => config,
+            Err(error) => {
+                return Response::error(&req.id, "invalid_request", error);
+            }
+        };
+        ctx.config_mut().semantic = semantic;
+    }
 
     let experimental_search_index = ctx.config().experimental_search_index;
     let experimental_semantic_search = ctx.config().experimental_semantic_search;
     let search_index_max_file_size = ctx.config().search_index_max_file_size;
+    let semantic_config = ctx.config().semantic.clone();
 
     *ctx.search_index().borrow_mut() = None;
     *ctx.search_index_rx().borrow_mut() = None;
     *ctx.semantic_index().borrow_mut() = None;
     *ctx.semantic_index_rx().borrow_mut() = None;
     *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Disabled;
+    *ctx.semantic_embedding_model().borrow_mut() = None;
 
     let storage_dir = ctx.config().storage_dir.clone();
 
@@ -213,7 +288,12 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     if experimental_semantic_search {
-        *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Building;
+        *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Building {
+            stage: "queued".to_string(),
+            files: None,
+            entries_done: None,
+            entries_total: None,
+        };
         let (tx, rx): (
             crossbeam_channel::Sender<SemanticIndexEvent>,
             crossbeam_channel::Receiver<SemanticIndexEvent>,
@@ -223,19 +303,43 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let root_clone = root_path.clone();
         let semantic_storage = storage_dir.clone();
         let semantic_project_key = crate::search_index::project_cache_key(&root_path);
+        let semantic_config = semantic_config.clone();
+        let tx_progress = tx.clone();
         thread::spawn(move || {
             let build_result = catch_unwind(AssertUnwindSafe(
-                || -> Result<SemanticIndexEvent, String> {
+                || -> Result<SemanticIndex, String> {
+                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                        stage: "initializing_embedding_model".to_string(),
+                        files: None,
+                        entries_done: None,
+                        entries_total: None,
+                    });
+                    let mut model = crate::semantic_index::EmbeddingModel::from_config(&semantic_config)?;
+                    let fingerprint = model.fingerprint(&semantic_config)?;
+                    let fingerprint_key = fingerprint.as_string();
+
                     if let Some(ref dir) = semantic_storage {
                         if let Some(cached) =
-                            SemanticIndex::read_from_disk(dir, &semantic_project_key)
+                            SemanticIndex::read_from_disk(dir, &semantic_project_key, Some(&fingerprint_key))
                         {
-                            return Ok(SemanticIndexEvent::Ready(cached));
+                            let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                stage: "loaded_cached_index".to_string(),
+                                files: None,
+                                entries_done: Some(cached.entry_count()),
+                                entries_total: Some(cached.entry_count()),
+                            });
+                            return Ok(cached);
                         }
                     }
 
                     let filters = build_path_filters(&[], &[]).unwrap_or_default();
                     let files = walk_project_files(&root_clone, &filters);
+                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                        stage: "scanned_project_files".to_string(),
+                        files: Some(files.len()),
+                        entries_done: None,
+                        entries_total: None,
+                    });
 
                     // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
                     // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
@@ -255,31 +359,53 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                         ));
                     }
 
-                    let mut model = crate::semantic_index::initialize_text_embedding()?;
+                    let mut embed = |texts: Vec<String>| model.embed(texts);
 
-                    let mut embed = |texts: Vec<String>| {
-                        model
-                            .embed(texts, None::<usize>)
-                            .map_err(|error| error.to_string())
+                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                        stage: "extracting_symbols".to_string(),
+                        files: Some(files.len()),
+                        entries_done: None,
+                        entries_total: None,
+                    });
+                    let mut progress = |done: usize, total: usize| {
+                        let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                            stage: "embedding_symbols".to_string(),
+                            files: Some(files.len()),
+                            entries_done: Some(done),
+                            entries_total: Some(total),
+                        });
                     };
-
-                    let index = SemanticIndex::build(&root_clone, &files, &mut embed, 64)?;
+                    let index = SemanticIndex::build_with_progress(
+                        &root_clone,
+                        &files,
+                        &mut embed,
+                        semantic_config.max_batch_size.max(1),
+                        &mut progress,
+                    )?;
+                    let mut index = index;
+                    index.set_fingerprint(fingerprint);
                     log::info!(
                         "[aft] built semantic index: {} files, {} entries",
                         files.len(),
                         index.len()
                     );
+                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                        stage: "persisting_index".to_string(),
+                        files: Some(files.len()),
+                        entries_done: Some(index.len()),
+                        entries_total: Some(index.len()),
+                    });
 
                     if let Some(ref dir) = semantic_storage {
                         index.write_to_disk(dir, &semantic_project_key);
                     }
 
-                    Ok(SemanticIndexEvent::Ready(index))
+                    Ok(index)
                 },
             ));
 
             let event = match build_result {
-                Ok(Ok(event)) => event,
+                Ok(Ok(index)) => SemanticIndexEvent::Ready(index),
                 Ok(Err(error)) => {
                     log::warn!("[aft] failed to build semantic index: {}", error);
                     SemanticIndexEvent::Failed(error)

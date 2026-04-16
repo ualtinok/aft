@@ -32,6 +32,23 @@ const CheckerEnum = z.enum([
   "none",
 ]);
 
+const SemanticBackendEnum = z.enum(["fastembed", "openai_compatible", "ollama"]);
+
+const SemanticConfigSchema = z.object({
+  /** Semantic backend type: local fastembed, OpenAI-compatible API, or Ollama. */
+  backend: SemanticBackendEnum.optional(),
+  /** Model identifier passed to the selected semantic backend. */
+  model: z.string().trim().min(1).optional(),
+  /** Base URL of the backend API endpoint. */
+  base_url: z.string().trim().min(1).optional(),
+  /** Environment variable that contains the API key used by external backends. */
+  api_key_env: z.string().trim().min(1).optional(),
+  /** Backend request timeout in milliseconds. */
+  timeout_ms: z.number().int().positive().optional(),
+  /** Maximum batch size used by the semantic pipeline. */
+  max_batch_size: z.number().int().positive().optional(),
+});
+
 export const AftConfigSchema = z.object({
   /** Whether to auto-format files after edits. Default: true. */
   format_on_edit: z.boolean().optional(),
@@ -72,6 +89,8 @@ export const AftConfigSchema = z.object({
   experimental_search_index: z.boolean().optional(),
   /** Enable experimental semantic search. Default: false. */
   experimental_semantic_search: z.boolean().optional(),
+  /** External semantic backend configuration for embedding and retrieval. */
+  semantic: SemanticConfigSchema.optional(),
 });
 
 export type AftConfig = z.infer<typeof AftConfigSchema>;

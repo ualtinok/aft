@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::context::{AppContext, SemanticIndexStatus};
 use crate::protocol::{RawRequest, Response};
 use crate::semantic_index::{
-    initialize_text_embedding, is_onnx_runtime_unavailable, SemanticResult,
+    EmbeddingModel, is_onnx_runtime_unavailable, SemanticResult,
 };
 use crate::symbols::SymbolKind;
 
@@ -43,12 +43,31 @@ pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
                 }),
             );
         }
-        SemanticIndexStatus::Building => {
+        SemanticIndexStatus::Building {
+            stage,
+            files,
+            entries_done,
+            entries_total,
+        } => {
+            let mut detail = format!("Semantic index is still building (stage: {}).", stage);
+            if let Some(files) = files {
+                detail.push_str(&format!(" files: {}", files));
+            }
+            if let Some(entries_done) = entries_done {
+                detail.push_str(&format!(" entries done: {}", entries_done));
+            }
+            if let Some(entries_total) = entries_total {
+                detail.push_str(&format!(" / {}", entries_total));
+            }
             return Response::success(
                 &req.id,
                 serde_json::json!({
                     "status": "building",
-                    "text": "Semantic index is still building...",
+                    "text": detail,
+                    "stage": stage,
+                    "files": files,
+                    "entries_done": entries_done,
+                    "entries_total": entries_total,
                 }),
             );
         }
@@ -77,7 +96,7 @@ pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
                 &req.id,
                 serde_json::json!({
                     "status": "not_ready",
-                    "text": "Semantic index is still building...",
+                    "text": "Semantic index is not ready yet.",
                 }),
             );
         };
@@ -109,22 +128,33 @@ fn default_top_k() -> usize {
 
 fn embed_query(query: &str, ctx: &AppContext) -> Result<Vec<f32>, String> {
     let mut model_ref = ctx.semantic_embedding_model().borrow_mut();
+    let semantic_config = ctx.config().semantic.clone();
 
     if model_ref.is_none() {
-        *model_ref = Some(initialize_text_embedding()?);
+        *model_ref = Some(EmbeddingModel::from_config(&semantic_config)?);
     }
 
     let model = model_ref
         .as_mut()
         .ok_or_else(|| "embedding model was not initialized".to_string())?;
     let embeddings = model
-        .embed(vec![query.to_string()], None)
+        .embed(vec![query.to_string()])
         .map_err(|error| format!("failed to embed query: {error}"))?;
 
     let query_vector = embeddings
         .first()
         .cloned()
         .ok_or_else(|| "embedding model returned no query vector".to_string())?;
+
+    if let Some(index) = ctx.semantic_index().borrow().as_ref() {
+        if index.dimension() != query_vector.len() {
+            return Err(format!(
+                "semantic embedding dimension mismatch: query backend returned {}, index expects {}. Rebuild the semantic index for the active backend/model.",
+                query_vector.len(),
+                index.dimension()
+            ));
+        }
+    }
 
     Ok(query_vector)
 }

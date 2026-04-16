@@ -325,31 +325,54 @@ fn drain_search_index_events(ctx: &AppContext) {
 }
 
 fn drain_semantic_index_events(ctx: &AppContext) {
-    let latest = {
+    let events = {
         let rx_ref = ctx.semantic_index_rx().borrow();
         let Some(rx) = rx_ref.as_ref() else {
             return;
         };
 
-        let mut latest = None;
+        let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            latest = Some(event);
+            events.push(event);
         }
-        latest
+        events
     };
 
-    if let Some(event) = latest {
-        *ctx.semantic_index_rx().borrow_mut() = None;
+    if events.is_empty() {
+        return;
+    }
+
+    let mut keep_receiver = true;
+    for event in events {
         match event {
+            SemanticIndexEvent::Progress {
+                stage,
+                files,
+                entries_done,
+                entries_total,
+            } => {
+                *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Building {
+                    stage,
+                    files,
+                    entries_done,
+                    entries_total,
+                };
+            }
             SemanticIndexEvent::Ready(index) => {
                 *ctx.semantic_index().borrow_mut() = Some(index);
                 *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Ready;
+                keep_receiver = false;
             }
             SemanticIndexEvent::Failed(error) => {
                 *ctx.semantic_index().borrow_mut() = None;
                 *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Failed(error);
+                keep_receiver = false;
             }
         }
+    }
+
+    if !keep_receiver {
+        *ctx.semantic_index_rx().borrow_mut() = None;
     }
 }
 

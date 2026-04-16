@@ -2,7 +2,6 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 
-use fastembed::TextEmbedding;
 use notify::RecommendedWatcher;
 
 use crate::backup::BackupStore;
@@ -17,12 +16,23 @@ use crate::semantic_index::SemanticIndex;
 #[derive(Debug, Clone)]
 pub enum SemanticIndexStatus {
     Disabled,
-    Building,
+    Building {
+        stage: String,
+        files: Option<usize>,
+        entries_done: Option<usize>,
+        entries_total: Option<usize>,
+    },
     Ready,
     Failed(String),
 }
 
 pub enum SemanticIndexEvent {
+    Progress {
+        stage: String,
+        files: Option<usize>,
+        entries_done: Option<usize>,
+        entries_total: Option<usize>,
+    },
     Ready(SemanticIndex),
     Failed(String),
 }
@@ -93,7 +103,7 @@ pub struct AppContext {
     semantic_index: RefCell<Option<SemanticIndex>>,
     semantic_index_rx: RefCell<Option<crossbeam_channel::Receiver<SemanticIndexEvent>>>,
     semantic_index_status: RefCell<SemanticIndexStatus>,
-    semantic_embedding_model: RefCell<Option<TextEmbedding>>,
+    semantic_embedding_model: RefCell<Option<crate::semantic_index::EmbeddingModel>>,
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
@@ -179,7 +189,7 @@ impl AppContext {
     }
 
     /// Access the cached semantic embedding model.
-    pub fn semantic_embedding_model(&self) -> &RefCell<Option<TextEmbedding>> {
+    pub fn semantic_embedding_model(&self) -> &RefCell<Option<crate::semantic_index::EmbeddingModel>> {
         &self.semantic_embedding_model
     }
 

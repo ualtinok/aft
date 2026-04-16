@@ -1,21 +1,397 @@
 use crate::parser::FileParser;
 use crate::symbols::{Symbol, SymbolKind};
+use crate::config::{SemanticBackend, SemanticBackendConfig};
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel as FastembedEmbeddingModel, InitOptions, TextEmbedding};
+use serde::{Deserialize, Serialize};
+use reqwest::blocking::Client;
 use std::collections::HashMap;
+use std::env;
 use std::fmt::Display;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use std::time::Duration;
+use url::Url;
 
 const DEFAULT_DIMENSION: usize = 384;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_DIMENSION: usize = 1024;
 const F32_BYTES: usize = std::mem::size_of::<f32>();
-const HEADER_BYTES: usize = 9;
+const HEADER_BYTES_V1: usize = 9;
+const HEADER_BYTES_V2: usize = 13;
 const ONNX_RUNTIME_INSTALL_HINT: &str =
     "ONNX Runtime not found. Install via: brew install onnxruntime (macOS) or apt install libonnxruntime (Linux).";
+
+const SEMANTIC_INDEX_VERSION_V1: u8 = 1;
+const SEMANTIC_INDEX_VERSION_V2: u8 = 2;
+const DEFAULT_OPENAI_EMBEDDING_PATH: &str = "/embeddings";
+const DEFAULT_OLLAMA_EMBEDDING_PATH: &str = "/api/embed";
+const DEFAULT_OPENAI_EMBEDDING_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_MAX_BATCH_SIZE: usize = 64;
+const FALLBACK_BACKEND: &str = "none";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticIndexFingerprint {
+    pub backend: String,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: String,
+    pub dimension: usize,
+}
+
+impl SemanticIndexFingerprint {
+    fn from_config(config: &SemanticBackendConfig, dimension: usize) -> Self {
+        Self {
+            backend: config.backend.as_str().to_string(),
+            model: config.model.clone(),
+            base_url: config
+                .base_url
+                .clone()
+                .unwrap_or_else(|| FALLBACK_BACKEND.to_string()),
+            dimension,
+        }
+    }
+
+    pub fn as_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| String::new())
+    }
+
+    fn matches_expected(&self, expected: &str) -> bool {
+        let encoded = self.as_string();
+        !encoded.is_empty() && encoded == expected
+    }
+}
+
+enum SemanticEmbeddingEngine {
+    Fastembed(TextEmbedding),
+    OpenAiCompatible {
+        client: Client,
+        model: String,
+        base_url: String,
+        api_key: Option<String>,
+    },
+    Ollama {
+        client: Client,
+        model: String,
+        base_url: String,
+    },
+}
+
+pub struct SemanticEmbeddingModel {
+    backend: SemanticBackend,
+    model: String,
+    base_url: Option<String>,
+    timeout_ms: u64,
+    max_batch_size: usize,
+    dimension: Option<usize>,
+    engine: SemanticEmbeddingEngine,
+}
+
+pub type EmbeddingModel = SemanticEmbeddingModel;
+
+fn normalize_base_url(raw: &str) -> Result<String, String> {
+    let parsed = Url::parse(raw).map_err(|error| format!("invalid base_url '{raw}': {error}"))?;
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn build_openai_embeddings_endpoint(base_url: &str) -> String {
+    if base_url.ends_with("/v1") {
+        format!("{base_url}{DEFAULT_OPENAI_EMBEDDING_PATH}")
+    } else {
+        format!("{base_url}/v1{}", DEFAULT_OPENAI_EMBEDDING_PATH)
+    }
+}
+
+fn build_ollama_embeddings_endpoint(base_url: &str) -> String {
+    if base_url.ends_with("/api") {
+        format!("{base_url}/embed")
+    } else {
+        format!("{base_url}{DEFAULT_OLLAMA_EMBEDDING_PATH}")
+    }
+}
+
+fn normalize_api_key(value: Option<String>) -> Option<String> {
+    value.and_then(|token| {
+        let token = token.trim();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        }
+    })
+}
+
+impl SemanticEmbeddingModel {
+    pub fn from_config(config: &SemanticBackendConfig) -> Result<Self, String> {
+        let timeout_ms = if config.timeout_ms == 0 {
+            DEFAULT_OPENAI_EMBEDDING_TIMEOUT_MS
+        } else {
+            config.timeout_ms
+        };
+
+        let max_batch_size = if config.max_batch_size == 0 {
+            DEFAULT_MAX_BATCH_SIZE
+        } else {
+            config.max_batch_size
+        };
+
+        let api_key_env = normalize_api_key(config.api_key_env.clone());
+        let model = config.model.clone();
+
+        let client = Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|error| format!("failed to configure embedding client: {error}"))?;
+
+        let engine = match config.backend {
+            SemanticBackend::Fastembed => SemanticEmbeddingEngine::Fastembed(
+                initialize_text_embedding(&model)?,
+            ),
+            SemanticBackend::OpenAiCompatible => {
+                let raw = config
+                    .base_url
+                    .as_ref()
+                    .ok_or_else(|| "base_url is required for openai_compatible backend".to_string())?;
+                let base_url = normalize_base_url(raw)?;
+
+                let api_key = match api_key_env {
+                    Some(var_name) => Some(
+                        env::var(&var_name).map_err(|_| {
+                            format!(
+                                "missing api_key_env '{var_name}' for openai_compatible backend"
+                            )
+                        })?,
+                    ),
+                    None => None,
+                };
+
+                SemanticEmbeddingEngine::OpenAiCompatible {
+                    client,
+                    model,
+                    base_url,
+                    api_key,
+                }
+            }
+            SemanticBackend::Ollama => {
+                let raw = config
+                    .base_url
+                    .as_ref()
+                    .ok_or_else(|| "base_url is required for ollama backend".to_string())?;
+                let base_url = normalize_base_url(raw)?;
+
+                SemanticEmbeddingEngine::Ollama {
+                    client,
+                    model,
+                    base_url,
+                }
+            }
+        };
+
+        Ok(Self {
+            backend: config.backend,
+            model: config.model.clone(),
+            base_url: config.base_url.clone(),
+            timeout_ms,
+            max_batch_size,
+            dimension: None,
+            engine,
+        })
+    }
+
+    pub fn backend(&self) -> SemanticBackend {
+        self.backend
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    pub fn fingerprint(&mut self, config: &SemanticBackendConfig) -> Result<SemanticIndexFingerprint, String> {
+        let dimension = self.dimension()?;
+        Ok(SemanticIndexFingerprint::from_config(config, dimension))
+    }
+
+    pub fn dimension(&mut self) -> Result<usize, String> {
+        if let Some(dimension) = self.dimension {
+            return Ok(dimension);
+        }
+
+        let dimension = match &mut self.engine {
+            SemanticEmbeddingEngine::Fastembed(model) => {
+                let vectors = model
+                    .embed(vec!["semantic index fingerprint probe".to_string()], None)
+                    .map_err(|error| format_embedding_init_error(error.to_string()))?;
+                vectors
+                    .first()
+                    .map(|v| v.len())
+                    .ok_or_else(|| "embedding backend returned no vectors".to_string())?
+            }
+            SemanticEmbeddingEngine::OpenAiCompatible { .. } => {
+                let vectors = self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
+                vectors
+                    .first()
+                    .map(|v| v.len())
+                    .ok_or_else(|| "embedding backend returned no vectors".to_string())?
+            }
+            SemanticEmbeddingEngine::Ollama { .. } => {
+                let vectors = self.embed_texts(vec!["semantic index fingerprint probe".to_string()])?;
+                vectors
+                    .first()
+                    .map(|v| v.len())
+                    .ok_or_else(|| "embedding backend returned no vectors".to_string())?
+            }
+        };
+
+        self.dimension = Some(dimension);
+        Ok(dimension)
+    }
+
+    pub fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_texts(texts)
+    }
+
+    fn embed_texts(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        match &mut self.engine {
+            SemanticEmbeddingEngine::Fastembed(model) => model
+                .embed(texts, None::<usize>)
+                .map_err(|error| format_embedding_init_error(error.to_string()))
+                .map_err(|error| format!("failed to embed batch: {error}")),
+            SemanticEmbeddingEngine::OpenAiCompatible {
+                client,
+                model,
+                base_url,
+                api_key,
+            } => {
+                let endpoint = build_openai_embeddings_endpoint(base_url);
+                let body = serde_json::json!({
+                    "input": texts,
+                    "model": model,
+                });
+
+                let mut request = client
+                    .post(&endpoint)
+                    .json(&body)
+                    .header("Content-Type", "application/json");
+
+                if let Some(api_key) = api_key {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
+                }
+
+                let response = request
+                    .send()
+                    .map_err(|error| format!("openai compatible request failed: {error}"))?;
+                let status = response.status();
+                let raw = response
+                    .text()
+                    .map_err(|error| format!("openai compatible response read failed: {error}"))?;
+                if !status.is_success() {
+                    return Err(format!(
+                        "openai compatible request failed (HTTP {}): {}",
+                        status, raw
+                    ));
+                }
+
+                #[derive(Deserialize)]
+                struct OpenAiResponse {
+                    data: Vec<OpenAiEmbeddingResult>,
+                }
+
+                #[derive(Deserialize)]
+                struct OpenAiEmbeddingResult {
+                    embedding: Vec<f32>,
+                    index: Option<u32>,
+                }
+
+                let parsed: OpenAiResponse = serde_json::from_str(&raw)
+                    .map_err(|error| format!("invalid openai compatible response: {error}"))?;
+
+                let mut vectors = vec![Vec::new(); parsed.data.len()];
+                for item in parsed.data {
+                    let index = item.index.unwrap_or(0) as usize;
+                    if index >= vectors.len() {
+                        return Err("openai compatible response contains invalid vector index".to_string());
+                    }
+                    vectors[index] = item.embedding;
+                }
+
+                for vector in &vectors {
+                    if vector.is_empty() {
+                        return Err("openai compatible response contained missing vectors".to_string());
+                    }
+                }
+
+                self.dimension = vectors.first().map(Vec::len);
+                Ok(vectors)
+            }
+            SemanticEmbeddingEngine::Ollama {
+                client,
+                model,
+                base_url,
+            } => {
+                let endpoint = build_ollama_embeddings_endpoint(base_url);
+
+                #[derive(Serialize)]
+                struct OllamaPayload<'a> {
+                    model: &'a str,
+                    input: Vec<String>,
+                }
+
+                let payload = OllamaPayload {
+                    model,
+                    input: texts,
+                };
+
+                let response = client
+                    .post(&endpoint)
+                    .json(&payload)
+                    .header("Content-Type", "application/json")
+                    .send()
+                    .map_err(|error| format!("ollama request failed: {error}"))?;
+                let status = response.status();
+                let raw = response
+                    .text()
+                    .map_err(|error| format!("ollama response read failed: {error}"))?;
+                if !status.is_success() {
+                    return Err(format!("ollama request failed (HTTP {}): {}", status, raw));
+                }
+
+                #[derive(Deserialize)]
+                struct OllamaResponse {
+                    embeddings: Vec<Vec<f32>>,
+                }
+
+                let parsed: OllamaResponse = serde_json::from_str(&raw)
+                    .map_err(|error| format!("invalid ollama response: {error}"))?;
+                if parsed.embeddings.is_empty() {
+                    return Err("ollama response returned no embeddings".to_string());
+                }
+
+                let vectors = parsed.embeddings;
+                for vector in &vectors {
+                    if vector.is_empty() {
+                        return Err("ollama response contained empty embeddings".to_string());
+                    }
+                }
+
+                self.dimension = vectors.first().map(Vec::len);
+                Ok(vectors)
+            }
+        }
+    }
+}
 
 /// Pre-validate ONNX Runtime by attempting a raw dlopen before ort touches it.
 /// This catches broken/incompatible .so files without risking a panic in the ort crate.
@@ -147,11 +523,16 @@ fn suggest_removal_command(lib_path: &str) -> String {
     format!("   rm '{}'", lib_path)
 }
 
-pub fn initialize_text_embedding() -> Result<TextEmbedding, String> {
+pub fn initialize_text_embedding(model: &str) -> Result<TextEmbedding, String> {
     // Pre-validate before ort can panic on a bad library
     pre_validate_onnx_runtime()?;
 
-    TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
+    let selected_model = match model {
+        "all-MiniLM-L6-v2" | "all-minilm-l6-v2" => FastembedEmbeddingModel::AllMiniLML6V2,
+        _ => FastembedEmbeddingModel::AllMiniLML6V2,
+    };
+
+    TextEmbedding::try_new(InitOptions::new(selected_model))
         .map_err(format_embedding_init_error)
 }
 
@@ -224,6 +605,7 @@ pub struct SemanticIndex {
     file_mtimes: HashMap<PathBuf, SystemTime>,
     /// Embedding dimension (384 for MiniLM-L6-v2)
     dimension: usize,
+    fingerprint: Option<SemanticIndexFingerprint>,
 }
 
 /// Search result from a semantic query
@@ -245,6 +627,7 @@ impl SemanticIndex {
             entries: Vec::new(),
             file_mtimes: HashMap::new(),
             dimension: DEFAULT_DIMENSION, // MiniLM-L6-v2 default
+            fingerprint: None,
         }
     }
 
@@ -262,22 +645,14 @@ impl SemanticIndex {
         }
     }
 
-    /// Build the semantic index from a set of files using the provided embedding function.
-    /// `embed_fn` takes a batch of texts and returns a batch of embedding vectors.
-    pub fn build<F>(
+    fn collect_chunks(
         project_root: &Path,
         files: &[PathBuf],
-        embed_fn: &mut F,
-        max_batch_size: usize,
-    ) -> Result<Self, String>
-    where
-        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
-    {
+    ) -> (Vec<SemanticChunk>, HashMap<PathBuf, SystemTime>) {
         let mut parser = FileParser::new();
         let mut chunks: Vec<SemanticChunk> = Vec::new();
         let mut file_mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
 
-        // Extract chunks from all files
         for file in files {
             let mtime = std::fs::metadata(file)
                 .and_then(|m| m.modified())
@@ -297,11 +672,28 @@ impl SemanticIndex {
             chunks.extend(file_chunks);
         }
 
+        (chunks, file_mtimes)
+    }
+
+    fn build_from_chunks<F, P>(
+        chunks: Vec<SemanticChunk>,
+        file_mtimes: HashMap<PathBuf, SystemTime>,
+        embed_fn: &mut F,
+        max_batch_size: usize,
+        mut progress: Option<&mut P>,
+    ) -> Result<Self, String>
+    where
+        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
+        P: FnMut(usize, usize),
+    {
+        let total_chunks = chunks.len();
+
         if chunks.is_empty() {
             return Ok(Self {
                 entries: Vec::new(),
                 file_mtimes,
                 dimension: DEFAULT_DIMENSION,
+                fingerprint: None,
             });
         }
 
@@ -324,6 +716,10 @@ impl SemanticIndex {
                     vector,
                 });
             }
+
+            if let Some(callback) = progress.as_mut() {
+                callback(entries.len(), total_chunks);
+            }
         }
 
         let dimension = entries
@@ -335,7 +731,53 @@ impl SemanticIndex {
             entries,
             file_mtimes,
             dimension,
+            fingerprint: None,
         })
+    }
+
+    /// Build the semantic index from a set of files using the provided embedding function.
+    /// `embed_fn` takes a batch of texts and returns a batch of embedding vectors.
+    pub fn build<F>(
+        project_root: &Path,
+        files: &[PathBuf],
+        embed_fn: &mut F,
+        max_batch_size: usize,
+    ) -> Result<Self, String>
+    where
+        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
+    {
+        let (chunks, file_mtimes) = Self::collect_chunks(project_root, files);
+        Self::build_from_chunks(
+            chunks,
+            file_mtimes,
+            embed_fn,
+            max_batch_size,
+            Option::<&mut fn(usize, usize)>::None,
+        )
+    }
+
+    /// Build the semantic index and report embedding progress using entry counts.
+    pub fn build_with_progress<F, P>(
+        project_root: &Path,
+        files: &[PathBuf],
+        embed_fn: &mut F,
+        max_batch_size: usize,
+        progress: &mut P,
+    ) -> Result<Self, String>
+    where
+        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
+        P: FnMut(usize, usize),
+    {
+        let (chunks, file_mtimes) = Self::collect_chunks(project_root, files);
+        let total_chunks = chunks.len();
+        progress(0, total_chunks);
+        Self::build_from_chunks(
+            chunks,
+            file_mtimes,
+            embed_fn,
+            max_batch_size,
+            Some(progress),
+        )
     }
 
     /// Search the index with a query embedding, returning top-K results sorted by relevance
@@ -407,6 +849,22 @@ impl SemanticIndex {
         self.dimension
     }
 
+    pub fn fingerprint(&self) -> Option<&SemanticIndexFingerprint> {
+        self.fingerprint.as_ref()
+    }
+
+    pub fn backend_label(&self) -> Option<&str> {
+        self.fingerprint.as_ref().map(|f| f.backend.as_str())
+    }
+
+    pub fn model_label(&self) -> Option<&str> {
+        self.fingerprint.as_ref().map(|f| f.model.as_str())
+    }
+
+    pub fn set_fingerprint(&mut self, fingerprint: SemanticIndexFingerprint) {
+        self.fingerprint = Some(fingerprint);
+    }
+
     /// Write the semantic index to disk using atomic temp+rename pattern
     pub fn write_to_disk(&self, storage_dir: &Path, project_key: &str) {
         // Don't persist empty indexes — they would be loaded on next startup
@@ -441,38 +899,21 @@ impl SemanticIndex {
     }
 
     /// Read the semantic index from disk
-    pub fn read_from_disk(storage_dir: &Path, project_key: &str) -> Option<Self> {
+    pub fn read_from_disk(
+        storage_dir: &Path,
+        project_key: &str,
+        expected_fingerprint: Option<&str>,
+    ) -> Option<Self> {
         let data_path = storage_dir
             .join("semantic")
             .join(project_key)
             .join("semantic.bin");
         let file_len = usize::try_from(fs::metadata(&data_path).ok()?.len()).ok()?;
-        if file_len < HEADER_BYTES {
+        if file_len < HEADER_BYTES_V1 {
             log::warn!(
                 "[aft] corrupt semantic index (too small: {} bytes), removing",
                 file_len
             );
-            let _ = fs::remove_file(&data_path);
-            return None;
-        }
-
-        let mut header = [0u8; HEADER_BYTES];
-        fs::File::open(&data_path)
-            .ok()?
-            .read_exact(&mut header)
-            .ok()?;
-        let version = header[0];
-        let dimension = u32::from_le_bytes(header[1..5].try_into().ok()?) as usize;
-        let entry_count = u32::from_le_bytes(header[5..9].try_into().ok()?) as usize;
-        if version != 1 || dimension == 0 || dimension > MAX_DIMENSION || entry_count > MAX_ENTRIES
-        {
-            let _ = fs::remove_file(&data_path);
-            return None;
-        }
-        let minimum_vector_bytes = entry_count
-            .checked_mul(dimension)
-            .and_then(|count| count.checked_mul(F32_BYTES))?;
-        if minimum_vector_bytes > file_len.saturating_sub(HEADER_BYTES) {
             let _ = fs::remove_file(&data_path);
             return None;
         }
@@ -484,6 +925,17 @@ impl SemanticIndex {
                     log::info!("[aft] cached semantic index is empty, will rebuild");
                     let _ = fs::remove_file(&data_path);
                     return None;
+                }
+                if let Some(expected) = expected_fingerprint {
+                    let matches = index
+                        .fingerprint()
+                        .map(|fingerprint| fingerprint.matches_expected(expected))
+                        .unwrap_or(false);
+                    if !matches {
+                        log::info!("[aft] cached semantic index fingerprint mismatch, rebuilding");
+                        let _ = fs::remove_file(&data_path);
+                        return None;
+                    }
                 }
                 log::info!(
                     "[aft] loaded semantic index from disk: {} entries",
@@ -502,11 +954,31 @@ impl SemanticIndex {
     /// Serialize the index to bytes for disk persistence
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
+        let fingerprint_bytes = self
+            .fingerprint
+            .as_ref()
+            .and_then(|fingerprint| {
+                let encoded = fingerprint.as_string();
+                if encoded.is_empty() {
+                    None
+                } else {
+                    Some(encoded.into_bytes())
+                }
+            });
 
-        // Header: version(1) + dimension(4) + entry_count(4)
-        buf.push(1u8); // version
+        // Header: version(1) + dimension(4) + entry_count(4) [+ fingerprint_len(4)]
+        let version = if fingerprint_bytes.is_some() {
+            SEMANTIC_INDEX_VERSION_V2
+        } else {
+            SEMANTIC_INDEX_VERSION_V1
+        };
+        buf.push(version);
         buf.extend_from_slice(&(self.dimension as u32).to_le_bytes());
         buf.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        if let Some(bytes) = &fingerprint_bytes {
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
 
         // File mtime table: count(4) + entries
         buf.extend_from_slice(&(self.file_mtimes.len() as u32).to_le_bytes());
@@ -565,14 +1037,17 @@ impl SemanticIndex {
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         let mut pos = 0;
 
-        if data.len() < 9 {
+        if data.len() < HEADER_BYTES_V1 {
             return Err("data too short".to_string());
         }
 
         let version = data[pos];
         pos += 1;
-        if version != 1 {
+        if version != SEMANTIC_INDEX_VERSION_V1 && version != SEMANTIC_INDEX_VERSION_V2 {
             return Err(format!("unsupported version: {}", version));
+        }
+        if version == SEMANTIC_INDEX_VERSION_V2 && data.len() < HEADER_BYTES_V2 {
+            return Err("data too short for semantic index v2 header".to_string());
         }
 
         let dimension = read_u32(data, &mut pos)? as usize;
@@ -583,6 +1058,21 @@ impl SemanticIndex {
         if entry_count > MAX_ENTRIES {
             return Err(format!("too many semantic index entries: {}", entry_count));
         }
+
+        let fingerprint = if version == SEMANTIC_INDEX_VERSION_V2 {
+            let fingerprint_len = read_u32(data, &mut pos)? as usize;
+            if pos + fingerprint_len > data.len() {
+                return Err("unexpected end of data reading fingerprint".to_string());
+            }
+            let raw = String::from_utf8_lossy(&data[pos..pos + fingerprint_len]).to_string();
+            pos += fingerprint_len;
+            Some(
+                serde_json::from_str::<SemanticIndexFingerprint>(&raw)
+                    .map_err(|error| format!("invalid semantic fingerprint: {error}"))?,
+            )
+        } else {
+            None
+        };
 
         // File mtimes
         let mtime_count = read_u32(data, &mut pos)? as usize;
@@ -663,6 +1153,7 @@ impl SemanticIndex {
             entries,
             file_mtimes,
             dimension,
+            fingerprint,
         })
     }
 }
@@ -860,6 +1351,70 @@ fn read_string(data: &[u8], pos: &mut usize) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SemanticBackend, SemanticBackendConfig};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn start_mock_http_server<F>(handler: F) -> (String, thread::JoinHandle<()>)
+    where
+        F: Fn(String, String, String) -> String + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_length = 0usize;
+            loop {
+                let n = stream.read(&mut chunk).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let headers = String::from_utf8_lossy(&buf[..pos + 4]);
+                        for line in headers.lines() {
+                            if let Some(value) = line.strip_prefix("Content-Length:") {
+                                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+                if let Some(end) = header_end {
+                    if buf.len() >= end + content_length {
+                        break;
+                    }
+                }
+            }
+
+            let end = header_end.expect("header terminator");
+            let request = String::from_utf8_lossy(&buf[..end]).to_string();
+            let body = String::from_utf8_lossy(&buf[end..end + content_length]).to_string();
+            let mut lines = request.lines();
+            let request_line = lines.next().expect("request line").to_string();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .expect("request path")
+                .to_string();
+            let response_body = handler(request_line, path, body);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        (format!("http://{}", addr), handle)
+    }
 
     #[test]
     fn test_cosine_similarity_identical() {
@@ -902,6 +1457,12 @@ mod tests {
         index
             .file_mtimes
             .insert(PathBuf::from("/src/main.rs"), SystemTime::UNIX_EPOCH);
+        index.set_fingerprint(SemanticIndexFingerprint {
+            backend: "fastembed".to_string(),
+            model: "all-MiniLM-L6-v2".to_string(),
+            base_url: FALLBACK_BACKEND.to_string(),
+            dimension: 4,
+        });
 
         let bytes = index.to_bytes();
         let restored = SemanticIndex::from_bytes(&bytes).unwrap();
@@ -910,6 +1471,8 @@ mod tests {
         assert_eq!(restored.entries[0].chunk.name, "handle_request");
         assert_eq!(restored.entries[0].vector, vec![0.1, 0.2, 0.3, 0.4]);
         assert_eq!(restored.dimension, 4);
+        assert_eq!(restored.backend_label(), Some("fastembed"));
+        assert_eq!(restored.model_label(), Some("all-MiniLM-L6-v2"));
     }
 
     #[test]
@@ -1016,5 +1579,101 @@ mod tests {
 
         assert!(message.starts_with("ONNX Runtime not found. Install via:"));
         assert!(message.contains("Original error:"));
+    }
+
+    #[test]
+    fn openai_compatible_backend_embeds_with_mock_server() {
+        let (base_url, handle) = start_mock_http_server(|request_line, path, _body| {
+            assert!(request_line.starts_with("POST "));
+            assert_eq!(path, "/v1/embeddings");
+            "{\"data\":[{\"embedding\":[0.1,0.2,0.3],\"index\":0},{\"embedding\":[0.4,0.5,0.6],\"index\":1}]}".to_string()
+        });
+
+        let config = SemanticBackendConfig {
+            backend: SemanticBackend::OpenAiCompatible,
+            model: "test-embedding".to_string(),
+            base_url: Some(base_url),
+            api_key_env: None,
+            timeout_ms: 5_000,
+            max_batch_size: 64,
+        };
+
+        let mut model = SemanticEmbeddingModel::from_config(&config).unwrap();
+        let vectors = model
+            .embed(vec!["hello".to_string(), "world".to_string()])
+            .unwrap();
+
+        assert_eq!(vectors, vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn ollama_backend_embeds_with_mock_server() {
+        let (base_url, handle) = start_mock_http_server(|request_line, path, _body| {
+            assert!(request_line.starts_with("POST "));
+            assert_eq!(path, "/api/embed");
+            "{\"embeddings\":[[0.7,0.8,0.9],[1.0,1.1,1.2]]}".to_string()
+        });
+
+        let config = SemanticBackendConfig {
+            backend: SemanticBackend::Ollama,
+            model: "embeddinggemma".to_string(),
+            base_url: Some(base_url),
+            api_key_env: None,
+            timeout_ms: 5_000,
+            max_batch_size: 64,
+        };
+
+        let mut model = SemanticEmbeddingModel::from_config(&config).unwrap();
+        let vectors = model
+            .embed(vec!["hello".to_string(), "world".to_string()])
+            .unwrap();
+
+        assert_eq!(vectors, vec![vec![0.7, 0.8, 0.9], vec![1.0, 1.1, 1.2]]);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn read_from_disk_rejects_fingerprint_mismatch() {
+        let storage = tempfile::tempdir().unwrap();
+        let project_key = "proj";
+
+        let mut index = SemanticIndex::new();
+        index.entries.push(EmbeddingEntry {
+            chunk: SemanticChunk {
+                file: PathBuf::from("/src/main.rs"),
+                name: "handle_request".to_string(),
+                kind: SymbolKind::Function,
+                start_line: 10,
+                end_line: 25,
+                exported: true,
+                embed_text: "file:src/main.rs kind:function name:handle_request".to_string(),
+                snippet: "fn handle_request() {}".to_string(),
+            },
+            vector: vec![0.1, 0.2, 0.3],
+        });
+        index.dimension = 3;
+        index
+            .file_mtimes
+            .insert(PathBuf::from("/src/main.rs"), SystemTime::UNIX_EPOCH);
+        index.set_fingerprint(SemanticIndexFingerprint {
+            backend: "openai_compatible".to_string(),
+            model: "test-embedding".to_string(),
+            base_url: "http://127.0.0.1:1234/v1".to_string(),
+            dimension: 3,
+        });
+        index.write_to_disk(storage.path(), project_key);
+
+        let matching = index.fingerprint().unwrap().as_string();
+        assert!(SemanticIndex::read_from_disk(storage.path(), project_key, Some(&matching)).is_some());
+
+        let mismatched = SemanticIndexFingerprint {
+            backend: "ollama".to_string(),
+            model: "embeddinggemma".to_string(),
+            base_url: "http://127.0.0.1:11434".to_string(),
+            dimension: 3,
+        }
+        .as_string();
+        assert!(SemanticIndex::read_from_disk(storage.path(), project_key, Some(&mismatched)).is_none());
     }
 }

@@ -144,4 +144,59 @@ describe("loadAftConfig", () => {
     expect(result.stderr).toContain(`Config loaded from ${fixture.userConfigPath}`);
     expect(result.stderr).toContain(`Config loaded from ${fixture.projectConfigPath}`);
   });
+
+  test("loads semantic config block and propagates nested fields", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "openai_compatible",
+          model: "text-embedding-3-small",
+          base_url: "https://api.example.test/v1",
+          api_key_env: "AFT_SEMANTIC_API_KEY",
+          timeout_ms: 15_000,
+          max_batch_size: 32,
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      semantic: {
+        backend: "openai_compatible",
+        model: "text-embedding-3-small",
+        base_url: "https://api.example.test/v1",
+        api_key_env: "AFT_SEMANTIC_API_KEY",
+        timeout_ms: 15000,
+        max_batch_size: 32,
+      },
+    });
+    expect(result.stderr).toContain(`Config loaded from ${fixture.userConfigPath}`);
+  });
+
+  test("rejects invalid semantic backend value as malformed section", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        semantic: {
+          backend: "gpt-4",
+          timeout_ms: 1000,
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({});
+    expect(result.stderr).toContain("Partial config loaded — invalid sections skipped");
+  });
 });

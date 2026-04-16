@@ -94,7 +94,7 @@ fn write_and_read_roundtrip_preserves_semantic_entries() {
 
     index.write_to_disk(storage.path(), "roundtrip-project");
 
-    let restored = SemanticIndex::read_from_disk(storage.path(), "roundtrip-project")
+    let restored = SemanticIndex::read_from_disk(storage.path(), "roundtrip-project", None)
         .expect("restore semantic index from disk");
 
     assert_eq!(restored.len(), index.len());
@@ -115,7 +115,7 @@ fn write_and_read_roundtrip_preserves_semantic_entries() {
 fn read_from_nonexistent_path_returns_none() {
     let storage = tempfile::tempdir().expect("create storage dir");
 
-    let restored = SemanticIndex::read_from_disk(storage.path(), "missing-project");
+    let restored = SemanticIndex::read_from_disk(storage.path(), "missing-project", None);
 
     assert!(restored.is_none());
 }
@@ -130,7 +130,7 @@ fn read_from_corrupt_file_returns_none_and_logs_warning() {
     let semantic_file = semantic_dir.join("semantic.bin");
     fs::write(&semantic_file, b"corrupt").expect("write corrupt semantic file");
 
-    let restored = SemanticIndex::read_from_disk(storage.path(), "corrupt-project");
+    let restored = SemanticIndex::read_from_disk(storage.path(), "corrupt-project", None);
 
     assert!(restored.is_none());
     assert!(
