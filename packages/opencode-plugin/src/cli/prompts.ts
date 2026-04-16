@@ -21,6 +21,13 @@ function prefix(kind: string, code: string): string {
   return color(kind, code);
 }
 
+function normalizeValidationMessage(value: string | Error | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return value instanceof Error ? value.message : value;
+}
+
 async function promptLine(message: string): Promise<string> {
   const rl = createInterface({ input, output });
   try {
@@ -135,7 +142,7 @@ export async function text(
 ): Promise<string> {
   const defaultValue = options.defaultValue ?? "";
   if (!isInteractive) {
-    const validation = options.validate?.(defaultValue);
+    const validation = normalizeValidationMessage(options.validate?.(defaultValue));
     if (validation) {
       throw new Error(validation);
     }
@@ -151,7 +158,7 @@ export async function text(
   while (true) {
     const answer = await promptLine(`${message}${hint}: `);
     const value = answer === "" ? defaultValue : answer;
-    const validation = options.validate?.(value);
+    const validation = normalizeValidationMessage(options.validate?.(value));
     if (!validation) {
       return value;
     }
