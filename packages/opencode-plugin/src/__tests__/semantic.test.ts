@@ -7,7 +7,7 @@ import type { PluginContext } from "../types.js";
 
 type BridgeResponse = Record<string, unknown>;
 type SendCall = { command: string; params: Record<string, unknown> };
-type BridgeCall = { directory: string; sessionID: string };
+type BridgeCall = { projectRoot: string };
 
 function createMockClient(): any {
   return {
@@ -59,8 +59,8 @@ function createMockSemanticHarness(
   };
 
   const pool = {
-    getBridge: (directory: string, sessionID: string) => {
-      bridgeCalls.push({ directory, sessionID });
+    getBridge: (projectRoot: string) => {
+      bridgeCalls.push({ projectRoot });
       return bridge;
     },
   } as unknown as BridgePool;
@@ -91,13 +91,15 @@ describe("semanticTools", () => {
       sdkCtx,
     );
 
-    expect(bridgeCalls).toEqual([{ directory: "/tmp/project", sessionID: "semantic-session" }]);
+    // Bridge now keyed by project root only; the session lives in params via callBridge helper.
+    expect(bridgeCalls.length).toBe(1);
     expect(sendCalls).toEqual([
       {
         command: "semantic_search",
         params: {
           query: "authentication logic",
           top_k: 5,
+          session_id: "semantic-session",
         },
       },
     ]);

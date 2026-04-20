@@ -7,7 +7,7 @@ import type { PluginContext } from "../types.js";
 
 type BridgeResponse = Record<string, unknown>;
 type SendCall = { command: string; params: Record<string, unknown> };
-type BridgeCall = { directory: string; sessionID: string };
+type BridgeCall = { projectRoot: string };
 
 function createMockClient(): any {
   return {
@@ -59,8 +59,8 @@ function createMockSearchHarness(
   };
 
   const pool = {
-    getBridge: (directory: string, sessionID: string) => {
-      bridgeCalls.push({ directory, sessionID });
+    getBridge: (projectRoot: string) => {
+      bridgeCalls.push({ projectRoot });
       return bridge;
     },
   } as unknown as BridgePool;
@@ -107,7 +107,8 @@ describe("searchTools", () => {
 
     const output = await tools.grep.execute({ pattern: "dispatch" }, sdkCtx);
 
-    expect(bridgeCalls).toEqual([{ directory: "/tmp/project", sessionID: "search-session" }]);
+    // Bridge is project-keyed now; sessionID travels in params via callBridge.
+    expect(bridgeCalls.length).toBe(1);
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls[0]?.command).toBe("grep");
     expect(sendCalls[0]?.params).toEqual({
@@ -116,6 +117,7 @@ describe("searchTools", () => {
       include: undefined,
       path: undefined,
       max_results: 100,
+      session_id: "search-session",
     });
     expect(output).toBe(
       [

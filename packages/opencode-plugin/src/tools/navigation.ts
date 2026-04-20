@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 const z = tool.schema;
 
@@ -43,7 +44,6 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
           .describe("Expression to track through data flow (required for trace_data op)"),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
         const params: Record<string, unknown> = {
           file: args.filePath,
           symbol: args.symbol,
@@ -53,7 +53,7 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
         if (args.op === "trace_data" && typeof args.expression !== "string") {
           throw new Error("'expression' is required for 'trace_data' op");
         }
-        const response = await bridge.send(args.op as string, params);
+        const response = await callBridge(ctx, context, args.op as string, params);
         if (response.success === false) {
           throw new Error((response.message as string) || `${args.op} failed`);
         }

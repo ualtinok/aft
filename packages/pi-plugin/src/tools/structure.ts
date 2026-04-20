@@ -59,7 +59,8 @@ export function registerStructureTool(pi: ExtensionAPI, ctx: PluginContext): voi
       extCtx,
     ) {
       const bridge = bridgeFor(ctx, extCtx.cwd);
-      const req: Record<string, unknown> = { op: params.op, file: params.filePath };
+      // Rust dispatch accepts the op name directly (add_member, add_derive, etc.)
+      const req: Record<string, unknown> = { file: params.filePath };
       if (params.container !== undefined) req.scope = params.container;
       if (params.code !== undefined) req.code = params.code;
       if (params.target !== undefined) req.target = params.target;
@@ -72,7 +73,7 @@ export function registerStructureTool(pi: ExtensionAPI, ctx: PluginContext): voi
       if (params.position !== undefined) req.position = params.position;
       if (params.dryRun !== undefined) req.dry_run = params.dryRun;
       if (params.validate !== undefined) req.validate = params.validate;
-      const response = await callBridge(bridge, "transform", req);
+      const response = await callBridge(bridge, params.op, req);
       return textResult(JSON.stringify(response, null, 2));
     },
   });

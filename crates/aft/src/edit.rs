@@ -214,14 +214,20 @@ pub fn compute_diff_info(before: &str, after: &str) -> serde_json::Value {
         })
     }
 }
-/// Snapshot the file into the backup store before mutation.
+/// Snapshot the file into the backup store before mutation, scoped to a session.
 ///
 /// Returns `Ok(Some(backup_id))` if the file existed and was backed up,
 /// `Ok(None)` if the file doesn't exist (new file creation).
 ///
+/// The `session` argument is the request-level session namespace (see
+/// [`crate::protocol::RawRequest::session`]). Snapshots created by one session
+/// are not visible from another, which is what keeps undo state isolated in
+/// a shared-bridge setup (issue #14).
+///
 /// Drops the RefCell borrow before returning (D029).
 pub fn auto_backup(
     ctx: &AppContext,
+    session: &str,
     path: &Path,
     description: &str,
 ) -> Result<Option<String>, AftError> {
@@ -230,7 +236,7 @@ pub fn auto_backup(
     }
     let backup_id = {
         let mut store = ctx.backup().borrow_mut();
-        store.snapshot(path, description)?
+        store.snapshot(session, path, description)?
     }; // borrow dropped here
     Ok(Some(backup_id))
 }

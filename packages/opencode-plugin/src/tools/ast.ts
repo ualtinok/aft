@@ -10,6 +10,7 @@ const z = tool.schema;
 
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 import {
   askEditPermission,
   resolveAbsolutePath,
@@ -71,7 +72,6 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
         .describe("Number of context lines to show around each match"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const params: Record<string, unknown> = {
         pattern: args.pattern,
         lang: args.lang,
@@ -79,7 +79,7 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (args.paths) params.paths = args.paths;
       if (args.globs) params.globs = args.globs;
       if (args.contextLines !== undefined) params.context = Number(args.contextLines);
-      const response = await bridge.send("ast_search", params);
+      const response = await callBridge(ctx, context, "ast_search", params);
 
       // Error response (e.g. invalid pattern)
       if (response.success === false) {
@@ -159,7 +159,6 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       dryRun: z.boolean().optional().describe("Preview changes without applying (default: false)"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const isDryRun = args.dryRun === true;
 
       if (!isDryRun) {
@@ -194,7 +193,7 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (args.paths) params.paths = args.paths;
       if (args.globs) params.globs = args.globs;
       params.dry_run = args.dryRun === true;
-      const response = await bridge.send("ast_replace", params);
+      const response = await callBridge(ctx, context, "ast_replace", params);
 
       // Error response (e.g. invalid pattern)
       if (response.success === false) {

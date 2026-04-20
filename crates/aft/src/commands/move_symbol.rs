@@ -366,7 +366,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
 
         let backup_store = ctx.backup().borrow();
         let mut cp_store = ctx.checkpoint().borrow_mut();
-        if let Err(e) = cp_store.create(&checkpoint_name, all_files, &backup_store) {
+        if let Err(e) = cp_store.create(req.session(), &checkpoint_name, all_files, &backup_store) {
             return Response::error(&req.id, e.code(), e.to_string());
         }
     }
@@ -394,7 +394,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
             }));
         }
         Err(e) => {
-            restore_checkpoint(ctx, &checkpoint_name);
+            restore_checkpoint(ctx, req.session(), &checkpoint_name);
             return move_error(
                 &req.id,
                 file,
@@ -424,7 +424,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
             }));
         }
         Err(e) => {
-            restore_checkpoint(ctx, &checkpoint_name);
+            restore_checkpoint(ctx, req.session(), &checkpoint_name);
             cleanup_new_files(&new_files);
             return move_error(
                 &req.id,
@@ -454,7 +454,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
                 }));
             }
             Err(e) => {
-                restore_checkpoint(ctx, &checkpoint_name);
+                restore_checkpoint(ctx, req.session(), &checkpoint_name);
                 cleanup_new_files(&new_files);
                 return move_error(
                     &req.id,
@@ -892,10 +892,10 @@ fn extract_alias(raw_text: &str, symbol_name: &str) -> Option<String> {
     None
 }
 
-/// Restore a checkpoint by name.
-fn restore_checkpoint(ctx: &AppContext, name: &str) {
+/// Restore a checkpoint by name, scoped to the caller's session.
+fn restore_checkpoint(ctx: &AppContext, session: &str, name: &str) {
     let cp_store = ctx.checkpoint().borrow();
-    if let Err(e) = cp_store.restore(name) {
+    if let Err(e) = cp_store.restore(session, name) {
         log::debug!(
             "[aft] move_symbol rollback: failed to restore checkpoint '{}': {}",
             name,

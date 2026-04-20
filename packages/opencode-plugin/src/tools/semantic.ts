@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 type ToolArg = ToolDefinition["args"][string];
 
@@ -17,8 +18,7 @@ export function semanticTools(ctx: PluginContext): Record<string, ToolDefinition
       topK: arg(z.number().optional().describe("Number of results (default: 10)")),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-      const response = await bridge.send("semantic_search", {
+      const response = await callBridge(ctx, context, "semantic_search", {
         query: args.query,
         top_k: args.topK ?? 10,
       });

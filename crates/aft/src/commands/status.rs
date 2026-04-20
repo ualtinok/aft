@@ -45,40 +45,38 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
                     "model": idx.model_label().unwrap_or(config.semantic.model.as_str()),
                 })
             }
-            None => {
-                match &*ctx.semantic_index_status().borrow() {
-                    SemanticIndexStatus::Disabled => serde_json::json!({
-                        "status": "disabled",
-                        "backend": config.semantic_backend_label(),
-                        "model": config.semantic.model.as_str(),
-                    }),
-                    SemanticIndexStatus::Building {
-                        stage,
-                        files,
-                        entries_done,
-                        entries_total,
-                    } => serde_json::json!({
-                        "status": "loading",
-                        "stage": stage,
-                        "files": files,
-                        "entries_done": entries_done,
-                        "entries_total": entries_total,
-                        "backend": config.semantic_backend_label(),
-                        "model": config.semantic.model.as_str(),
-                    }),
-                    SemanticIndexStatus::Ready => serde_json::json!({
-                        "status": "ready",
-                        "backend": config.semantic_backend_label(),
-                        "model": config.semantic.model.as_str(),
-                    }),
-                    SemanticIndexStatus::Failed(error) => serde_json::json!({
-                        "status": "failed",
-                        "error": error,
-                        "backend": config.semantic_backend_label(),
-                        "model": config.semantic.model.as_str(),
-                    }),
-                }
-            }
+            None => match &*ctx.semantic_index_status().borrow() {
+                SemanticIndexStatus::Disabled => serde_json::json!({
+                    "status": "disabled",
+                    "backend": config.semantic_backend_label(),
+                    "model": config.semantic.model.as_str(),
+                }),
+                SemanticIndexStatus::Building {
+                    stage,
+                    files,
+                    entries_done,
+                    entries_total,
+                } => serde_json::json!({
+                    "status": "loading",
+                    "stage": stage,
+                    "files": files,
+                    "entries_done": entries_done,
+                    "entries_total": entries_total,
+                    "backend": config.semantic_backend_label(),
+                    "model": config.semantic.model.as_str(),
+                }),
+                SemanticIndexStatus::Ready => serde_json::json!({
+                    "status": "ready",
+                    "backend": config.semantic_backend_label(),
+                    "model": config.semantic.model.as_str(),
+                }),
+                SemanticIndexStatus::Failed(error) => serde_json::json!({
+                    "status": "failed",
+                    "error": error,
+                    "backend": config.semantic_backend_label(),
+                    "model": config.semantic.model.as_str(),
+                }),
+            },
         }
     };
 
@@ -106,6 +104,14 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
     // Symbol cache stats
     let symbol_cache_stats = ctx.symbol_cache_stats();
 
+    // Per-session undo/checkpoint counts (issue #14 — one shared bridge serves
+    // many sessions; surface both the global footprint and the current
+    // session's own slice so `/aft-status` can split them in the UI).
+    let checkpoint_total = ctx.checkpoint().borrow().total_count();
+    let session_id = req.session();
+    let session_checkpoints = ctx.checkpoint().borrow().list(session_id).len();
+    let session_tracked_files = ctx.backup().borrow().tracked_files(session_id).len();
+
     Response::success(
         &req.id,
         serde_json::json!({
@@ -124,6 +130,14 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
             "lsp_servers": lsp_count,
             "symbol_cache": symbol_cache_stats,
             "storage_dir": storage_dir,
+            // Project-wide (all sessions): total in-memory checkpoint count.
+            "checkpoints_total": checkpoint_total,
+            // Current session slice: only when the caller passed `session_id`.
+            "session": {
+                "id": session_id,
+                "tracked_files": session_tracked_files,
+                "checkpoints": session_checkpoints,
+            },
         }),
     )
 }

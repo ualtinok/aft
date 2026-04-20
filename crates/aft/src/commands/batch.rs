@@ -90,7 +90,7 @@ pub fn handle_batch(req: &RawRequest, ctx: &AppContext) -> Response {
     // Phase 2: Auto-backup once before applying (skip for dry-run)
     let dry_run = edit::is_dry_run(&req.params);
     let backup_id = if !dry_run {
-        match edit::auto_backup(ctx, &path, "batch: pre-batch backup") {
+        match edit::auto_backup(ctx, req.session(), &path, "batch: pre-batch backup") {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

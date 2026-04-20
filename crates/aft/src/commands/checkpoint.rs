@@ -42,7 +42,7 @@ fn handle_checkpoint_impl(req: &RawRequest, ctx: &AppContext) -> Result<Response
 
     let file_list = if files.is_empty() {
         let backup = ctx.backup().borrow();
-        backup.tracked_files()
+        backup.tracked_files(req.session())
     } else {
         files
     };
@@ -52,7 +52,7 @@ fn handle_checkpoint_impl(req: &RawRequest, ctx: &AppContext) -> Result<Response
     let backup = ctx.backup().borrow();
     let mut checkpoint_store = ctx.checkpoint().borrow_mut();
 
-    match checkpoint_store.create(name, validated_files, &backup) {
+    match checkpoint_store.create(req.session(), name, validated_files, &backup) {
         Ok(info) => Ok(Response::success(
             &req.id,
             serde_json::json!({

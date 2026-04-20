@@ -306,7 +306,12 @@ pub fn handle_extract_function(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Auto-backup before mutation ---
-    let backup_id = match edit::auto_backup(ctx, &path, &format!("extract_function: {}", name)) {
+    let backup_id = match edit::auto_backup(
+        ctx,
+        req.session(),
+        &path,
+        &format!("extract_function: {}", name),
+    ) {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());
@@ -471,6 +476,7 @@ mod tests {
             command: command.to_string(),
             params,
             lsp_hints: None,
+            session_id: None,
         }
     }
 

@@ -49,10 +49,12 @@ export function registerImportTools(pi: ExtensionAPI, ctx: PluginContext): void 
         throw new Error(`op='${params.op}' requires 'module'`);
       }
       const bridge = bridgeFor(ctx, extCtx.cwd);
-      const req: Record<string, unknown> = {
-        op: params.op,
-        file: params.filePath,
+      const commandMap: Record<string, string> = {
+        add: "add_import",
+        remove: "remove_import",
+        organize: "organize_imports",
       };
+      const req: Record<string, unknown> = { file: params.filePath };
       if (params.module !== undefined) req.module = params.module;
       if (params.names !== undefined) req.names = params.names;
       if (params.defaultImport !== undefined) req.default_import = params.defaultImport;
@@ -61,7 +63,7 @@ export function registerImportTools(pi: ExtensionAPI, ctx: PluginContext): void 
       if (params.dryRun !== undefined) req.dry_run = params.dryRun;
       if (params.validate !== undefined) req.validate = params.validate;
 
-      const response = await callBridge(bridge, "import", req);
+      const response = await callBridge(bridge, commandMap[params.op], req);
       return textResult(JSON.stringify(response, null, 2));
     },
   });

@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 import {
   askEditPermission,
   permissionDeniedResponse,
@@ -96,7 +97,6 @@ export function structureTools(ctx: PluginContext): Record<string, ToolDefinitio
           .describe("Preview without modifying the file (default: false)"),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
         const op = args.op as string;
 
         if (op === "add_member") {
@@ -168,7 +168,7 @@ export function structureTools(ctx: PluginContext): Record<string, ToolDefinitio
             break;
         }
 
-        const response = await bridge.send(op, params);
+        const response = await callBridge(ctx, context, op, params);
         if (response.success === false) {
           throw new Error((response.message as string) || `${op} failed`);
         }

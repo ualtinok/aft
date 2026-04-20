@@ -107,7 +107,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
             // Snapshot existing file — scoped borrow (D029)
             let snapshot_result = {
                 let mut store = ctx.backup().borrow_mut();
-                store.snapshot(&op.file, "transaction")
+                store.snapshot(req.session(), &op.file, "transaction")
             };
             if let Err(e) = snapshot_result {
                 return Response::error(&req.id, e.code(), e.to_string());
@@ -125,7 +125,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
         let new_content = match compute_new_content(op) {
             Ok(c) => c,
             Err(msg) => {
-                let failures = rollback(ctx, &snapshotted_files, &new_files);
+                let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
                 return transaction_error(
                     &req.id,
                     i,
@@ -156,7 +156,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
                 });
             }
             Err(e) => {
-                let failures = rollback(ctx, &snapshotted_files, &new_files);
+                let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
                 return transaction_error(
                     &req.id,
                     i,
@@ -172,7 +172,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     // --- Validate phase: check syntax_valid on all results ---
     for (i, result) in results.iter().enumerate() {
         if result.syntax_valid == Some(false) {
-            let failures = rollback(ctx, &snapshotted_files, &new_files);
+            let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
             return transaction_error(
                 &req.id,
                 i,
@@ -411,6 +411,7 @@ struct RollbackFailure {
 /// Returns a list of files that failed to rollback.
 fn rollback(
     ctx: &AppContext,
+    session: &str,
     snapshotted: &[PathBuf],
     new_files: &[PathBuf],
 ) -> Vec<RollbackFailure> {
@@ -420,7 +421,7 @@ fn rollback(
     for path in snapshotted.iter().rev() {
         let result = {
             let mut store = ctx.backup().borrow_mut();
-            store.restore_latest(path)
+            store.restore_latest(session, path)
         };
         if let Err(e) = result {
             log::warn!(

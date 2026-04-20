@@ -183,11 +183,7 @@ fn handle_glob_edit_match(
             Err(resp) => return resp,
         };
 
-        if let Err(e) = edit::auto_backup(
-            ctx,
-            &validated_path,
-            &format!("glob_edit_match: {}", match_str),
-        ) {
+        if let Err(e) = edit::auto_backup(ctx, req.session(), &validated_path, &format!("glob_edit_match: {}", match_str)) {
             return Response::error(&req.id, e.code(), e.to_string());
         }
 
@@ -417,7 +413,7 @@ fn handle_single_file_edit_match(
         } else {
             format!("edit_match: {}", match_str)
         };
-        match edit::auto_backup(ctx, path.as_path(), &label) {
+        match edit::auto_backup(ctx, req.session(), path.as_path(), &label) {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

@@ -207,7 +207,7 @@ pub fn handle_add_struct_tags(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Auto-backup ---
-    let backup_id = match edit::auto_backup(ctx, &path, "add_struct_tags: pre-edit backup") {
+    let backup_id = match edit::auto_backup(ctx, req.session(), &path, "add_struct_tags: pre-edit backup") {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());

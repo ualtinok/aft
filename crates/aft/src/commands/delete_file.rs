@@ -46,7 +46,7 @@ pub fn handle_delete_file(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Backup before deletion
-    let backup_id = match edit::auto_backup(ctx, &path, "delete_file: pre-delete backup") {
+    let backup_id = match edit::auto_backup(ctx, req.session(), &path, "delete_file: pre-delete backup") {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());

@@ -95,7 +95,8 @@ export function registerAstTools(pi: ExtensionAPI, ctx: PluginContext, surface: 
         };
         if (params.paths !== undefined) req.paths = params.paths;
         if (params.globs !== undefined) req.globs = params.globs;
-        if (params.dryRun !== undefined) req.dry_run = params.dryRun;
+        // Rust ast_replace defaults to dry_run=true; apply by default to match description.
+        req.dry_run = params.dryRun === true;
         const response = await callBridge(bridge, "ast_replace", req);
         return textResult((response.text as string | undefined) ?? JSON.stringify(response));
       },

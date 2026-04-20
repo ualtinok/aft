@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 type ToolArg = ToolDefinition["args"][string];
 
@@ -70,8 +71,7 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       path: arg(z.string().optional().describe("Directory to search in, relative to project root")),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-      const response = await bridge.send("grep", {
+      const response = await callBridge(ctx, context, "grep", {
         pattern: args.pattern,
         case_sensitive: true,
         include: args.include
@@ -102,8 +102,6 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       path: arg(z.string().optional().describe("Directory to search in, relative to project root")),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-
       // Handle absolute paths embedded in the pattern (e.g. "/abs/path/src/**/*.ts")
       // Split into path (directory prefix) and pattern (glob suffix)
       let globPattern = String(args.pattern);
@@ -121,7 +119,7 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
         }
       }
 
-      const response = await bridge.send("glob", {
+      const response = await callBridge(ctx, context, "glob", {
         pattern: globPattern,
         path: globPath,
       });

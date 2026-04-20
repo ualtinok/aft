@@ -20,14 +20,18 @@ struct Checkpoint {
     created_at: u64,
 }
 
-/// Workspace-wide checkpoint store.
+/// Workspace-wide, per-session checkpoint store.
 ///
-/// Stores named snapshots of file contents. On `create`, reads the listed files
-/// (or all tracked files from a BackupStore if the list is empty). On `restore`,
-/// overwrites files with stored content. Checkpoints can be cleaned up by TTL.
+/// Partitioned by session (issue #14): two OpenCode sessions sharing one bridge
+/// can both create checkpoints named `snap1` without collision, and restoring
+/// from one session does not leak the other's file set. Checkpoints are kept
+/// in memory only — a bridge crash drops all of them, which is a deliberate
+/// trade-off to keep this refactor bounded. Durable checkpoints are a possible
+/// follow-up.
 #[derive(Debug)]
 pub struct CheckpointStore {
-    checkpoints: HashMap<String, Checkpoint>,
+    /// session -> name -> checkpoint
+    checkpoints: HashMap<String, HashMap<String, Checkpoint>>,
 }
 
 impl CheckpointStore {
@@ -37,18 +41,20 @@ impl CheckpointStore {
         }
     }
 
-    /// Create a checkpoint by reading the given files.
+    /// Create a checkpoint by reading the given files, scoped to `session`.
     ///
-    /// If `files` is empty, snapshots all tracked files from the BackupStore.
-    /// Overwrites any existing checkpoint with the same name.
+    /// If `files` is empty, snapshots all tracked files for **that session**
+    /// from the BackupStore (other sessions' tracked files are not visible).
+    /// Overwrites any existing checkpoint with the same name in this session.
     pub fn create(
         &mut self,
+        session: &str,
         name: &str,
         files: Vec<PathBuf>,
         backup_store: &BackupStore,
     ) -> Result<CheckpointInfo, AftError> {
         let file_list = if files.is_empty() {
-            backup_store.tracked_files()
+            backup_store.tracked_files(session)
         } else {
             files
         };
@@ -70,7 +76,10 @@ impl CheckpointStore {
             created_at,
         };
 
-        self.checkpoints.insert(name.to_string(), checkpoint);
+        self.checkpoints
+            .entry(session.to_string())
+            .or_default()
+            .insert(name.to_string(), checkpoint);
 
         log::info!("checkpoint created: {} ({} files)", name, file_count);
 
@@ -82,13 +91,8 @@ impl CheckpointStore {
     }
 
     /// Restore a checkpoint by overwriting files with stored content.
-    pub fn restore(&self, name: &str) -> Result<CheckpointInfo, AftError> {
-        let checkpoint =
-            self.checkpoints
-                .get(name)
-                .ok_or_else(|| AftError::CheckpointNotFound {
-                    name: name.to_string(),
-                })?;
+    pub fn restore(&self, session: &str, name: &str) -> Result<CheckpointInfo, AftError> {
+        let checkpoint = self.get(session, name)?;
 
         for (path, content) in &checkpoint.file_contents {
             std::fs::write(path, content).map_err(|_| AftError::FileNotFound {
@@ -108,15 +112,11 @@ impl CheckpointStore {
     /// Restore a checkpoint using a caller-validated path list.
     pub fn restore_validated(
         &self,
+        session: &str,
         name: &str,
         validated_paths: &[PathBuf],
     ) -> Result<CheckpointInfo, AftError> {
-        let checkpoint =
-            self.checkpoints
-                .get(name)
-                .ok_or_else(|| AftError::CheckpointNotFound {
-                    name: name.to_string(),
-                })?;
+        let checkpoint = self.get(session, name)?;
 
         for path in validated_paths {
             let content =
@@ -141,35 +141,50 @@ impl CheckpointStore {
     }
 
     /// Return the file paths stored for a checkpoint.
-    pub fn file_paths(&self, name: &str) -> Result<Vec<PathBuf>, AftError> {
-        let checkpoint =
-            self.checkpoints
-                .get(name)
-                .ok_or_else(|| AftError::CheckpointNotFound {
-                    name: name.to_string(),
-                })?;
-
+    pub fn file_paths(&self, session: &str, name: &str) -> Result<Vec<PathBuf>, AftError> {
+        let checkpoint = self.get(session, name)?;
         Ok(checkpoint.file_contents.keys().cloned().collect())
     }
 
-    /// List all checkpoints with metadata.
-    pub fn list(&self) -> Vec<CheckpointInfo> {
+    /// List all checkpoints for this session with metadata.
+    pub fn list(&self, session: &str) -> Vec<CheckpointInfo> {
         self.checkpoints
-            .values()
-            .map(|cp| CheckpointInfo {
-                name: cp.name.clone(),
-                file_count: cp.file_contents.len(),
-                created_at: cp.created_at,
+            .get(session)
+            .map(|s| {
+                s.values()
+                    .map(|cp| CheckpointInfo {
+                        name: cp.name.clone(),
+                        file_count: cp.file_contents.len(),
+                        created_at: cp.created_at,
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default()
     }
 
-    /// Remove checkpoints older than `ttl_hours`.
+    /// Total checkpoint count across all sessions (for `/aft-status`).
+    pub fn total_count(&self) -> usize {
+        self.checkpoints.values().map(|s| s.len()).sum()
+    }
+
+    /// Remove checkpoints older than `ttl_hours` across all sessions.
+    /// Empty session entries are pruned after cleanup.
     pub fn cleanup(&mut self, ttl_hours: u32) {
         let now = current_timestamp();
         let ttl_secs = ttl_hours as u64 * 3600;
+        self.checkpoints.retain(|_, session_cps| {
+            session_cps.retain(|_, cp| now.saturating_sub(cp.created_at) < ttl_secs);
+            !session_cps.is_empty()
+        });
+    }
+
+    fn get(&self, session: &str, name: &str) -> Result<&Checkpoint, AftError> {
         self.checkpoints
-            .retain(|_, cp| now.saturating_sub(cp.created_at) < ttl_secs);
+            .get(session)
+            .and_then(|s| s.get(name))
+            .ok_or_else(|| AftError::CheckpointNotFound {
+                name: name.to_string(),
+            })
     }
 }
 
@@ -183,6 +198,7 @@ fn current_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::DEFAULT_SESSION_ID;
     use std::fs;
 
     fn temp_file(name: &str, content: &str) -> PathBuf {
@@ -202,7 +218,12 @@ mod tests {
         let mut store = CheckpointStore::new();
 
         let info = store
-            .create("snap1", vec![path1.clone(), path2.clone()], &backup_store)
+            .create(
+                DEFAULT_SESSION_ID,
+                "snap1",
+                vec![path1.clone(), path2.clone()],
+                &backup_store,
+            )
             .unwrap();
         assert_eq!(info.name, "snap1");
         assert_eq!(info.file_count, 2);
@@ -212,7 +233,7 @@ mod tests {
         fs::write(&path2, "changed2").unwrap();
 
         // Restore
-        let info = store.restore("snap1").unwrap();
+        let info = store.restore(DEFAULT_SESSION_ID, "snap1").unwrap();
         assert_eq!(info.file_count, 2);
         assert_eq!(fs::read_to_string(&path1).unwrap(), "hello");
         assert_eq!(fs::read_to_string(&path2).unwrap(), "world");
@@ -225,70 +246,117 @@ mod tests {
         let mut store = CheckpointStore::new();
 
         store
-            .create("dup", vec![path.clone()], &backup_store)
+            .create(DEFAULT_SESSION_ID, "dup", vec![path.clone()], &backup_store)
             .unwrap();
         fs::write(&path, "v2").unwrap();
         store
-            .create("dup", vec![path.clone()], &backup_store)
+            .create(DEFAULT_SESSION_ID, "dup", vec![path.clone()], &backup_store)
             .unwrap();
 
         // Restore should give v2 (the overwritten checkpoint)
         fs::write(&path, "v3").unwrap();
-        store.restore("dup").unwrap();
+        store.restore(DEFAULT_SESSION_ID, "dup").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "v2");
     }
 
     #[test]
-    fn list_returns_metadata() {
+    fn list_returns_metadata_scoped_to_session() {
         let path = temp_file("cp_list.txt", "data");
         let backup_store = BackupStore::new();
         let mut store = CheckpointStore::new();
 
         store
-            .create("a", vec![path.clone()], &backup_store)
+            .create(DEFAULT_SESSION_ID, "a", vec![path.clone()], &backup_store)
             .unwrap();
         store
-            .create("b", vec![path.clone()], &backup_store)
+            .create(DEFAULT_SESSION_ID, "b", vec![path.clone()], &backup_store)
+            .unwrap();
+        store
+            .create("other_session", "c", vec![path.clone()], &backup_store)
             .unwrap();
 
-        let list = store.list();
-        assert_eq!(list.len(), 2);
-        let names: Vec<&str> = list.iter().map(|i| i.name.as_str()).collect();
+        let default_list = store.list(DEFAULT_SESSION_ID);
+        assert_eq!(default_list.len(), 2);
+        let names: Vec<&str> = default_list.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"a"));
         assert!(names.contains(&"b"));
+
+        let other_list = store.list("other_session");
+        assert_eq!(other_list.len(), 1);
+        assert_eq!(other_list[0].name, "c");
     }
 
     #[test]
-    fn cleanup_removes_expired() {
+    fn sessions_isolate_checkpoint_names() {
+        // Same checkpoint name in two sessions does not collide on restore.
+        let path_a = temp_file("cp_isolated_a.txt", "a-original");
+        let path_b = temp_file("cp_isolated_b.txt", "b-original");
+        let backup_store = BackupStore::new();
+        let mut store = CheckpointStore::new();
+
+        // Both sessions create a checkpoint with the same name but different files.
+        store
+            .create("session_a", "snap", vec![path_a.clone()], &backup_store)
+            .unwrap();
+        store
+            .create("session_b", "snap", vec![path_b.clone()], &backup_store)
+            .unwrap();
+
+        fs::write(&path_a, "a-modified").unwrap();
+        fs::write(&path_b, "b-modified").unwrap();
+
+        // Restoring session A's "snap" only touches path_a.
+        store.restore("session_a", "snap").unwrap();
+        assert_eq!(fs::read_to_string(&path_a).unwrap(), "a-original");
+        assert_eq!(fs::read_to_string(&path_b).unwrap(), "b-modified");
+
+        // Restoring session B's "snap" only touches path_b.
+        fs::write(&path_a, "a-modified").unwrap();
+        store.restore("session_b", "snap").unwrap();
+        assert_eq!(fs::read_to_string(&path_a).unwrap(), "a-modified");
+        assert_eq!(fs::read_to_string(&path_b).unwrap(), "b-original");
+    }
+
+    #[test]
+    fn cleanup_removes_expired_across_sessions() {
         let path = temp_file("cp_cleanup.txt", "data");
         let backup_store = BackupStore::new();
         let mut store = CheckpointStore::new();
 
         store
-            .create("recent", vec![path.clone()], &backup_store)
+            .create(
+                DEFAULT_SESSION_ID,
+                "recent",
+                vec![path.clone()],
+                &backup_store,
+            )
             .unwrap();
 
-        // Manually insert an expired checkpoint
-        store.checkpoints.insert(
-            "old".to_string(),
-            Checkpoint {
-                name: "old".to_string(),
-                file_contents: HashMap::new(),
-                created_at: 1000, // far in the past
-            },
-        );
+        // Manually insert an expired checkpoint in another session.
+        store
+            .checkpoints
+            .entry("other".to_string())
+            .or_default()
+            .insert(
+                "old".to_string(),
+                Checkpoint {
+                    name: "old".to_string(),
+                    file_contents: HashMap::new(),
+                    created_at: 1000, // far in the past
+                },
+            );
 
-        assert_eq!(store.list().len(), 2);
+        assert_eq!(store.total_count(), 2);
         store.cleanup(24); // 24 hours
-        let remaining = store.list();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].name, "recent");
+        assert_eq!(store.total_count(), 1);
+        assert_eq!(store.list(DEFAULT_SESSION_ID)[0].name, "recent");
+        assert!(store.list("other").is_empty());
     }
 
     #[test]
     fn restore_nonexistent_returns_error() {
         let store = CheckpointStore::new();
-        let result = store.restore("nope");
+        let result = store.restore(DEFAULT_SESSION_ID, "nope");
         assert!(result.is_err());
         match result.unwrap_err() {
             AftError::CheckpointNotFound { name } => {
@@ -299,18 +367,34 @@ mod tests {
     }
 
     #[test]
+    fn restore_nonexistent_in_other_session_returns_error() {
+        // A "snap" that exists in session A must NOT be visible from session B.
+        let path = temp_file("cp_cross_session.txt", "data");
+        let backup_store = BackupStore::new();
+        let mut store = CheckpointStore::new();
+        store
+            .create("session_a", "only_a", vec![path], &backup_store)
+            .unwrap();
+        assert!(store.restore("session_b", "only_a").is_err());
+    }
+
+    #[test]
     fn create_with_empty_files_uses_backup_tracked() {
         let path = temp_file("cp_tracked.txt", "tracked_content");
         let mut backup_store = BackupStore::new();
-        backup_store.snapshot(&path, "auto").unwrap();
+        backup_store
+            .snapshot(DEFAULT_SESSION_ID, &path, "auto")
+            .unwrap();
 
         let mut store = CheckpointStore::new();
-        let info = store.create("from_tracked", vec![], &backup_store).unwrap();
+        let info = store
+            .create(DEFAULT_SESSION_ID, "from_tracked", vec![], &backup_store)
+            .unwrap();
         assert!(info.file_count >= 1);
 
         // Modify and restore
         fs::write(&path, "modified").unwrap();
-        store.restore("from_tracked").unwrap();
+        store.restore(DEFAULT_SESSION_ID, "from_tracked").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "tracked_content");
     }
 }

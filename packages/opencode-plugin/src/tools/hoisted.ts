@@ -16,6 +16,7 @@ import { tool } from "@opencode-ai/plugin";
 import { storeToolMetadata } from "../metadata-store.js";
 import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 /** Extract callID from plugin context (exists on object but not in TS type). */
 function getCallID(ctx: unknown): string | undefined {
@@ -112,7 +113,6 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         ),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const file = args.filePath as string;
 
       // Resolve relative paths
@@ -193,7 +193,7 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       // Only send limit if we did NOT convert offset to startLine/endLine
       if (args.limit !== undefined && args.offset === undefined) params.limit = args.limit;
 
-      const data = await bridge.send("read", params);
+      const data = await callBridge(ctx, context, "read", params);
 
       // Error response (e.g. file not found)
       if (data.success === false) {
@@ -269,7 +269,6 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
       content: z.string().describe("The full content to write to the file"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const file = args.filePath as string;
       const content = args.content as string;
 
@@ -285,7 +284,7 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
         metadata: { filepath: filePath },
       });
 
-      const data = await bridge.send("write", {
+      const data = await callBridge(ctx, context, "write", {
         file: filePath,
         content,
         create_dirs: true,
@@ -443,8 +442,6 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .describe("Preview changes without applying (returns diff, default: false)"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-
       // Transaction mode — multi-file
       if (Array.isArray(args.operations)) {
         const ops = args.operations as Array<Record<string, unknown>>;
@@ -468,7 +465,7 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
 
         const params: Record<string, unknown> = { operations: resolvedOps };
         params.dry_run = args.dryRun === true;
-        const data = await bridge.send("transaction", params);
+        const data = await callBridge(ctx, context, "transaction", params);
         return JSON.stringify(data);
       }
 
@@ -539,7 +536,7 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
       // Request diff from Rust for UI metadata (avoids extra file reads in TS)
       if (!args.dryRun) params.include_diff = true;
 
-      const data = await bridge.send(command, params);
+      const data = await callBridge(ctx, context, command, params);
 
       // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
       if (!args.dryRun && data.success && data.diff) {
@@ -645,7 +642,6 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       patchText: z.string().describe("The full patch text including Begin/End markers"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const patchText = args.patchText as string;
       if (!patchText) throw new Error("'patchText' is required");
 
@@ -677,7 +673,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       const checkpointName = `apply_patch_${Date.now()}`;
       let checkpointCreated = false;
       try {
-        await bridge.send("checkpoint", {
+        await callBridge(ctx, context, "checkpoint", {
           name: checkpointName,
           files: allPaths.map((p) => path.resolve(context.directory, p)),
         });
@@ -697,7 +693,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         switch (hunk.type) {
           case "add": {
             try {
-              await bridge.send("write", {
+              await callBridge(ctx, context, "write", {
                 file: filePath,
                 content: hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`,
                 create_dirs: true,
@@ -715,7 +711,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
           case "delete": {
             try {
               const before = await fs.promises.readFile(filePath, "utf-8").catch(() => "");
-              await bridge.send("delete_file", { file: filePath });
+              await callBridge(ctx, context, "delete_file", { file: filePath });
               perFileDiffs.push({ filePath, before, after: "" });
               results.push(`Deleted ${hunk.path}`);
             } catch (e) {
@@ -735,7 +731,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
                 ? path.resolve(context.directory, hunk.move_path)
                 : filePath;
 
-              const writeResult = await bridge.send("write", {
+              const writeResult = await callBridge(ctx, context, "write", {
                 file: targetPath,
                 content: newContent,
                 create_dirs: true,
@@ -759,7 +755,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               perFileDiffs.push({ filePath, before: original, after: newContent });
 
               if (hunk.move_path) {
-                await bridge.send("delete_file", { file: filePath });
+                await callBridge(ctx, context, "delete_file", { file: filePath });
                 results.push(`Updated and moved ${hunk.path} → ${hunk.move_path}`);
               } else {
                 results.push(`Updated ${hunk.path}`);
@@ -778,7 +774,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       if (patchFailed) {
         if (checkpointCreated) {
           try {
-            await bridge.send("restore_checkpoint", { name: checkpointName });
+            await callBridge(ctx, context, "restore_checkpoint", { name: checkpointName });
             results.push("Patch failed — restored files to pre-patch state.");
           } catch {
             results.push(
@@ -847,7 +843,6 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
       filePath: z.string().describe("Path to file to delete"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const filePath = path.isAbsolute(args.filePath as string)
         ? (args.filePath as string)
         : path.resolve(context.directory, args.filePath as string);
@@ -859,7 +854,7 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
         metadata: { action: "delete" },
       });
 
-      const result = await bridge.send("delete_file", { file: filePath });
+      const result = await callBridge(ctx, context, "delete_file", { file: filePath });
       if (result.success === false) {
         throw new Error((result.message as string) || "delete failed");
       }
@@ -884,7 +879,6 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
       destination: z.string().describe("Destination file path"),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const filePath = path.isAbsolute(args.filePath as string)
         ? (args.filePath as string)
         : path.resolve(context.directory, args.filePath as string);
@@ -899,7 +893,7 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
         metadata: { action: "move" },
       });
 
-      const result = await bridge.send("move_file", {
+      const result = await callBridge(ctx, context, "move_file", {
         file: filePath,
         destination: destPath,
       });

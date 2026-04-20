@@ -27,6 +27,7 @@ import { clearSharedBridgePool, setSharedBridgePool } from "./shared/runtime.js"
 import { coerceAftStatus, formatStatusMarkdown } from "./shared/status.js";
 import { ensureTuiPluginEntry } from "./shared/tui-config.js";
 import { cleanupUrlCache } from "./shared/url-fetch.js";
+import { registerShutdownCleanup } from "./shutdown-hooks.js";
 import { astTools } from "./tools/ast.js";
 import { conflictTools } from "./tools/conflicts.js";
 import { aftPrefixedTools, hoistedTools } from "./tools/hoisted.js";
@@ -236,11 +237,27 @@ const plugin: Plugin = async (input) => {
 
   // Start RPC server for TUI plugin communication
   const rpcServer = new AftRpcServer(configOverrides.storage_dir as string, input.directory);
+
+  // Install process-level SIGTERM/SIGINT handlers so that child `aft` processes
+  // get an orderly shutdown when the Node host receives a termination signal.
+  // Without this, OS propagates SIGTERM to children before OpenCode calls dispose,
+  // and (together with bridge.ts signal handling) we want the shutdown path we
+  // control, not implicit process-group death. The returned unregister is called
+  // from dispose so plugin reloads don't leak stale cleanup callbacks.
+  const unregisterShutdown = registerShutdownCleanup(async () => {
+    try {
+      rpcServer.stop();
+    } catch {
+      // best-effort
+    }
+    await pool.shutdown();
+  });
   rpcServer.handle("status", async (params) => {
     const sessionID = (params.sessionID as string) || "rpc";
-    const bridge =
-      pool.getAnyActiveBridge(input.directory) ?? pool.getBridge(input.directory, sessionID);
-    return await bridge.send("status", {});
+    // Prefer an already-warm bridge (semantic/trigram indexes loaded) before
+    // spawning a cold one just to answer a status query.
+    const bridge = pool.getAnyActiveBridge(input.directory) ?? pool.getBridge(input.directory);
+    return await bridge.send("status", { session_id: sessionID });
   });
   // Feature announcement — TUI plugin calls this on startup to show a dialog.
   // Uses ANNOUNCEMENT_VERSION (not PLUGIN_VERSION) so patch releases don't re-fire.
@@ -424,9 +441,8 @@ const plugin: Plugin = async (input) => {
 
       // Prefer an existing active bridge to get warm index status
       const bridge =
-        ctx.pool.getAnyActiveBridge(input.directory) ??
-        ctx.pool.getBridge(input.directory, commandInput.sessionID);
-      const response = await bridge.send("status", {});
+        ctx.pool.getAnyActiveBridge(input.directory) ?? ctx.pool.getBridge(input.directory);
+      const response = await bridge.send("status", { session_id: commandInput.sessionID });
       if (response.success === false) {
         throw new Error((response.message as string) || "status failed");
       }
@@ -477,6 +493,7 @@ const plugin: Plugin = async (input) => {
       };
     },
     dispose: () => {
+      unregisterShutdown();
       rpcServer.stop();
       clearSharedBridgePool();
       return pool.shutdown();

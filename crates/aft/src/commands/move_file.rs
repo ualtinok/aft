@@ -70,7 +70,7 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Backup source before moving
-    let backup_id = match edit::auto_backup(ctx, src_path.as_path(), "move_file: pre-move backup") {
+    let backup_id = match edit::auto_backup(ctx, req.session(), src_path.as_path(), "move_file: pre-move backup") {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());

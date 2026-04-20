@@ -157,7 +157,7 @@ pub fn handle_add_decorator(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // --- Auto-backup (skip for dry-run) ---
     let backup_id = if !edit::is_dry_run(&req.params) {
-        match edit::auto_backup(ctx, &path, "add_decorator: pre-edit backup") {
+        match edit::auto_backup(ctx, req.session(), &path, "add_decorator: pre-edit backup") {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

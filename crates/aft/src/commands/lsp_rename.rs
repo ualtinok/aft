@@ -153,7 +153,7 @@ pub fn handle_lsp_rename(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    match apply_workspace_edit(&workspace_edit, ctx, &req.id) {
+    match apply_workspace_edit(&workspace_edit, ctx, req.session(), &req.id) {
         Ok(changes) => {
             let total_files = changes.len();
             let total_edits: usize = changes.iter().map(|change| change.edits).sum();
@@ -184,6 +184,7 @@ pub fn handle_lsp_rename(req: &RawRequest, ctx: &AppContext) -> Response {
 fn apply_workspace_edit(
     edit: &WorkspaceEdit,
     ctx: &AppContext,
+    session: &str,
     req_id: &str,
 ) -> Result<Vec<FileChange>, Response> {
     let file_changes = collect_workspace_edit_changes(edit, ctx, req_id)?;
@@ -195,14 +196,14 @@ fn apply_workspace_edit(
         ));
     }
 
-    let snapshotted = snapshot_affected_files(&file_changes, ctx)
+    let snapshotted = snapshot_affected_files(&file_changes, session, ctx)
         .map_err(|err| Response::error(req_id, "lsp_error", format!("rename failed: {err}")))?;
     let result = apply_collected_changes(&file_changes, ctx);
 
     match result {
         Ok(changes) => Ok(changes),
         Err(err) => {
-            rollback_rename(ctx, &snapshotted);
+            rollback_rename(ctx, session, &snapshotted);
             Err(Response::error(
                 req_id,
                 "lsp_error",
@@ -293,15 +294,18 @@ fn collect_workspace_edit_changes(
 
 fn snapshot_affected_files(
     file_changes: &BTreeMap<PathBuf, Vec<PendingTextEdit>>,
+    session: &str,
     ctx: &AppContext,
 ) -> Result<Vec<PathBuf>, LspError> {
     let mut backup = ctx.backup().borrow_mut();
     let mut snapshotted = Vec::with_capacity(file_changes.len());
 
     for path in file_changes.keys() {
-        backup.snapshot(path, "lsp_rename").map_err(|err| {
-            LspError::NotFound(format!("failed to snapshot '{}': {err}", path.display()))
-        })?;
+        backup
+            .snapshot(session, path, "lsp_rename")
+            .map_err(|err| {
+                LspError::NotFound(format!("failed to snapshot '{}': {err}", path.display()))
+            })?;
         snapshotted.push(path.clone());
     }
 
@@ -424,11 +428,11 @@ fn utf16_column_to_byte(line: &str, character: u32) -> usize {
     line.len()
 }
 
-fn rollback_rename(ctx: &AppContext, snapshotted: &[PathBuf]) {
+fn rollback_rename(ctx: &AppContext, session: &str, snapshotted: &[PathBuf]) {
     for path in snapshotted.iter().rev() {
         let backup_entry = {
             let backup = ctx.backup().borrow();
-            backup.history(path).last().cloned()
+            backup.history(session, path).last().cloned()
         };
 
         if let Some(entry) = backup_entry {

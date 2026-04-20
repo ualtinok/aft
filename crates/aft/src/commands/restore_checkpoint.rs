@@ -28,11 +28,11 @@ fn handle_restore_checkpoint_impl(
 
     let checkpoint_store = ctx.checkpoint().borrow();
     let file_paths = checkpoint_store
-        .file_paths(name)
+        .file_paths(req.session(), name)
         .map_err(|e| Response::error(&req.id, e.code(), e.to_string()))?;
     let validated_paths = validate_restore_paths(&req.id, ctx, &file_paths)?;
 
-    match checkpoint_store.restore_validated(name, &validated_paths) {
+    match checkpoint_store.restore_validated(req.session(), name, &validated_paths) {
         Ok(info) => Ok(Response::success(
             &req.id,
             serde_json::json!({

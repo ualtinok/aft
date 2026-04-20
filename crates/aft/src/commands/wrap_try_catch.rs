@@ -184,7 +184,7 @@ pub fn handle_wrap_try_catch(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // --- Auto-backup (skip for dry-run) ---
     let backup_id = if !edit::is_dry_run(&req.params) {
-        match edit::auto_backup(ctx, &path, "wrap_try_catch: pre-edit backup") {
+        match edit::auto_backup(ctx, req.session(), &path, "wrap_try_catch: pre-edit backup") {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

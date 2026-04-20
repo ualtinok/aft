@@ -4,6 +4,7 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { fetchUrlToTempFile } from "../shared/url-fetch.js";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 /** File extensions that aft_outline supports via tree-sitter or markdown parser */
 const OUTLINE_EXTENSIONS = new Set([
@@ -70,8 +71,6 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           .describe("HTTP/HTTPS URL of an HTML or Markdown document to fetch and outline"),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-
         const filesArg = Array.isArray(args.files) ? (args.files as unknown[]) : undefined;
         const hasFilePath = typeof args.filePath === "string" && args.filePath.length > 0;
         const hasFiles = (filesArg?.length ?? 0) > 0;
@@ -92,7 +91,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         // URL mode: fetch to temp file, then outline the cached copy
         if (hasUrl) {
           const cachedPath = await fetchUrlToTempFile(args.url as string, ctx.storageDir);
-          const response = await bridge.send("outline", { file: cachedPath });
+          const response = await callBridge(ctx, context, "outline", { file: cachedPath });
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
@@ -124,7 +123,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
               message: `No source files found under ${dirArg}`,
             });
           }
-          const response = await bridge.send("outline", { files });
+          const response = await callBridge(ctx, context, "outline", { files });
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
@@ -132,13 +131,13 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         }
 
         if (Array.isArray(args.files) && args.files.length > 0) {
-          const response = await bridge.send("outline", { files: args.files });
+          const response = await callBridge(ctx, context, "outline", { files: args.files });
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
           return response.text as string;
         }
-        const response = await bridge.send("outline", { file: args.filePath });
+        const response = await callBridge(ctx, context, "outline", { file: args.filePath });
         if (response.success === false) {
           throw new Error((response.message as string) || "outline failed");
         }
@@ -173,8 +172,6 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           .describe("Lines of context before/after the symbol (default: 3)"),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
-
         const hasFilePath = typeof args.filePath === "string" && args.filePath.length > 0;
         const hasUrl = typeof args.url === "string" && args.url.length > 0;
 
@@ -196,7 +193,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             (args.symbols as string[]).map((sym) => {
               const params: Record<string, unknown> = { file, symbol: sym };
               if (args.contextLines !== undefined) params.context_lines = args.contextLines;
-              return bridge.send("zoom", params);
+              return callBridge(ctx, context, "zoom", params);
             }),
           );
           return JSON.stringify(results);
@@ -207,7 +204,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         if (typeof args.symbol === "string") params.symbol = args.symbol;
         if (args.contextLines !== undefined) params.context_lines = args.contextLines;
 
-        const data = await bridge.send("zoom", params);
+        const data = await callBridge(ctx, context, "zoom", params);
         if (data.success === false) {
           throw new Error((data.message as string) || "zoom failed");
         }

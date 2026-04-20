@@ -90,6 +90,8 @@ export interface BridgeOptions {
  */
 export class BinaryBridge {
   private static readonly RESTART_RESET_MS = 5 * 60 * 1000;
+  /** How many recent stderr lines to keep for crash diagnostics. */
+  private static readonly STDERR_TAIL_MAX = 20;
 
   private binaryPath: string;
   private cwd: string;
@@ -97,6 +99,8 @@ export class BinaryBridge {
   private pending = new Map<string, PendingRequest>();
   private nextId = 1;
   private stdoutBuffer = "";
+  /** Ring buffer of the last N stderr lines, cleared on every spawn. */
+  private stderrTail: string[] = [];
   private _restartCount = 0;
   private _shuttingDown = false;
   private timeoutMs: number;
@@ -347,25 +351,57 @@ export class BinaryBridge {
     child.stderr?.on("data", (chunk: Buffer) => {
       const lines = chunk.toString("utf-8").trimEnd().split("\n");
       for (const line of lines) {
+        if (!line) continue;
         // Strip Rust env_logger prefix and re-tag under [aft]
         const stripped = line.replace(/^\[aft\]\s*/, "");
         log(`[aft] ${stripped}`);
+        this.pushStderrLine(stripped);
       }
     });
 
     child.on("error", (err) => {
-      error(`Process error: ${err.message}`);
+      error(`Process error: ${err.message}${this.formatStderrTail()}`);
       this.handleCrash();
     });
 
     child.on("exit", (code, signal) => {
       if (this._shuttingDown) return;
       log(`Process exited: code=${code}, signal=${signal}`);
+      // External termination signals are intentional kills — don't auto-restart.
+      // See packages/opencode-plugin/src/bridge.ts for the full rationale (issue #14).
+      if (
+        signal === "SIGTERM" ||
+        signal === "SIGKILL" ||
+        signal === "SIGHUP" ||
+        signal === "SIGINT"
+      ) {
+        this.process = null;
+        this.configured = false;
+        this.clearRestartResetTimer();
+        this.rejectAllPending(new Error(`[aft-pi] Binary killed by ${signal}`));
+        return;
+      }
       this.handleCrash();
     });
 
     this.process = child;
     this.stdoutBuffer = "";
+    // Fresh spawn — clear stderr ring so crash diagnostics only reflect
+    // the current child's output, not prior restart cycles.
+    this.stderrTail = [];
+  }
+
+  private pushStderrLine(line: string): void {
+    this.stderrTail.push(line);
+    if (this.stderrTail.length > BinaryBridge.STDERR_TAIL_MAX) {
+      this.stderrTail.shift();
+    }
+  }
+
+  private formatStderrTail(): string {
+    if (this.stderrTail.length === 0) return "";
+    const tail = this.stderrTail.join("\n  ");
+    return `\n  --- last ${this.stderrTail.length} stderr lines ---\n  ${tail}`;
   }
 
   private onStdoutData(data: string): void {
@@ -407,8 +443,11 @@ export class BinaryBridge {
     this.clearRestartResetTimer();
     this.configured = false;
 
+    const tail = this.formatStderrTail();
+    this.stderrTail = [];
+
     // Reject any other pending requests (the timed-out one was already rejected)
-    this.rejectAllPending(new Error("[aft-pi] Bridge restarted after timeout"));
+    this.rejectAllPending(new Error(`[aft-pi] Bridge restarted after timeout${tail}`));
   }
 
   private handleCrash(): void {
@@ -416,8 +455,14 @@ export class BinaryBridge {
     this.clearRestartResetTimer();
     this.configured = false; // Force reconfigure on next command after restart
 
-    // Reject all pending requests
-    this.rejectAllPending(new Error(`[aft-pi] Binary crashed (restarts: ${this._restartCount})`));
+    // Capture the tail BEFORE spawning the replacement, because the next spawn
+    // clears the ring. Include it in both the pending-request rejection and
+    // the "max restarts reached" log so the underlying failure is visible.
+    const tail = this.formatStderrTail();
+
+    this.rejectAllPending(
+      new Error(`[aft-pi] Binary crashed (restarts: ${this._restartCount})${tail}`),
+    );
 
     // Auto-restart with exponential backoff
     if (this._restartCount < this.maxRestarts) {
@@ -435,7 +480,9 @@ export class BinaryBridge {
         }
       }, delay);
     } else {
-      error(`Max restarts (${this.maxRestarts}) reached, giving up. Logs: ${getLogFilePath()}`);
+      error(
+        `Max restarts (${this.maxRestarts}) reached, giving up. Logs: ${getLogFilePath()}${tail}`,
+      );
     }
   }
 

@@ -180,7 +180,7 @@ pub fn handle_add_member(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // --- Auto-backup (skip for dry-run) ---
     let backup_id = if !edit::is_dry_run(&req.params) {
-        match edit::auto_backup(ctx, &path, "add_member: pre-edit backup") {
+        match edit::auto_backup(ctx, req.session(), &path, "add_member: pre-edit backup") {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

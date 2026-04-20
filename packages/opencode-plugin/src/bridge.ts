@@ -90,6 +90,8 @@ export interface BridgeOptions {
  */
 export class BinaryBridge {
   private static readonly RESTART_RESET_MS = 5 * 60 * 1000;
+  /** How many recent stderr lines to keep for crash diagnostics. */
+  private static readonly STDERR_TAIL_MAX = 20;
 
   private binaryPath: string;
   private cwd: string;
@@ -97,6 +99,8 @@ export class BinaryBridge {
   private pending = new Map<string, PendingRequest>();
   private nextId = 1;
   private stdoutBuffer = "";
+  /** Ring buffer of the last N stderr lines, cleared on every spawn. */
+  private stderrTail: string[] = [];
   private _restartCount = 0;
   private _shuttingDown = false;
   private timeoutMs: number;
@@ -349,25 +353,67 @@ export class BinaryBridge {
     child.stderr?.on("data", (chunk: Buffer) => {
       const lines = chunk.toString("utf-8").trimEnd().split("\n");
       for (const line of lines) {
+        if (!line) continue;
         // Strip Rust env_logger prefix and re-tag under [aft]
         const stripped = line.replace(/^\[aft\]\s*/, "");
         log(`[aft] ${stripped}`);
+        this.pushStderrLine(stripped);
       }
     });
 
     child.on("error", (err) => {
-      error(`Process error: ${err.message}`);
+      error(`Process error: ${err.message}${this.formatStderrTail()}`);
       this.handleCrash();
     });
 
     child.on("exit", (code, signal) => {
       if (this._shuttingDown) return;
       log(`Process exited: code=${code}, signal=${signal}`);
+      // External termination signals (SIGTERM/SIGKILL/SIGHUP/SIGINT) are almost
+      // always intentional kills — from our own shutdown path, OpenCode tearing
+      // down, OS shutdown, or the user killing the host. Auto-restarting here
+      // produces process avalanches (issue #14): N bridges all receive SIGTERM
+      // simultaneously, each "auto-restarts", spawning N fresh processes that
+      // reload ONNX + semantic + trigram indexes. Real Rust panics/crashes exit
+      // with a non-null `code` and `signal === null`; those still restart.
+      if (
+        signal === "SIGTERM" ||
+        signal === "SIGKILL" ||
+        signal === "SIGHUP" ||
+        signal === "SIGINT"
+      ) {
+        this.process = null;
+        this.configured = false;
+        this.clearRestartResetTimer();
+        this.rejectAllPending(new Error(`[aft-plugin] Binary killed by ${signal}`));
+        return;
+      }
       this.handleCrash();
     });
 
     this.process = child;
     this.stdoutBuffer = "";
+    // Fresh spawn — clear the stderr ring so crash diagnostics only reflect
+    // the current child's output, not output from prior restart cycles.
+    this.stderrTail = [];
+  }
+
+  private pushStderrLine(line: string): void {
+    this.stderrTail.push(line);
+    if (this.stderrTail.length > BinaryBridge.STDERR_TAIL_MAX) {
+      this.stderrTail.shift();
+    }
+  }
+
+  /**
+   * Format the current stderr tail for inclusion in error messages. Returns
+   * empty string when nothing has been captured (e.g., silent SIGKILL from
+   * macOS amfid) so the caller can safely concatenate unconditionally.
+   */
+  private formatStderrTail(): string {
+    if (this.stderrTail.length === 0) return "";
+    const tail = this.stderrTail.join("\n  ");
+    return `\n  --- last ${this.stderrTail.length} stderr lines ---\n  ${tail}`;
   }
 
   private onStdoutData(data: string): void {
@@ -409,8 +455,13 @@ export class BinaryBridge {
     this.clearRestartResetTimer();
     this.configured = false;
 
+    // Capture the stderr tail for diagnostics, then clear so the next spawn
+    // doesn't inherit this one's output.
+    const tail = this.formatStderrTail();
+    this.stderrTail = [];
+
     // Reject any other pending requests (the timed-out one was already rejected)
-    this.rejectAllPending(new Error("[aft-plugin] Bridge restarted after timeout"));
+    this.rejectAllPending(new Error(`[aft-plugin] Bridge restarted after timeout${tail}`));
   }
 
   private handleCrash(): void {
@@ -418,9 +469,15 @@ export class BinaryBridge {
     this.clearRestartResetTimer();
     this.configured = false; // Force reconfigure on next command after restart
 
-    // Reject all pending requests
+    // Capture the tail BEFORE spawning the replacement, because the next spawn
+    // clears the ring. Include it in both the pending-request rejection and
+    // the "max restarts reached" log so the underlying failure is visible
+    // without having to grep the plugin log for a timestamp match.
+    const tail = this.formatStderrTail();
+
+    // Reject all pending requests with the tail attached.
     this.rejectAllPending(
-      new Error(`[aft-plugin] Binary crashed (restarts: ${this._restartCount})`),
+      new Error(`[aft-plugin] Binary crashed (restarts: ${this._restartCount})${tail}`),
     );
 
     // Auto-restart with exponential backoff
@@ -439,7 +496,9 @@ export class BinaryBridge {
         }
       }, delay);
     } else {
-      error(`Max restarts (${this.maxRestarts}) reached, giving up. Logs: ${getLogFilePath()}`);
+      error(
+        `Max restarts (${this.maxRestarts}) reached, giving up. Logs: ${getLogFilePath()}${tail}`,
+      );
     }
   }
 

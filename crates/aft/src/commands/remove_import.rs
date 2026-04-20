@@ -118,7 +118,7 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // --- Auto-backup (skip for dry-run) ---
     let backup_id = if !edit::is_dry_run(&req.params) {
-        match edit::auto_backup(ctx, &path, "remove_import: pre-edit backup") {
+        match edit::auto_backup(ctx, req.session(), &path, "remove_import: pre-edit backup") {
             Ok(id) => id,
             Err(e) => {
                 return Response::error(&req.id, e.code(), e.to_string());

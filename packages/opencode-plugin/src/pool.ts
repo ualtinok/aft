@@ -16,11 +16,23 @@ export interface PoolOptions extends BridgeOptions {
 }
 
 /**
- * Manages a pool of BinaryBridge instances, one per session.
- * Each session gets its own binary process with isolated backup/undo history.
- * Handles idle cleanup and LRU eviction when at capacity.
+ * Manages a pool of BinaryBridge instances, keyed by **canonical project root**.
+ *
+ * Prior to issue #14, the pool spawned one binary process per OpenCode session,
+ * which duplicated every heavy in-memory structure (ONNX runtime, trigram and
+ * semantic indexes, LSP state, symbol caches) N times for N sessions in the
+ * same project. That produced an effective "leak" the user saw as many aft
+ * processes consuming gigabytes of RAM on large repositories.
+ *
+ * The current design spawns **one bridge per project** and relies on the Rust
+ * side to partition the small amount of truly session-scoped state (undo
+ * history, named checkpoints) via the `session_id` envelope field attached by
+ * the `callBridge()` helper. Sessions sharing a bridge still share the
+ * latency of a single request pipeline; the trade-off is acceptable because
+ * it removes the real RAM multiplier.
  */
 export class BridgePool {
+  /** Project-root → bridge. Key is a normalized canonical path. */
   private readonly bridges = new Map<string, PoolEntry>();
   private binaryPath: string;
   private readonly maxPoolSize: number;
@@ -52,14 +64,21 @@ export class BridgePool {
   }
 
   /**
-   * Get or create a bridge for the given session.
-   * Each session gets its own binary process with isolated backup/undo history.
-   * The bridge's working directory is set to `directory`.
+   * Get any existing bridge that is configured and alive, preferring one that
+   * matches the given project root.
+   *
+   * Used by `/aft-status` and similar read-only paths that want to reuse a
+   * warm bridge (with loaded semantic indexes etc.) instead of paying the
+   * cold-start cost on a cheap query.
    */
-  /** Get any existing bridge that is configured and alive, preferring the given directory. */
-  getAnyActiveBridge(_directory: string): BinaryBridge | null {
-    // First try to find one matching this directory
-    for (const [, entry] of this.bridges) {
+  getAnyActiveBridge(projectRoot: string): BinaryBridge | null {
+    const key = normalizeKey(projectRoot);
+    const preferred = this.bridges.get(key);
+    if (preferred?.bridge.isAlive()) {
+      preferred.lastUsed = Date.now();
+      return preferred.bridge;
+    }
+    for (const entry of this.bridges.values()) {
       if (entry.bridge.isAlive()) {
         entry.lastUsed = Date.now();
         return entry.bridge;
@@ -68,26 +87,29 @@ export class BridgePool {
     return null;
   }
 
-  getBridge(directory: string, sessionID: string): BinaryBridge {
-    const key = sessionID || directory.replace(/\/+$/, "");
+  /**
+   * Get or create the bridge for `projectRoot`.
+   *
+   * Callers should always pass a **canonical** project root (see
+   * `projectRootFor()` in `tools/_shared.ts`). All sessions operating on the
+   * same project share one bridge; their undo/checkpoint state is still
+   * isolated by `session_id` on the Rust side.
+   */
+  getBridge(projectRoot: string): BinaryBridge {
+    const key = normalizeKey(projectRoot);
     const existing = this.bridges.get(key);
     if (existing) {
       existing.lastUsed = Date.now();
       return existing.bridge;
     }
 
-    // Evict LRU if at capacity
+    // Evict LRU if at capacity (one project = one slot now, so reaching the
+    // cap means the user has many distinct projects open).
     if (this.bridges.size >= this.maxPoolSize) {
       this.evictLRU();
     }
 
-    const normalized = directory.replace(/\/+$/, "");
-    const bridge = new BinaryBridge(
-      this.binaryPath,
-      normalized,
-      this.bridgeOptions,
-      this.configOverrides,
-    );
+    const bridge = new BinaryBridge(this.binaryPath, key, this.bridgeOptions, this.configOverrides);
     this.bridges.set(key, { bridge, lastUsed: Date.now() });
     return bridge;
   }
@@ -158,4 +180,9 @@ export class BridgePool {
   get size(): number {
     return this.bridges.size;
   }
+}
+
+/** Strip trailing path separators so `/repo` and `/repo/` collapse to one key. */
+function normalizeKey(projectRoot: string): string {
+  return projectRoot.replace(/[/\\]+$/, "");
 }

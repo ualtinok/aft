@@ -259,11 +259,7 @@ pub fn handle_edit_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Auto-backup before writing
-    let backup_id = match edit::auto_backup(
-        ctx,
-        &path,
-        &format!("edit_symbol: {} {}", operation, symbol_name),
-    ) {
+    let backup_id = match edit::auto_backup(ctx, req.session(), &path, &format!("edit_symbol: {} {}", operation, symbol_name)) {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());

@@ -209,6 +209,7 @@ describe("Hoisted tool execute handlers", () => {
         ],
         diagnostics: true,
         include_diff: true,
+        session_id: "test",
       },
     });
   });
@@ -243,6 +244,7 @@ describe("Hoisted tool execute handlers", () => {
         replace_all: true,
         diagnostics: true,
         include_diff: true,
+        session_id: "test",
       },
     });
   });
@@ -316,6 +318,7 @@ describe("Hoisted tool execute handlers", () => {
       command: "read",
       params: {
         file: resolve(tmpDir, "artifact.bin"),
+        session_id: "test",
       },
     });
   });

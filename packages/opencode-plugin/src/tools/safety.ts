@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 import {
   askEditPermission,
   permissionDeniedResponse,
@@ -49,7 +50,6 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
           ),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
         const op = args.op as string;
 
         if ((op === "undo" || op === "history") && typeof args.filePath !== "string") {
@@ -87,7 +87,7 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
         if (args.filePath !== undefined) params.file = args.filePath;
         if (args.name !== undefined) params.name = args.name;
         if (args.files !== undefined) params.files = args.files;
-        const response = await bridge.send(commandMap[op], params);
+        const response = await callBridge(ctx, context, commandMap[op], params);
         if (response.success === false) {
           throw new Error((response.message as string) || `${op} failed`);
         }

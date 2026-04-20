@@ -120,6 +120,7 @@ mod tests {
             id: "test-1".into(),
             command: "edit_symbol".into(),
             lsp_hints,
+            session_id: None,
             params: serde_json::json!({}),
         }
     }

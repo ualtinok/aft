@@ -88,6 +88,10 @@ export function registerHoistedTools(
           req.end_line = params.limit;
         }
         const response = await callBridge(bridge, "read", req);
+        // Directory listings come back as { entries: [...] }, files as { content: "..." }.
+        if (Array.isArray(response.entries)) {
+          return textResult((response.entries as string[]).join("\n"));
+        }
         const text = (response.content as string | undefined) ?? "";
         return textResult(text);
       },

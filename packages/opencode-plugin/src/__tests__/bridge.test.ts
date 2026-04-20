@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { BinaryBridge } from "../bridge.js";
 
 const BINARY_PATH = resolve(import.meta.dir, "../../../../target/debug/aft");
@@ -53,7 +55,10 @@ describe("BinaryBridge lifecycle", () => {
     expect(new Set(ids).size).toBe(3);
   });
 
-  test("bridge auto-restarts after binary crash", async () => {
+  test("bridge recovers via lazy respawn after external SIGKILL", async () => {
+    // Issue #14: SIGKILL/SIGTERM are external kills, not crashes — we explicitly
+    // do NOT auto-restart to avoid process avalanches when many bridges receive
+    // SIGTERM together. Recovery still works: the next send() lazy-spawns.
     bridge = new BinaryBridge(BINARY_PATH, PROJECT_CWD, {
       timeoutMs: TEST_TIMEOUT_MS,
       maxRestarts: 3,
@@ -63,20 +68,19 @@ describe("BinaryBridge lifecycle", () => {
     const r1 = await bridge.send("ping");
     expect(r1.success).toBe(true);
 
-    // Kill the child process to simulate a crash
-    // Access the private process field via bracket notation for testing
+    // Kill the child — this is treated as external termination, not a crash.
     const proc = (bridge as any).process;
     expect(proc).not.toBeNull();
     proc.kill("SIGKILL");
 
-    // Wait for the bridge to detect the crash and auto-restart
-    // The crash handler runs on 'exit' event, restart has exponential backoff (100ms first)
+    // Let the exit handler run (it should NOT schedule an auto-restart).
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Next request should work — bridge auto-restarted
+    // Next request lazy-spawns a fresh bridge.
     const r2 = await bridge.send("ping");
     expect(r2.success).toBe(true);
-    expect(bridge.restartCount).toBeGreaterThanOrEqual(1);
+    // No restart counter bump — this path uses lazy spawn, not auto-restart.
+    expect(bridge.restartCount).toBe(0);
   });
 
   test("shutdown cleans up child process (no orphans)", async () => {
@@ -187,6 +191,99 @@ describe("BinaryBridge lifecycle", () => {
 
     // configured should be false — the bridge should NOT be marked as configured
     expect((bridge as any).configured).toBe(false);
+  });
+
+  test("crash error surfaces stderr tail for diagnostics", async () => {
+    // Fake binary: writes recognizable stderr lines, briefly sleeps so the
+    // bridge has time to queue `configure`, then exits non-zero. The exit
+    // handler then runs handleCrash() which rejects pending requests — and
+    // the rejection must now include the stderr tail so callers see WHY
+    // the child died, not just that it died.
+    const fakeBin = join(tmpdir(), `aft-fake-crash-${Date.now()}.sh`);
+    await writeFile(
+      fakeBin,
+      [
+        "#!/bin/sh",
+        'echo "fatal: semantic index corrupted" >&2',
+        'echo "caused by: bad cache magic" >&2',
+        // Sleep long enough for the bridge to write `configure` to stdin
+        // before the process dies, so the request is in `pending` when the
+        // exit handler runs.
+        "sleep 0.3",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: 5_000, // must exceed the fake binary's sleep
+        maxRestarts: 0, // force straight to the "giving up" path
+      });
+
+      let caught: Error | null = null;
+      try {
+        await bridge.send("ping");
+      } catch (e) {
+        caught = e as Error;
+      }
+      expect(caught).not.toBeNull();
+      const msg = caught?.message ?? "";
+      expect(msg).toContain("fatal: semantic index corrupted");
+      expect(msg).toContain("caused by: bad cache magic");
+      expect(msg).toContain("stderr lines");
+    } finally {
+      await rm(fakeBin).catch(() => {});
+    }
+  });
+
+  test("stderr tail is bounded (doesn't grow unboundedly)", async () => {
+    // Emit 200 stderr lines before crashing. Only the last 20 should be kept
+    // per BinaryBridge.STDERR_TAIL_MAX — prevents memory leaks when a child
+    // panics in a long loop before its final exit.
+    const fakeBin = join(tmpdir(), `aft-fake-flood-${Date.now()}.sh`);
+    await writeFile(
+      fakeBin,
+      [
+        "#!/bin/sh",
+        "i=0",
+        "while [ $i -lt 200 ]; do",
+        '  echo "noise line $i" >&2',
+        "  i=$((i + 1))",
+        "done",
+        'echo "MARKER_LAST" >&2',
+        "sleep 0.3",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: 5_000,
+        maxRestarts: 0,
+      });
+
+      let caught: Error | null = null;
+      try {
+        await bridge.send("ping");
+      } catch (e) {
+        caught = e as Error;
+      }
+      const msg = caught?.message ?? "";
+      // The last marker must be present — tail is capturing the end, not the start.
+      expect(msg).toContain("MARKER_LAST");
+      // Early lines should have been evicted (far beyond the 20-line cap).
+      expect(msg).not.toContain("noise line 0\n");
+      expect(msg).not.toContain("noise line 100\n");
+      // The message shouldn't be megabytes long; cap at a generous but fixed
+      // size that reflects ~20 lines * ~30 chars/line + framing.
+      expect(msg.length).toBeLessThan(2_000);
+    } finally {
+      await rm(fakeBin).catch(() => {});
+    }
   });
 });
 

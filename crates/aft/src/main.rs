@@ -190,7 +190,7 @@ fn handle_snapshot(req: &RawRequest, ctx: &AppContext) -> Response {
     let path = std::path::Path::new(file);
     let mut backup = ctx.backup().borrow_mut();
 
-    match backup.snapshot(path, "manual snapshot") {
+    match backup.snapshot(req.session(), path, "manual snapshot") {
         Ok(id) => Response::success(&req.id, serde_json::json!({ "backup_id": id })),
         Err(e) => Response::error(&req.id, e.code(), e.to_string()),
     }

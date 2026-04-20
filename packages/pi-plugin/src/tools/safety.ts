@@ -44,11 +44,18 @@ export function registerSafetyTool(pi: ExtensionAPI, ctx: PluginContext): void {
         throw new Error(`op='${params.op}' requires 'name'`);
       }
       const bridge = bridgeFor(ctx, extCtx.cwd);
-      const req: Record<string, unknown> = { op: params.op };
+      const commandMap: Record<string, string> = {
+        undo: "undo",
+        history: "edit_history",
+        checkpoint: "checkpoint",
+        restore: "restore_checkpoint",
+        list: "list_checkpoints",
+      };
+      const req: Record<string, unknown> = {};
       if (params.filePath) req.file = params.filePath;
       if (params.name) req.name = params.name;
       if (params.files) req.files = params.files;
-      const response = await callBridge(bridge, "safety", req);
+      const response = await callBridge(bridge, commandMap[params.op], req);
       return textResult(JSON.stringify(response, null, 2));
     },
   });

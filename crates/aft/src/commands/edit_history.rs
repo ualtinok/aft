@@ -33,7 +33,7 @@ pub fn handle_edit_history(req: &RawRequest, ctx: &AppContext) -> Response {
     drop(config);
 
     let backup = ctx.backup().borrow();
-    let history = backup.history(&resolved);
+    let history = backup.history(req.session(), &resolved);
 
     let entries: Vec<serde_json::Value> = history
         .iter()

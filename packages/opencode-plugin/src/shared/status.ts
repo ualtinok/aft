@@ -36,6 +36,14 @@ export interface AftStatusSnapshot {
     warm_entries: number;
   };
   storage_dir: string | null;
+  /** Total checkpoints across all sessions sharing this bridge. */
+  checkpoints_total: number;
+  /** Current session's own slice of undo/checkpoint state. */
+  session: {
+    id: string;
+    tracked_files: number;
+    checkpoints: number;
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -95,6 +103,7 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
   };
   const disk = asRecord(response.disk);
   const symbolCache = asRecord(response.symbol_cache);
+  const session = asRecord(response.session);
 
   return {
     version: readString(response.version, "unknown"),
@@ -134,6 +143,12 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
       warm_entries: readNumber(symbolCache.warm_entries),
     },
     storage_dir: readNullableString(response.storage_dir),
+    checkpoints_total: readNumber(response.checkpoints_total),
+    session: {
+      id: readString(session.id, "__default__"),
+      tracked_files: readNumber(session.tracked_files),
+      checkpoints: readNumber(session.checkpoints),
+    },
   };
 }
 
@@ -181,6 +196,15 @@ export function formatStatusDialogMessage(status: AftStatusSnapshot): string {
   if (status.storage_dir ?? status.disk.storage_dir) {
     lines.push(`- storage dir: ${status.storage_dir ?? status.disk.storage_dir}`);
   }
+
+  lines.push(
+    "",
+    "Current session",
+    `- id: ${status.session.id}`,
+    `- tracked files: ${formatCount(status.session.tracked_files)}`,
+    `- checkpoints: ${formatCount(status.session.checkpoints)}`,
+    `- project checkpoints (all sessions): ${formatCount(status.checkpoints_total)}`,
+  );
 
   if (status.semantic_index.stage) {
     lines.push("", "Semantic stage", status.semantic_index.stage);
@@ -261,6 +285,15 @@ export function formatStatusMarkdown(status: AftStatusSnapshot): string {
   if (status.storage_dir ?? status.disk.storage_dir) {
     lines.push(`- **Storage dir:** \`${status.storage_dir ?? status.disk.storage_dir}\``);
   }
+
+  lines.push(
+    "",
+    "### Current session",
+    `- **ID:** \`${status.session.id}\``,
+    `- **Tracked files:** ${formatCount(status.session.tracked_files)}`,
+    `- **Checkpoints:** ${formatCount(status.session.checkpoints)}`,
+    `- **Project checkpoints (all sessions):** ${formatCount(status.checkpoints_total)}`,
+  );
 
   return lines.join("\n");
 }

@@ -45,7 +45,11 @@ maybeDescribe("e2e bridge boundary behavior", () => {
     expect(new Set(responses.map((response) => response.id)).size).toBe(3);
   });
 
-  test("auto-restarts after a process crash", async () => {
+  test("recovers via lazy respawn after external SIGKILL", async () => {
+    // Issue #14: SIGKILL/SIGTERM from OS or host process teardown is NOT a real
+    // crash — we explicitly do NOT auto-restart on signal exits to avoid
+    // process avalanches when many bridges receive SIGTERM simultaneously.
+    // Recovery still works: the next send() lazy-spawns a fresh bridge.
     const h = await harness();
 
     const first = await h.bridge.send("ping");
@@ -57,6 +61,7 @@ maybeDescribe("e2e bridge boundary behavior", () => {
 
     const second = await h.bridge.send("ping");
     expect(second.success).toBe(true);
-    expect(h.bridge.restartCount).toBeGreaterThanOrEqual(1);
+    // No auto-restart counter bump — signal kills aren't counted as crashes.
+    expect(h.bridge.restartCount).toBe(0);
   });
 });

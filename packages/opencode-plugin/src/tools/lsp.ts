@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 
 const z = tool.schema;
 /**
@@ -38,7 +39,6 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
         ),
     },
     execute: async (args, context): Promise<string> => {
-      const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
       const filePath = args.filePath || undefined; // treat empty string as absent
       const directory = args.directory || undefined;
       if (filePath !== undefined && directory !== undefined) {
@@ -51,7 +51,7 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
       if (directory !== undefined) params.directory = directory;
       if (args.severity !== undefined) params.severity = args.severity;
       if (args.waitMs !== undefined) params.wait_ms = args.waitMs;
-      const result = await bridge.send("lsp_diagnostics", params);
+      const result = await callBridge(ctx, context, "lsp_diagnostics", params);
       if (result.success === false) {
         throw new Error((result.message as string) || "lsp_diagnostics failed");
       }

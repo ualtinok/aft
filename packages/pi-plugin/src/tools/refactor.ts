@@ -37,16 +37,24 @@ export function registerRefactorTool(pi: ExtensionAPI, ctx: PluginContext): void
       extCtx,
     ) {
       const bridge = bridgeFor(ctx, extCtx.cwd);
-      const req: Record<string, unknown> = { op: params.op, file: params.filePath };
+      const commandMap: Record<string, string> = {
+        move: "move_symbol",
+        extract: "extract_function",
+        inline: "inline_symbol",
+      };
+      const req: Record<string, unknown> = { file: params.filePath };
       if (params.symbol !== undefined) req.symbol = params.symbol;
       if (params.destination !== undefined) req.destination = params.destination;
       if (params.scope !== undefined) req.scope = params.scope;
       if (params.name !== undefined) req.name = params.name;
       if (params.startLine !== undefined) req.start_line = params.startLine;
-      if (params.endLine !== undefined) req.end_line = params.endLine;
+      // Agent uses inclusive end_line; Rust extract_function expects exclusive.
+      if (params.endLine !== undefined) {
+        req.end_line = params.op === "extract" ? params.endLine + 1 : params.endLine;
+      }
       if (params.callSiteLine !== undefined) req.call_site_line = params.callSiteLine;
       if (params.dryRun !== undefined) req.dry_run = params.dryRun;
-      const response = await callBridge(bridge, "refactor", req);
+      const response = await callBridge(bridge, commandMap[params.op], req);
       return textResult(JSON.stringify(response, null, 2));
     },
   });

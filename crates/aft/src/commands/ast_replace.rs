@@ -190,7 +190,7 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
             let backup_id = ctx
                 .backup()
                 .borrow_mut()
-                .snapshot(validated_path.as_path(), "ast_replace")
+                .snapshot(req.session(), validated_path.as_path(), "ast_replace")
                 .ok();
 
             match std::fs::write(validated_path.as_path(), &new_content) {

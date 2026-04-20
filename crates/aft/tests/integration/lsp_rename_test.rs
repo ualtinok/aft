@@ -184,7 +184,10 @@ fn test_rename_rollback_on_failure() {
     let current = fs::read_to_string(&main_rs).expect("read rolled back file");
     assert_eq!(current, original);
 
-    let history = ctx.backup().borrow().history(&main_rs);
+    let history = ctx
+        .backup()
+        .borrow()
+        .history(aft::protocol::DEFAULT_SESSION_ID, &main_rs);
     assert!(
         !history.is_empty(),
         "expected backup history after rollback"

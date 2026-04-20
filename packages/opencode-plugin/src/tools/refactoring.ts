@@ -2,6 +2,7 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { queryLspHints } from "../lsp.js";
 import type { PluginContext } from "../types.js";
+import { callBridge } from "./_shared.js";
 import {
   askEditPermission,
   permissionDeniedResponse,
@@ -72,7 +73,6 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
           .describe("Preview changes as diff without modifying files (default: false)"),
       },
       execute: async (args, context): Promise<string> => {
-        const bridge = ctx.pool.getBridge(context.directory, context.sessionID);
         const op = args.op as string;
 
         if ((op === "move" || op === "inline") && typeof args.symbol !== "string") {
@@ -132,7 +132,7 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
         const hints = await queryLspHints(ctx.client, (args.symbol ?? args.name) as string);
         if (hints) params.lsp_hints = hints;
 
-        const response = await bridge.send(commandMap[op], params);
+        const response = await callBridge(ctx, context, commandMap[op], params);
         if (response.success === false) {
           throw new Error((response.message as string) || `${op} failed`);
         }

@@ -338,7 +338,12 @@ pub fn handle_inline_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Auto-backup before mutation ---
-    let backup_id = match edit::auto_backup(ctx, &path, &format!("inline_symbol: {}", symbol)) {
+    let backup_id = match edit::auto_backup(
+        ctx,
+        req.session(),
+        &path,
+        &format!("inline_symbol: {}", symbol),
+    ) {
         Ok(id) => id,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());
@@ -872,6 +877,7 @@ mod tests {
             command: command.to_string(),
             params,
             lsp_hints: None,
+            session_id: None,
         }
     }
 

@@ -34,7 +34,7 @@ pub fn handle_undo(req: &RawRequest, ctx: &AppContext) -> Response {
 
     let mut backup = ctx.backup().borrow_mut();
 
-    match backup.restore_latest(&resolved) {
+    match backup.restore_latest(req.session(), &resolved) {
         Ok((entry, warning)) => {
             let mut result = serde_json::json!({
                 "path": file,

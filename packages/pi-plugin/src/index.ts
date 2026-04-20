@@ -40,8 +40,10 @@ import { log, warn } from "./logger.js";
 import { ensureOnnxRuntime, getManualInstallHint } from "./onnx-runtime.js";
 import { BridgePool } from "./pool.js";
 import { findBinary } from "./resolver.js";
+import { registerShutdownCleanup } from "./shutdown-hooks.js";
 import { registerAstTools } from "./tools/ast.js";
 import { registerConflictsTool } from "./tools/conflicts.js";
+import { registerFsTools } from "./tools/fs.js";
 import { registerHoistedTools } from "./tools/hoisted.js";
 import { registerImportTools } from "./tools/imports.js";
 import { registerLspTools } from "./tools/lsp.js";
@@ -237,6 +239,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   if (surface.astSearch || surface.astReplace) {
     registerAstTools(pi, ctx, surface);
   }
+  if (surface.delete || surface.move) {
+    registerFsTools(pi, ctx, surface);
+  }
   if (surface.lspDiagnostics) {
     registerLspTools(pi, ctx);
   }
@@ -257,6 +262,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       log("Bridge pool shut down");
     } catch (err) {
       warn(`Error during bridge shutdown: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // Also register process-level signal handlers so children get an orderly
+  // shutdown when Pi's host Node process is killed directly (terminal close,
+  // Ctrl+C, OS shutdown) rather than through the session_shutdown lifecycle.
+  registerShutdownCleanup(async () => {
+    try {
+      await pool.shutdown();
+    } catch (err) {
+      warn(`Error during process shutdown: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
