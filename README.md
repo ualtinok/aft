@@ -29,25 +29,23 @@
 
 ## Get Started
 
-### OpenCode
-
-Run the setup wizard — it registers AFT in your OpenCode and TUI config and asks which experimental features to enable:
+Run the unified AFT setup wizard — it auto-detects which harnesses (OpenCode, Pi) you have installed and configures each one:
 
 ```bash
-bunx --bun @cortexkit/aft-opencode@latest setup
+bunx --bun @cortexkit/aft setup
 ```
 
-That's it. On the next session start, the binary downloads if needed and all tools become
-available. AFT replaces opencode's built-in `read`, `write`, `edit`, `apply_patch`,
-`ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` with enhanced versions — all
-powered natively by AFT — plus adds the `aft_` family of semantic tools on top.
+That's it. On the next session start the `aft` binary downloads if needed and all tools become available. Use `--harness opencode` or `--harness pi` to target a specific harness.
+
+### What AFT does to each harness
+
+- **OpenCode** — replaces the built-in `read`, `write`, `edit`, `apply_patch`, `ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` with AFT-powered versions and adds the `aft_` family on top.
+- **Pi** — replaces the built-in `read`, `write`, `edit`, and `grep` and adds the `aft_` family on top.
 
 <details>
-<summary>Manual install</summary>
+<summary>Manual install — OpenCode</summary>
 
-If you prefer to edit your config by hand:
-
-```
+```bash
 opencode plugin --global @cortexkit/aft-opencode@latest
 ```
 
@@ -61,38 +59,36 @@ or
 ```
 </details>
 
-### Pi
-
-AFT also ships as an extension for the [Pi coding agent](https://github.com/badlogic/pi-mono):
+<details>
+<summary>Manual install — Pi</summary>
 
 ```bash
 pi install npm:@cortexkit/aft-pi
 ```
 
-That's it. Pi loads the extension on the next session start. AFT replaces Pi's built-in
-`read`, `write`, `edit`, and `grep` with enhanced versions — all powered natively by AFT —
-plus adds the `aft_` family of semantic tools on top.
-
-See the [pi-plugin README](packages/pi-plugin/README.md) for detailed configuration.
+See the [pi-plugin README](packages/pi-plugin/README.md) for configuration details.
+</details>
 
 ### CLI Commands
 
-AFT ships a standalone CLI for setup, diagnostics, and issue reporting:
+The unified `@cortexkit/aft` CLI works across every supported harness:
 
 | Command | What it does |
 |---|---|
-| `bunx --bun @cortexkit/aft-opencode@latest setup` | Interactive first-time setup — registers plugin entries, enables experimental features |
-| `bunx --bun @cortexkit/aft-opencode@latest doctor` | Check configuration and auto-fix common issues |
-| `bunx --bun @cortexkit/aft-opencode@latest doctor --force` | Force-clear the OpenCode plugin cache (fixes stale `@latest` resolution) |
-| `bunx --bun @cortexkit/aft-opencode@latest doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
+| `bunx --bun @cortexkit/aft setup` | Interactive first-time setup — auto-detects installed harnesses and registers AFT with each |
+| `bunx --bun @cortexkit/aft doctor` | Check configuration and auto-fix common issues across all detected harnesses |
+| `bunx --bun @cortexkit/aft doctor --force` | Force-clear the OpenCode plugin cache (fixes stale `@latest` resolution) |
+| `bunx --bun @cortexkit/aft doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
 
-**`setup`** — Interactive wizard that registers AFT in your OpenCode and TUI config, asks whether to enable `experimental_search_index` and `experimental_semantic_search`, and writes the result to `~/.config/opencode/aft.jsonc`. Run this once after installing.
+Add `--harness opencode` or `--harness pi` to any command to target one harness explicitly.
 
-**`doctor`** — Checks everything that can go wrong: OpenCode install, plugin registration, plugin cache version, binary cache, config parse errors, ONNX Runtime availability (for semantic search), storage directory sizes, and log file status. Auto-fixes missing plugin entries and outdated plugin caches.
+**`setup`** — Registers AFT with each installed harness (edits `opencode.jsonc`'s `plugin` array for OpenCode, runs `pi install npm:@cortexkit/aft-pi` for Pi). When multiple harnesses are detected, prompts you to pick which ones to configure.
 
-**`doctor --force`** — Same as `doctor` but always clears the OpenCode plugin cache, forcing a fresh download of the latest plugin version. Use this when you're on an old version and `@latest` doesn't seem to update (OpenCode caches npm packages aggressively).
+**`doctor`** — Checks everything that can go wrong per harness: host install, plugin registration, plugin cache version, binary cache, config parse errors, ONNX Runtime availability (for semantic search), storage directory sizes, log file status. Auto-fixes missing plugin entries and outdated caches.
 
-**`doctor --issue`** — Collects a full diagnostic report, sanitizes your username and home path out of the logs, and opens a pre-filled GitHub issue on [cortexkit/aft](https://github.com/cortexkit/aft/issues). If you have `gh` installed, it submits directly; otherwise it writes the report to `./aft-issue-<timestamp>.md` and opens the GitHub new-issue page in your browser so you can paste it in.
+**`doctor --force`** — Same as `doctor` but always clears the OpenCode plugin cache, forcing a fresh download. Use when you're on an old version and `@latest` doesn't seem to update (OpenCode caches npm packages aggressively).
+
+**`doctor --issue`** — Collects a full diagnostic report, sanitizes your username and home path out of the logs, and files a GitHub issue. If you have `gh` installed, it submits directly; otherwise it writes the report to `./aft-issue-<timestamp>.md` and opens the new-issue page in your browser.
 
 ---
 
