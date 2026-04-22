@@ -15,13 +15,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-ai --external @mariozechner/pi-tui --external @sinclair/typebox && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-ai --external @mariozechner/pi-tui --external @sinclair/typebox --external diff && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "test": "bun test src/__tests__/",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.33"
+    "@sinclair/typebox": "^0.34.33",
+    "diff": "^8.0.4"
   },
   "optionalDependencies": {
     "@cortexkit/aft-darwin-arm64": "0.14.0",
@@ -33,11 +34,13 @@
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
     "@types/node": "^22.0.0",
     "typescript": "^5.8.0"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
   },
   "exports": {
     ".": {
