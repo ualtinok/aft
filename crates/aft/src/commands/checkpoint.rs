@@ -10,7 +10,10 @@ use crate::protocol::{RawRequest, Response};
 /// - `files` (array of strings, optional) — files to include. If omitted, uses
 ///   all files tracked by the backup store.
 ///
-/// Returns: `{ name, file_count, created_at }`.
+/// Returns: `{ name, file_count, created_at }`. When some tracked files have
+/// been deleted since their last edit the checkpoint still succeeds for the
+/// remaining files and adds a `skipped: [{ file, error }, ...]` array so the
+/// caller can surface which paths were dropped.
 pub fn handle_checkpoint(req: &RawRequest, ctx: &AppContext) -> Response {
     match handle_checkpoint_impl(req, ctx) {
         Ok(resp) | Err(resp) => resp,
@@ -53,14 +56,30 @@ fn handle_checkpoint_impl(req: &RawRequest, ctx: &AppContext) -> Result<Response
     let mut checkpoint_store = ctx.checkpoint().borrow_mut();
 
     match checkpoint_store.create(req.session(), name, validated_files, &backup) {
-        Ok(info) => Ok(Response::success(
-            &req.id,
-            serde_json::json!({
+        Ok(info) => {
+            // Only surface `skipped` when we actually skipped something. Keeps
+            // happy-path responses compact and backward-compatible for callers
+            // that only read `name` / `file_count` / `created_at`.
+            let mut payload = serde_json::json!({
                 "name": info.name,
                 "file_count": info.file_count,
                 "created_at": info.created_at,
-            }),
-        )),
+            });
+            if !info.skipped.is_empty() {
+                let skipped: Vec<_> = info
+                    .skipped
+                    .iter()
+                    .map(|(p, err)| {
+                        serde_json::json!({
+                            "file": p.display().to_string(),
+                            "error": err,
+                        })
+                    })
+                    .collect();
+                payload["skipped"] = serde_json::Value::Array(skipped);
+            }
+            Ok(Response::success(&req.id, payload))
+        }
         Err(e) => Ok(Response::error(&req.id, e.code(), e.to_string())),
     }
 }

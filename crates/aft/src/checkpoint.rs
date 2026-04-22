@@ -10,6 +10,11 @@ pub struct CheckpointInfo {
     pub name: String,
     pub file_count: usize,
     pub created_at: u64,
+    /// Paths that could not be snapshotted (e.g. deleted since last edit),
+    /// paired with the OS-level error that stopped us from reading them.
+    /// Empty on successful round-trips. Populated only on `create()` — the
+    /// `list()` / `restore()` paths leave it empty.
+    pub skipped: Vec<(PathBuf, String)>,
 }
 
 /// A stored checkpoint: a snapshot of multiple file contents.
@@ -46,6 +51,14 @@ impl CheckpointStore {
     /// If `files` is empty, snapshots all tracked files for **that session**
     /// from the BackupStore (other sessions' tracked files are not visible).
     /// Overwrites any existing checkpoint with the same name in this session.
+    ///
+    /// Unreadable paths (e.g. deleted since their last edit) are skipped with
+    /// a warning instead of failing the whole checkpoint. The paths and their
+    /// errors are returned via `CheckpointInfo::skipped` so callers can
+    /// surface them. A checkpoint is only rejected outright when *every*
+    /// requested path fails — that case still returns a `FileNotFound`
+    /// error so callers can distinguish "partial success" from "nothing
+    /// snapshotted at all".
     pub fn create(
         &mut self,
         session: &str,
@@ -53,6 +66,7 @@ impl CheckpointStore {
         files: Vec<PathBuf>,
         backup_store: &BackupStore,
     ) -> Result<CheckpointInfo, AftError> {
+        let explicit_request = !files.is_empty();
         let file_list = if files.is_empty() {
             backup_store.tracked_files(session)
         } else {
@@ -60,11 +74,34 @@ impl CheckpointStore {
         };
 
         let mut file_contents = HashMap::new();
+        let mut skipped: Vec<(PathBuf, String)> = Vec::new();
         for path in &file_list {
-            let content = std::fs::read_to_string(path).map_err(|_| AftError::FileNotFound {
-                path: path.display().to_string(),
-            })?;
-            file_contents.insert(path.clone(), content);
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    file_contents.insert(path.clone(), content);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "checkpoint {}: skipping unreadable file {}: {}",
+                        name,
+                        path.display(),
+                        e
+                    );
+                    skipped.push((path.clone(), e.to_string()));
+                }
+            }
+        }
+
+        // If the caller explicitly named a single file and it was unreadable,
+        // that's a real error — surface it rather than silently returning an
+        // empty checkpoint. For empty `files` (tracked-file fallback) with no
+        // readable files at all, the empty-file checkpoint is a legitimate
+        // "nothing to snapshot" outcome and we keep it.
+        if explicit_request && file_contents.is_empty() && !skipped.is_empty() {
+            let (path, err) = &skipped[0];
+            return Err(AftError::FileNotFound {
+                path: format!("{}: {}", path.display(), err),
+            });
         }
 
         let created_at = current_timestamp();
@@ -81,12 +118,22 @@ impl CheckpointStore {
             .or_default()
             .insert(name.to_string(), checkpoint);
 
-        log::info!("checkpoint created: {} ({} files)", name, file_count);
+        if skipped.is_empty() {
+            log::info!("checkpoint created: {} ({} files)", name, file_count);
+        } else {
+            log::info!(
+                "checkpoint created: {} ({} files, {} skipped)",
+                name,
+                file_count,
+                skipped.len()
+            );
+        }
 
         Ok(CheckpointInfo {
             name: name.to_string(),
             file_count,
             created_at,
+            skipped,
         })
     }
 
@@ -106,6 +153,7 @@ impl CheckpointStore {
             name: checkpoint.name.clone(),
             file_count: checkpoint.file_contents.len(),
             created_at: checkpoint.created_at,
+            skipped: Vec::new(),
         })
     }
 
@@ -137,6 +185,7 @@ impl CheckpointStore {
             name: checkpoint.name.clone(),
             file_count: checkpoint.file_contents.len(),
             created_at: checkpoint.created_at,
+            skipped: Vec::new(),
         })
     }
 
@@ -156,6 +205,7 @@ impl CheckpointStore {
                         name: cp.name.clone(),
                         file_count: cp.file_contents.len(),
                         created_at: cp.created_at,
+                        skipped: Vec::new(),
                     })
                     .collect()
             })
@@ -376,6 +426,90 @@ mod tests {
             .create("session_a", "only_a", vec![path], &backup_store)
             .unwrap();
         assert!(store.restore("session_b", "only_a").is_err());
+    }
+
+    #[test]
+    fn create_skips_missing_files_from_backup_tracked_set() {
+        // Simulate the reported issue #15-follow-up: an agent deletes a
+        // previously-edited file, then calls checkpoint with no explicit
+        // file list. Before the fix, the stale backup-tracked entry caused
+        // the whole checkpoint to fail on the missing path. Now the checkpoint
+        // succeeds with the readable file and reports the skipped one.
+        let readable = temp_file("cp_skip_readable.txt", "still_here");
+        let deleted = temp_file("cp_skip_deleted.txt", "about_to_vanish");
+
+        // Backup store canonicalizes keys, so the skipped path in the
+        // checkpoint result is the canonical form, not the raw temp path.
+        let deleted_canonical = fs::canonicalize(&deleted).unwrap();
+
+        let mut backup_store = BackupStore::new();
+        backup_store
+            .snapshot(DEFAULT_SESSION_ID, &readable, "auto")
+            .unwrap();
+        backup_store
+            .snapshot(DEFAULT_SESSION_ID, &deleted, "auto")
+            .unwrap();
+
+        fs::remove_file(&deleted).unwrap();
+
+        let mut store = CheckpointStore::new();
+        let info = store
+            .create(DEFAULT_SESSION_ID, "partial", vec![], &backup_store)
+            .expect("checkpoint should succeed despite one missing file");
+        assert_eq!(info.file_count, 1);
+        assert_eq!(info.skipped.len(), 1);
+        assert_eq!(info.skipped[0].0, deleted_canonical);
+        assert!(!info.skipped[0].1.is_empty());
+    }
+
+    #[test]
+    fn create_with_explicit_single_missing_file_errors() {
+        // When the caller names a single file explicitly and it can't be read,
+        // fail loudly — an empty checkpoint isn't what the caller asked for.
+        let missing = std::env::temp_dir()
+            .join("aft_checkpoint_tests/cp_explicit_missing_does_not_exist.txt");
+        let _ = fs::remove_file(&missing);
+
+        let backup_store = BackupStore::new();
+        let mut store = CheckpointStore::new();
+        let result = store.create(
+            DEFAULT_SESSION_ID,
+            "explicit",
+            vec![missing.clone()],
+            &backup_store,
+        );
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AftError::FileNotFound { path } => {
+                assert!(path.contains(&missing.display().to_string()));
+            }
+            other => panic!("expected FileNotFound, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn create_with_explicit_mixed_files_keeps_readable_and_reports_skipped() {
+        // Explicit file list with one readable + one missing: keep the
+        // readable one in the checkpoint, report the missing one under
+        // `skipped` instead of failing outright.
+        let good = temp_file("cp_mixed_good.txt", "ok");
+        let missing = std::env::temp_dir().join("aft_checkpoint_tests/cp_mixed_missing.txt");
+        let _ = fs::remove_file(&missing);
+
+        let backup_store = BackupStore::new();
+        let mut store = CheckpointStore::new();
+        let info = store
+            .create(
+                DEFAULT_SESSION_ID,
+                "mixed",
+                vec![good.clone(), missing.clone()],
+                &backup_store,
+            )
+            .expect("mixed checkpoint should succeed when any file is readable");
+        assert_eq!(info.file_count, 1);
+        assert_eq!(info.skipped.len(), 1);
+        assert_eq!(info.skipped[0].0, missing);
     }
 
     #[test]

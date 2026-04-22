@@ -52,9 +52,23 @@ export function registerSafetyTool(pi: ExtensionAPI, ctx: PluginContext): void {
         list: "list_checkpoints",
       };
       const req: Record<string, unknown> = {};
-      if (params.filePath) req.file = params.filePath;
       if (params.name) req.name = params.name;
-      if (params.files) req.files = params.files;
+      if (params.op === "checkpoint") {
+        // For checkpoint, Rust only knows `files`. If the agent passes
+        // `filePath` (a reasonable mistake — the tool schema exposes both),
+        // auto-promote it into a single-entry `files` list rather than
+        // silently dropping it and falling back to the whole tracked-file
+        // set.
+        if (params.files) {
+          req.files = params.files;
+        } else if (params.filePath) {
+          req.files = [params.filePath];
+        }
+      } else {
+        // undo / history / restore / list all take `file` as-is.
+        if (params.filePath) req.file = params.filePath;
+        if (params.files) req.files = params.files;
+      }
       const response = await callBridge(bridge, commandMap[params.op], req);
       return textResult(JSON.stringify(response, null, 2));
     },

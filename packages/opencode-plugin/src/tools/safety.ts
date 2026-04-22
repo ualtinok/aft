@@ -84,9 +84,23 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
           list: "list_checkpoints",
         };
         const params: Record<string, unknown> = {};
-        if (args.filePath !== undefined) params.file = args.filePath;
         if (args.name !== undefined) params.name = args.name;
-        if (args.files !== undefined) params.files = args.files;
+        if (op === "checkpoint") {
+          // For checkpoint, Rust only knows `files`. If the agent passes
+          // `filePath` (a reasonable mistake — the tool schema exposes both),
+          // auto-promote it into a single-entry `files` list rather than
+          // silently dropping it and falling back to the whole tracked-file
+          // set.
+          if (args.files !== undefined) {
+            params.files = args.files;
+          } else if (args.filePath !== undefined) {
+            params.files = [args.filePath];
+          }
+        } else {
+          // undo / history / restore / list all take `file` as-is.
+          if (args.filePath !== undefined) params.file = args.filePath;
+          if (args.files !== undefined) params.files = args.files;
+        }
         const response = await callBridge(ctx, context, commandMap[op], params);
         if (response.success === false) {
           throw new Error((response.message as string) || `${op} failed`);
