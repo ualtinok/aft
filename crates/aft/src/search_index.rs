@@ -1281,36 +1281,78 @@ pub(crate) fn relative_to_root(root: &Path, path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Sort paths newest-first by mtime, falling back to lexicographic order.
+///
+/// Pre-v0.15.2 this called `path_modified_time(...)` directly inside the
+/// `sort_by()` closure. That made the comparator non-deterministic — a
+/// `stat()` syscall for the same path can return different values across
+/// invocations (file edited mid-sort, file deleted, OS clock adjustments,
+/// concurrent file-watcher activity), and Rust's slice::sort panics at
+/// runtime when it detects a non-total-order comparator. CI hit this on
+/// a Pi e2e test where the bridge invalidated files in parallel with grep.
+///
+/// Fix: snapshot mtimes ONCE into a HashMap before sorting, then look up
+/// from the map inside the closure. Pure function ⇒ guaranteed total order.
 pub(crate) fn sort_paths_by_mtime_desc(paths: &mut [PathBuf]) {
+    use std::collections::HashMap;
+    let mut mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::with_capacity(paths.len());
+    for path in paths.iter() {
+        mtimes
+            .entry(path.clone())
+            .or_insert_with(|| path_modified_time(path));
+    }
     paths.sort_by(|left, right| {
-        path_modified_time(right)
-            .cmp(&path_modified_time(left))
-            .then_with(|| left.cmp(right))
+        let left_mtime = mtimes.get(left).and_then(|v| *v);
+        let right_mtime = mtimes.get(right).and_then(|v| *v);
+        right_mtime.cmp(&left_mtime).then_with(|| left.cmp(right))
     });
 }
 
+/// See `sort_paths_by_mtime_desc` for why mtimes are snapshotted ahead of
+/// the sort. Same fix, applied to grep matches that share files.
 pub(crate) fn sort_grep_matches_by_mtime_desc(matches: &mut [GrepMatch], project_root: &Path) {
+    use std::collections::HashMap;
+    let mut mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
+    for m in matches.iter() {
+        mtimes.entry(m.file.clone()).or_insert_with(|| {
+            let resolved = resolve_match_path(project_root, &m.file);
+            path_modified_time(&resolved)
+        });
+    }
     matches.sort_by(|left, right| {
-        let left_path = resolve_match_path(project_root, &left.file);
-        let right_path = resolve_match_path(project_root, &right.file);
-
-        path_modified_time(&right_path)
-            .cmp(&path_modified_time(&left_path))
+        let left_mtime = mtimes.get(&left.file).and_then(|v| *v);
+        let right_mtime = mtimes.get(&right.file).and_then(|v| *v);
+        right_mtime
+            .cmp(&left_mtime)
             .then_with(|| left.file.cmp(&right.file))
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.column.cmp(&right.column))
     });
 }
 
+/// See `sort_paths_by_mtime_desc` for why mtimes are snapshotted ahead of
+/// the sort. The cached lookup function `modified_for_path` is fast (in-memory
+/// table from the search index), but it can still return different values if
+/// the file is modified mid-sort. Snapshot once.
 fn sort_shared_grep_matches_by_cached_mtime_desc<F>(
     matches: &mut [SharedGrepMatch],
     modified_for_path: F,
 ) where
     F: Fn(&Path) -> Option<SystemTime>,
 {
+    use std::collections::HashMap;
+    let mut mtimes: HashMap<PathBuf, Option<SystemTime>> = HashMap::with_capacity(matches.len());
+    for m in matches.iter() {
+        let path = m.file.as_path().to_path_buf();
+        mtimes
+            .entry(path.clone())
+            .or_insert_with(|| modified_for_path(&path));
+    }
     matches.sort_by(|left, right| {
-        modified_for_path(right.file.as_path())
-            .cmp(&modified_for_path(left.file.as_path()))
+        let left_mtime = mtimes.get(left.file.as_path()).and_then(|v| *v);
+        let right_mtime = mtimes.get(right.file.as_path()).and_then(|v| *v);
+        right_mtime
+            .cmp(&left_mtime)
             .then_with(|| left.file.as_path().cmp(right.file.as_path()))
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.column.cmp(&right.column))
@@ -2084,5 +2126,78 @@ mod tests {
         fs::write(cache_dir.join("lookup.bin"), lookup).expect("write lookup");
 
         assert!(SearchIndex::read_from_disk(&cache_dir).is_none());
+    }
+
+    /// Regression: v0.15.2 — sort_paths_by_mtime_desc panicked when files
+    /// changed between cmp() calls.
+    ///
+    /// Pre-fix, the sort closure called `path_modified_time(path)` directly,
+    /// which does a `stat()` syscall. If the file was deleted, modified, or
+    /// touched mid-sort, the comparator returned different values for the
+    /// same input pair on different invocations. Rust's slice::sort detects
+    /// this and panics with "user-provided comparison function does not
+    /// correctly implement a total order".
+    ///
+    /// CI hit this on a Pi e2e test (workflow run 24887807972) where the
+    /// bridge invalidated files in parallel with grep's sort path. This
+    /// test simulates the worst case: most paths don't exist (Err from
+    /// fs::metadata) and sort still completes successfully.
+    #[test]
+    fn sort_paths_by_mtime_desc_does_not_panic_on_missing_files() {
+        // Mix of existing and non-existing paths in deliberately
+        // non-monotonic order — pre-fix, the sort would call stat() at
+        // least N log N times and any flakiness would trigger the panic.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for i in 0..30 {
+            // Half exist, half don't.
+            let path = if i % 2 == 0 {
+                let p = dir.path().join(format!("real-{i}.rs"));
+                fs::write(&p, format!("// {i}\n")).expect("write");
+                p
+            } else {
+                dir.path().join(format!("missing-{i}.rs"))
+            };
+            paths.push(path);
+        }
+
+        // Run the sort many times to maximise the chance of catching any
+        // residual non-determinism. Pre-fix: panic. Post-fix: stable.
+        for _ in 0..50 {
+            let mut copy = paths.clone();
+            sort_paths_by_mtime_desc(&mut copy);
+            assert_eq!(copy.len(), paths.len());
+        }
+    }
+
+    /// Regression: v0.15.2 — sort_grep_matches_by_mtime_desc panicked under
+    /// the same conditions as sort_paths_by_mtime_desc. See the
+    /// sort_paths_... test above for the full rationale.
+    #[test]
+    fn sort_grep_matches_by_mtime_desc_does_not_panic_on_missing_files() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut matches: Vec<GrepMatch> = Vec::new();
+        for i in 0..30 {
+            let file = if i % 2 == 0 {
+                let p = dir.path().join(format!("real-{i}.rs"));
+                fs::write(&p, format!("// {i}\n")).expect("write");
+                p
+            } else {
+                dir.path().join(format!("missing-{i}.rs"))
+            };
+            matches.push(GrepMatch {
+                file,
+                line: u32::try_from(i).unwrap_or(0),
+                column: 0,
+                line_text: format!("match {i}"),
+                match_text: format!("match {i}"),
+            });
+        }
+
+        for _ in 0..50 {
+            let mut copy = matches.clone();
+            sort_grep_matches_by_mtime_desc(&mut copy, dir.path());
+            assert_eq!(copy.len(), matches.len());
+        }
     }
 }

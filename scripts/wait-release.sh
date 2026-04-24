@@ -1,17 +1,64 @@
 #!/usr/bin/env bash
 # Wait for the GitHub Actions release workflow to complete for a given tag.
-# Usage: ./scripts/wait-release.sh v0.7.5
-# Polls every 5 seconds, exits 0 on success, 1 on failure.
+# Usage: ./scripts/wait-release.sh v0.7.5 [--max-wait <seconds>]
+# Polls every 5 seconds, exits 0 on success, 1 on failure, 2 on timeout.
+#
+# Notes for callers wrapping this in another tool (e.g. AI agent bash):
+#   - Output uses plain newlines (no `\r` carriage-return tricks) so that
+#     line-buffered pipes flush every status update. The wrapper sees the
+#     script terminate immediately when the workflow reaches a terminal
+#     state — no bash-tool-timeout waiting required.
+#   - Default max-wait is 15 minutes (900s). Override with --max-wait or
+#     set MAX_WAIT_SECONDS env var. The script still exits early on any
+#     terminal state regardless of timeout.
 
 set -euo pipefail
 
-TAG="${1:?Usage: wait-release.sh <tag>}"
+TAG=""
+MAX_WAIT="${MAX_WAIT_SECONDS:-900}"
 REPO="cortexkit/aft"
 INTERVAL=5
 
-echo "⏳ Waiting for release workflow on ${TAG}..."
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max-wait)
+      MAX_WAIT="$2"
+      shift 2
+      ;;
+    -*)
+      echo "Unknown flag: $1" >&2
+      exit 64
+      ;;
+    *)
+      if [[ -z "$TAG" ]]; then
+        TAG="$1"
+      else
+        echo "Unexpected positional argument: $1" >&2
+        exit 64
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TAG" ]]; then
+  echo "Usage: wait-release.sh <tag> [--max-wait <seconds>]" >&2
+  exit 64
+fi
+
+echo "⏳ Waiting for release workflow on ${TAG} (max ${MAX_WAIT}s)..."
+
+START_TIME=$(date +%s)
 
 while true; do
+  NOW=$(date +%s)
+  ELAPSED=$((NOW - START_TIME))
+  if (( ELAPSED >= MAX_WAIT )); then
+    echo "⏱  Timed out after ${ELAPSED}s waiting for workflow to complete."
+    echo "   Check: https://github.com/${REPO}/actions"
+    exit 2
+  fi
+
   # Get the latest run for the release workflow triggered by this tag
   RUN_JSON=$(gh run list --repo "$REPO" --workflow release.yml --branch "$TAG" --limit 1 --json status,conclusion,databaseId 2>/dev/null || echo "[]")
 
@@ -20,25 +67,23 @@ while true; do
   RUN_ID=$(echo "$RUN_JSON" | jq -r '.[0].databaseId // ""')
 
   if [ "$STATUS" = "not_found" ]; then
-    printf "\r  Workflow not started yet..."
+    echo "  [+${ELAPSED}s] Workflow not started yet..."
     sleep "$INTERVAL"
     continue
   fi
 
   if [ "$STATUS" = "completed" ]; then
     if [ "$CONCLUSION" = "success" ]; then
-      echo ""
-      echo "✅ Release workflow succeeded (run $RUN_ID)"
-      echo "   https://github.com/$REPO/actions/runs/$RUN_ID"
+      echo "✅ Release workflow succeeded (run ${RUN_ID})"
+      echo "   https://github.com/${REPO}/actions/runs/${RUN_ID}"
       exit 0
     else
-      echo ""
-      echo "❌ Release workflow failed: conclusion=$CONCLUSION (run $RUN_ID)"
-      echo "   https://github.com/$REPO/actions/runs/$RUN_ID"
+      echo "❌ Release workflow failed: conclusion=${CONCLUSION} (run ${RUN_ID})"
+      echo "   https://github.com/${REPO}/actions/runs/${RUN_ID}"
       exit 1
     fi
   fi
 
-  printf "\r  Status: %-12s (run $RUN_ID)" "$STATUS"
+  echo "  [+${ELAPSED}s] Status: ${STATUS} (run ${RUN_ID})"
   sleep "$INTERVAL"
 done

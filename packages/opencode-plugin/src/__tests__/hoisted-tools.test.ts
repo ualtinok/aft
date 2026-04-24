@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
+import { consumeToolMetadata } from "../metadata-store.js";
 import type { BridgePool } from "../pool.js";
 import { hoistedTools } from "../tools/hoisted.js";
 import type { PluginContext } from "../types.js";
@@ -380,5 +381,100 @@ describe("Hoisted tool execute handlers", () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]?.params.file).toBe(resolve(tmpDir, "created.ts"));
     expect(calls[1]?.params.file).toBe(resolve(tmpDir, "created.ts"));
+  });
+
+  /// Regression: v0.15.3 — apply_patch metadata.files entries must include
+  /// `patch`, `additions`, and `deletions` for OpenCode's UI to render diffs.
+  ///
+  /// OpenCode's UI patchFile() at packages/ui/src/components/apply-patch-file.ts
+  /// drops any file metadata entry that lacks all of `patch`, `before`, `after`.
+  /// Pre-fix, AFT only sent `{ filePath, relativePath, type }`, so EVERY file
+  /// was silently dropped and the TUI/desktop showed no diffs at all.
+  test("apply_patch stores per-file diff metadata for the OpenCode renderer", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+    // Inject callID — required for storeToolMetadata to fire (the production
+    // ToolContext supplies it; our mock omits it by default).
+    (sdkCtx as unknown as { callID: string }).callID = "call_apply_patch_meta";
+
+    const updatedFile = resolve(tmpDir, "updated.ts");
+    const deletedFile = resolve(tmpDir, "deleted.ts");
+
+    // Seed source files for the update + delete hunks (apply_patch reads
+    // them via fs.readFile to compute per-file diffs).
+    await writeFile(updatedFile, "old line\n");
+    await writeFile(deletedFile, "to be deleted\n");
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Add File: new.ts",
+      "+export const created = 1;",
+      "*** Update File: updated.ts",
+      "@@",
+      "-old line",
+      "+new line",
+      "*** Delete File: deleted.ts",
+      "*** End Patch",
+    ].join("\n");
+
+    const { tools } = createMockHoistedHarness(async (command) => {
+      if (command === "checkpoint") return { success: true };
+      if (command === "write") return { success: true };
+      if (command === "delete_file") return { success: true };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    await tools.apply_patch.execute({ patchText }, sdkCtx);
+
+    const stored = consumeToolMetadata("test", "call_apply_patch_meta");
+    expect(stored).toBeDefined();
+    expect(stored?.title).toContain("Success. Updated the following files:");
+    expect(stored?.title).toContain("A new.ts");
+    expect(stored?.title).toContain("M updated.ts");
+    expect(stored?.title).toContain("D deleted.ts");
+
+    const meta = stored?.metadata as {
+      diff: string;
+      files: Array<{
+        filePath: string;
+        relativePath: string;
+        type: string;
+        patch: string;
+        additions: number;
+        deletions: number;
+        movePath?: string;
+      }>;
+    };
+
+    expect(meta.diff).toBeTypeOf("string");
+    expect(meta.files).toHaveLength(3);
+
+    // Each file MUST carry patch + additions + deletions or the OpenCode UI
+    // will silently drop it (the v0.15.3 regression). This assertion
+    // catches any future change that strips these fields.
+    for (const file of meta.files) {
+      expect(file.filePath).toBeTypeOf("string");
+      expect(file.relativePath).toBeTypeOf("string");
+      expect(["add", "update", "delete", "move"]).toContain(file.type);
+      expect(file.patch).toBeTypeOf("string");
+      expect(file.patch.length).toBeGreaterThan(0);
+      expect(file.additions).toBeTypeOf("number");
+      expect(file.deletions).toBeTypeOf("number");
+    }
+
+    // Sanity-check shape of each per-file entry. We don't assert exact
+    // additions/deletions counts because buildUnifiedDiff treats absent
+    // content as an empty line ("") which shows up in the diff — the
+    // important contract is that `patch` and the counters are present
+    // and non-degenerate, which the per-entry loop above already checks.
+    const addEntry = meta.files.find((f) => f.type === "add");
+    expect(addEntry?.additions).toBeGreaterThan(0);
+
+    const updateEntry = meta.files.find((f) => f.type === "update");
+    expect(updateEntry?.additions).toBeGreaterThan(0);
+    expect(updateEntry?.deletions).toBeGreaterThan(0);
+
+    const deleteEntry = meta.files.find((f) => f.type === "delete");
+    expect(deleteEntry?.deletions).toBeGreaterThan(0);
   });
 });

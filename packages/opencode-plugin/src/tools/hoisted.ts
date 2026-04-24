@@ -790,13 +790,64 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       // Store metadata for tool.execute.after hook (match opencode built-in format)
       const callID = getCallID(context);
       if (callID) {
-        // Build per-file metadata matching opencode's files array
+        // Index per-file diffs by absolute filePath for fast lookup when
+        // building the metadata.files array. Each entry NEEDS to carry the
+        // per-file `patch` string plus `additions`/`deletions` counts —
+        // OpenCode's UI patchFile() at packages/ui/src/components/apply-patch-file.ts
+        // returns undefined for any file metadata that lacks all of `patch`,
+        // `before`, and `after`. Without this enrichment, the UI silently
+        // dropped every file entry and rendered no diffs (v0.15.2 fix for
+        // the "apply_patch shows no diff in TUI/UI" report).
+        const diffByPath = new Map(perFileDiffs.map((d) => [d.filePath, d]));
+
+        const countAddDel = (patch: string): { additions: number; deletions: number } => {
+          let additions = 0;
+          let deletions = 0;
+          for (const line of patch.split("\n")) {
+            // Skip diff metadata lines (---, +++) so they aren't counted as
+            // file additions/deletions. The metadata header for unified
+            // diffs starts with `--- ` / `+++ ` followed by a path.
+            if (line.startsWith("---") || line.startsWith("+++")) continue;
+            if (line.startsWith("+")) additions++;
+            else if (line.startsWith("-")) deletions++;
+          }
+          return { additions, deletions };
+        };
+
+        // Build per-file metadata. OpenCode's apply_patch shape (see
+        // packages/opencode/src/tool/apply_patch.ts:188) per file:
+        //   { filePath, relativePath, type, patch, additions, deletions, movePath? }
+        // `type` is normalised to "move" when an update hunk has a move target,
+        // so the UI can label the row correctly.
         const files = hunks.map((h) => {
-          const relPath = path.relative(context.worktree, path.resolve(context.directory, h.path));
+          const filePath = path.resolve(context.directory, h.path);
+          // `move_path` only exists on UpdateHunk variants — narrow first.
+          const rawMovePath = h.type === "update" ? h.move_path : undefined;
+          const movePath = rawMovePath ? path.resolve(context.directory, rawMovePath) : undefined;
+          // For moved files, render the destination path as the visible
+          // location (matches OpenCode's apply_patch behaviour).
+          const displayPath = movePath ?? filePath;
+          const relPath = path.relative(context.worktree, displayPath);
+
+          const diffEntry = diffByPath.get(filePath);
+          const patch = diffEntry
+            ? buildUnifiedDiff(displayPath, diffEntry.before, diffEntry.after)
+            : "";
+          const { additions, deletions } = countAddDel(patch);
+
+          // Normalise type for UI: an "update" hunk with a move target is a
+          // move, otherwise keep the parsed type as-is.
+          const uiType: "add" | "update" | "delete" | "move" =
+            h.type === "update" && rawMovePath ? "move" : h.type;
+
           return {
-            filePath: path.resolve(context.directory, h.path),
+            filePath,
             relativePath: relPath,
-            type: h.type,
+            type: uiType,
+            patch,
+            additions,
+            deletions,
+            ...(movePath ? { movePath } : {}),
           };
         });
 
@@ -809,9 +860,11 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
           .join("\n");
         const title = `Success. Updated the following files:\n${fileList}`;
 
-        // Build per-file diffs instead of concatenating content across files
-        const diffText = perFileDiffs
-          .map((d) => buildUnifiedDiff(d.filePath, d.before, d.after))
+        // Aggregate unified diff for the top-level metadata.diff field
+        // (OpenCode's renderer also uses this for some views).
+        const diffText = files
+          .map((f) => f.patch)
+          .filter(Boolean)
           .join("\n");
 
         storeToolMetadata(context.sessionID, callID, {
