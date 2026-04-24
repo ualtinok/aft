@@ -190,13 +190,32 @@ fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
     // 2. Fall back to PATH lookup
     match Command::new(command)
         .arg("--version")
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
-            let _ = child.wait();
-            Some(command.to_string())
+            let start = Instant::now();
+            let timeout = Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        return if status.success() {
+                            Some(command.to_string())
+                        } else {
+                            None
+                        };
+                    }
+                    Ok(None) if start.elapsed() > timeout => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(50)),
+                    Err(_) => return None,
+                }
+            }
         }
         Err(_) => None,
     }
@@ -1102,7 +1121,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     // Type checkers may need to run from the project root
-    let working_dir = path.parent();
+    let working_dir = config.project_root.as_deref();
 
     match run_external_tool_capture(
         &cmd,

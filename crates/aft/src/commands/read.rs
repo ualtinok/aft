@@ -14,6 +14,7 @@ const DEFAULT_LIMIT: u32 = 2000;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_BYTES: usize = 50 * 1024; // 50KB output cap
 const MAX_FILE_READ_BYTES: u64 = 50 * 1024 * 1024; // 50MB input guard
+const MAX_DIRECTORY_ENTRIES: usize = 1000;
 
 /// Check if file content is binary using the content_inspector crate.
 /// Detects null bytes, UTF-16 BOMs, and other binary indicators.
@@ -154,7 +155,12 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
         .get("end_line")
         .and_then(|v| v.as_u64())
         .map(|v| v as u32)
-        .unwrap_or_else(|| (start_line + limit - 1).min(total_lines));
+        .unwrap_or_else(|| {
+            start_line
+                .saturating_add(limit)
+                .saturating_sub(1)
+                .min(total_lines)
+        });
 
     // Clamp to actual line count. `.max(start_idx)` guards against agents
     // sending inverted ranges (e.g. end_line < start_line) which would
@@ -268,6 +274,13 @@ fn handle_directory(req: &RawRequest, path: &Path) -> Response {
     entries.sort();
 
     let total = entries.len();
+    if total > MAX_DIRECTORY_ENTRIES {
+        entries.truncate(MAX_DIRECTORY_ENTRIES);
+        entries.push(format!(
+            "\n... and {} more entries (truncated, showing first 1000)",
+            total - MAX_DIRECTORY_ENTRIES
+        ));
+    }
     Response::success(
         &req.id,
         serde_json::json!({

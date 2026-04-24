@@ -715,7 +715,14 @@ impl BackupStore {
 }
 
 fn canonicalize_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).unwrap_or_else(|err| {
+        log::debug!(
+            "backup canonicalize_key fallback for {}: {}",
+            path.display(),
+            err
+        );
+        path.to_path_buf()
+    })
 }
 
 fn current_timestamp() -> u64 {

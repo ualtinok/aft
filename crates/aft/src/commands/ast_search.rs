@@ -84,6 +84,19 @@ pub fn handle_ast_search(req: &RawRequest, ctx: &AppContext) -> Response {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
 
+    // Validate the pattern before searching. ast-grep-core can panic (via unwrap) on
+    // patterns that parse to multiple AST nodes (e.g. bare `catch` or `finally`
+    // clauses). Release builds use panic="unwind", so catch_unwind is effective,
+    // but returning an explicit pattern error gives callers a better signal.
+    use ast_grep_core::matcher::Pattern as AstPattern;
+    if let Err(err) = AstPattern::try_new(&pattern, lang.clone()) {
+        return Response::error(
+            &req.id,
+            "invalid_pattern",
+            format!("invalid AST pattern: {}", err),
+        );
+    }
+
     let config = ctx.config();
     let project_root = config
         .project_root
@@ -156,8 +169,7 @@ fn search_file(
     let file_str = file_path.display().to_string();
 
     // Validate the pattern before searching. ast-grep-core panics (via unwrap) on patterns
-    // that parse to multiple AST nodes (e.g. bare `catch` or `finally` clauses), and the
-    // release binary uses panic="abort", so catch_unwind cannot save us.
+    // that parse to multiple AST nodes (e.g. bare `catch` or `finally` clauses).
     use ast_grep_core::matcher::Pattern as AstPattern;
     if AstPattern::try_new(pattern, lang.clone()).is_err() {
         return Vec::new();

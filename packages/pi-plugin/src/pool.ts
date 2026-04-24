@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { BinaryBridge, type BridgeOptions } from "./bridge.js";
 import { error, log } from "./logger.js";
 
@@ -55,7 +56,7 @@ export class BridgePool {
 
   /** Get any existing alive bridge, preferring the given directory. */
   getAnyActiveBridge(directory: string): BinaryBridge | null {
-    const key = normalizeKey(directory);
+    const key = canonicalKey(directory);
     const match = this.bridges.get(key);
     if (match?.bridge.isAlive()) {
       match.lastUsed = Date.now();
@@ -72,7 +73,7 @@ export class BridgePool {
 
   /** Get or create a bridge for the given directory. */
   getBridge(directory: string): BinaryBridge {
-    const key = normalizeKey(directory);
+    const key = canonicalKey(directory);
     const existing = this.bridges.get(key);
     if (existing) {
       existing.lastUsed = Date.now();
@@ -137,7 +138,12 @@ export class BridgePool {
   }
 }
 
-/** Strip trailing path separators so `/repo` and `/repo/` collapse to one key. */
-function normalizeKey(directory: string): string {
-  return directory.replace(/[/\\]+$/, "");
+/** Canonicalize bridge keys so symlinked paths and trailing separators collapse to one key. */
+function canonicalKey(directory: string): string {
+  const stripped = directory.replace(/[/\\]+$/, "");
+  try {
+    return realpathSync(stripped);
+  } catch {
+    return stripped;
+  }
 }

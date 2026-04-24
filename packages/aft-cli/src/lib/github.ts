@@ -28,6 +28,13 @@ export function openBrowser(url: string): void {
 /**
  * Create a GitHub issue via `gh issue create`. Returns the issue URL on
  * success or null on failure.
+ *
+ * Uses spawnSync with argv array instead of execSync with a shell string —
+ * avoids shell metacharacter injection when `title` or `repo` contain
+ * backticks, `$(...)`, or `;`. Even though `JSON.stringify` quotes the title,
+ * the outer command runs through a shell which reinterprets backticks inside
+ * double-quoted strings. spawnSync with shell: false (default) passes argv
+ * directly to execve without any shell involvement.
  */
 export function createGitHubIssue(
   repo: string,
@@ -37,18 +44,21 @@ export function createGitHubIssue(
   if (!isGhInstalled()) {
     return { url: null, stderr: "gh CLI not installed" };
   }
-  try {
-    const result = execSync(
-      `gh issue create --repo ${repo} --title ${JSON.stringify(title)} --body-file -`,
-      {
-        input: body,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
-    const url = result.trim().split(/\r?\n/).pop();
-    return { url: url || null };
-  } catch (error) {
-    return { url: null, stderr: error instanceof Error ? error.message : String(error) };
+  const result = spawnSync(
+    "gh",
+    ["issue", "create", "--repo", repo, "--title", title, "--body-file", "-"],
+    {
+      input: body,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  if (result.error) {
+    return { url: null, stderr: result.error.message };
   }
+  if (result.status !== 0) {
+    return { url: null, stderr: result.stderr?.trim() || `gh exited with status ${result.status}` };
+  }
+  const url = result.stdout.trim().split(/\r?\n/).pop();
+  return { url: url || null };
 }

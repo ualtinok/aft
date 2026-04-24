@@ -145,8 +145,13 @@ const plugin: Plugin = async (input) => {
     configOverrides.validate_on_edit = aftConfig.validate_on_edit;
   if (aftConfig.formatter !== undefined) configOverrides.formatter = aftConfig.formatter;
   if (aftConfig.checker !== undefined) configOverrides.checker = aftConfig.checker;
-  if (aftConfig.restrict_to_project_root !== undefined)
-    configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root;
+  // Default to restrict_to_project_root: true for plugin-hosted agents.
+  // The Rust CLI default is false (documented — for direct/scripted use), but
+  // when agents call `aft_outline`, `aft_read`, etc. through the plugin there
+  // is no interactive permission prompt for reads, so we must enforce the
+  // project-root boundary by default. Users can opt out by explicitly setting
+  // `restrict_to_project_root: false` in their aft.jsonc.
+  configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root ?? true;
   if (aftConfig.experimental_search_index !== undefined)
     configOverrides.experimental_search_index = aftConfig.experimental_search_index;
   if (aftConfig.experimental_semantic_search !== undefined)

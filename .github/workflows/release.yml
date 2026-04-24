@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   id-token: write
@@ -42,6 +46,9 @@ jobs:
 
       - name: Lint
         run: bun run lint
+
+      - name: Build all JS packages (gate publish)
+        run: bun run --filter '*' build
 
   publish-crates:
     name: Publish to crates.io
@@ -322,7 +329,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd release-assets
-          shasum -a 256 aft-* > checksums.sha256
+          sha256sum aft-* > checksums.sha256
           cat checksums.sha256
 
       - name: Create GitHub Release

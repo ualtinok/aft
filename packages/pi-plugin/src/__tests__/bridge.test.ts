@@ -11,7 +11,7 @@ import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_pr
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { BinaryBridge } from "../bridge.js";
+import { BinaryBridge, compareSemver } from "../bridge.js";
 
 const PROJECT_CWD = resolve(import.meta.dir, "../../../..");
 
@@ -103,5 +103,28 @@ describe("Pi BinaryBridge", () => {
       staleChild?.kill("SIGKILL");
       await rm(fakeBin).catch(() => {});
     }
+  });
+});
+
+describe("Pi compareSemver", () => {
+  test("orders semver pre-release identifiers per spec", () => {
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+    ];
+
+    for (let i = 0; i < ordered.length - 1; i++) {
+      expect(compareSemver(ordered[i], ordered[i + 1])).toBeLessThan(0);
+      expect(compareSemver(ordered[i + 1], ordered[i])).toBeGreaterThan(0);
+    }
+    expect(compareSemver("1.0.0-beta.1", "1.0.0")).toBeLessThan(0);
+    expect(compareSemver("1.2.0", "1.1.99-rc.1")).toBeGreaterThan(0);
+    expect(compareSemver("1.0.0-alpha.1", "1.0.0-alpha.1")).toBe(0);
   });
 });

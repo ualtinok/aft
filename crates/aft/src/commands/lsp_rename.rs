@@ -34,6 +34,12 @@ struct FileChange {
 
 /// Handle the `lsp_rename` command.
 /// Renames a symbol across the workspace via LSP, applying all changes atomically.
+///
+/// Params:
+///   - `file` (string, required) — source file path
+///   - `line` (integer, required, 1-based) — cursor line
+///   - `character` (integer, required, 1-based) — cursor column
+///   - `new_name` (string, required) — replacement symbol name
 pub fn handle_lsp_rename(req: &RawRequest, ctx: &AppContext) -> Response {
     let params = match serde_json::from_value::<LspRenameCommandParams>(req.params.clone()) {
         Ok(params) => params,

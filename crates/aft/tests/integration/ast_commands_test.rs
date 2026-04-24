@@ -332,6 +332,40 @@ fn ast_replace_rejects_invalid_partial_patterns_without_crashing() {
 }
 
 #[test]
+fn ast_search_rejects_invalid_partial_patterns_without_returning_empty_matches() {
+    let original = "try { doWork(); } catch (err) { console.error(err); }\n";
+    let project = setup_project(&[("sample.ts", original)]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "invalid-ast-search",
+            "command": "ast_search",
+            "pattern": "catch ($ERR) { $$$ }",
+            "lang": "typescript",
+        }),
+    );
+
+    assert_eq!(
+        resp["success"], false,
+        "invalid ast_search pattern should fail: {resp:?}"
+    );
+    assert_eq!(resp["code"], "invalid_pattern");
+    assert!(resp["message"]
+        .as_str()
+        .expect("message")
+        .contains("invalid AST pattern"));
+
+    let alive = aft.send(r#"{"id":"alive-after-ast-search","command":"ping"}"#);
+    assert_eq!(alive["success"], true);
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn ast_search_and_replace_report_empty_results_for_valid_patterns() {
     let original = "const value = compute();\n";
     let project = setup_project(&[("sample.ts", original)]);

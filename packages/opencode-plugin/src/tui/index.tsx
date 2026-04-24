@@ -5,6 +5,11 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui";
 import { AftRpcClient } from "../shared/rpc-client";
 import { coerceAftStatus, formatStatusDialogMessage } from "../shared/status";
 
+// The TUI talks to the server plugin via AftRpcClient. The client reads the
+// JSON port file written by AftRpcServer ({ port, token }) and includes that
+// per-server token on every RPC request; legacy integer port files are still
+// tolerated for already-running older server plugins.
+
 const STATUS_COMMAND = "aft-status";
 
 // RPC clients keyed by directory — one per project

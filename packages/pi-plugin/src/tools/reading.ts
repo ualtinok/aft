@@ -274,12 +274,15 @@ export function registerReadingTools(
         const bridge = bridgeFor(ctx, extCtx.cwd);
 
         // Multi-symbol: fire in parallel and JSON-stringify the array.
+        // Uses callBridge (not bridge.send directly) so each parallel request
+        // carries Pi's native session_id — otherwise multi-symbol zoom would
+        // bypass per-session undo/checkpoint scoping.
         if (Array.isArray(params.symbols) && params.symbols.length > 0) {
           const results = await Promise.all(
             params.symbols.map((sym) => {
               const req: Record<string, unknown> = { file: params.filePath, symbol: sym };
               if (params.contextLines !== undefined) req.context_lines = params.contextLines;
-              return bridge.send("zoom", req);
+              return callBridge(bridge, "zoom", req, extCtx);
             }),
           );
           return textResult(JSON.stringify(results, null, 2));

@@ -130,6 +130,8 @@ export function registerStructureTool(pi: ExtensionAPI, ctx: PluginContext): voi
       _onUpdate,
       extCtx,
     ) {
+      validateTransformParams(params);
+
       const bridge = bridgeFor(ctx, extCtx.cwd);
       // Rust dispatch accepts the op name directly (add_member, add_derive, etc.)
       const req: Record<string, unknown> = { file: params.filePath };
@@ -155,4 +157,44 @@ export function registerStructureTool(pi: ExtensionAPI, ctx: PluginContext): voi
       return renderTransformResult(result, context.args, theme, context);
     },
   });
+}
+
+function validateTransformParams(params: Static<typeof TransformParams>): void {
+  const op = params.op;
+
+  if (op === "add_member") {
+    if (typeof params.container !== "string") {
+      throw new Error("'container' is required for 'add_member' op");
+    }
+    if (typeof params.code !== "string") {
+      throw new Error("'code' is required for 'add_member' op");
+    }
+  }
+  if (
+    op === "add_derive" ||
+    op === "wrap_try_catch" ||
+    op === "add_decorator" ||
+    op === "add_struct_tags"
+  ) {
+    if (typeof params.target !== "string") {
+      throw new Error(`'target' is required for '${op}' op`);
+    }
+  }
+  if (op === "add_derive" && !Array.isArray(params.derives)) {
+    throw new Error("'derives' array is required for 'add_derive' op");
+  }
+  if (op === "add_decorator" && typeof params.decorator !== "string") {
+    throw new Error("'decorator' is required for 'add_decorator' op");
+  }
+  if (op === "add_struct_tags") {
+    if (typeof params.field !== "string") {
+      throw new Error("'field' is required for 'add_struct_tags' op");
+    }
+    if (typeof params.tag !== "string") {
+      throw new Error("'tag' is required for 'add_struct_tags' op");
+    }
+    if (typeof params.value !== "string") {
+      throw new Error("'value' is required for 'add_struct_tags' op");
+    }
+  }
 }

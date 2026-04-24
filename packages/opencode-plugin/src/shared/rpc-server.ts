@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
@@ -9,6 +10,7 @@ type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, un
 export class AftRpcServer {
   private server: Server | null = null;
   private port = 0;
+  private token: string | null = null;
   private handlers = new Map<string, RpcHandler>();
   private portFilePath: string;
 
@@ -38,6 +40,7 @@ export class AftRpcServer {
           return;
         }
         this.port = addr.port;
+        this.token = randomBytes(32).toString("hex");
         this.server = server;
 
         // Write port file atomically
@@ -45,7 +48,7 @@ export class AftRpcServer {
           const dir = dirname(this.portFilePath);
           mkdirSync(dir, { recursive: true });
           const tmpPath = `${this.portFilePath}.tmp`;
-          writeFileSync(tmpPath, String(this.port), "utf-8");
+          writeFileSync(tmpPath, JSON.stringify({ port: this.port, token: this.token }), "utf-8");
           renameSync(tmpPath, this.portFilePath);
           log(`RPC server listening on 127.0.0.1:${this.port}`);
         } catch (err) {
@@ -66,6 +69,7 @@ export class AftRpcServer {
       this.server.close();
       this.server = null;
     }
+    this.token = null;
     try {
       unlinkSync(this.portFilePath);
     } catch {
@@ -118,8 +122,16 @@ export class AftRpcServer {
         return;
       }
 
-      log(`RPC call: ${method} params=${JSON.stringify(params).slice(0, 200)}`);
-      handler(params)
+      if (params.token !== this.token) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Forbidden" }));
+        return;
+      }
+
+      const { token: _token, ...handlerParams } = params;
+
+      log(`RPC call: ${method} params=${JSON.stringify(handlerParams).slice(0, 200)}`);
+      handler(handlerParams)
         .then((result) => {
           log(`RPC result: ${method} => ${JSON.stringify(result).slice(0, 200)}`);
           res.writeHead(200, { "Content-Type": "application/json" });

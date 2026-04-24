@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::backup::BackupStore;
 use crate::error::AftError;
@@ -142,9 +142,7 @@ impl CheckpointStore {
         let checkpoint = self.get(session, name)?;
 
         for (path, content) in &checkpoint.file_contents {
-            std::fs::write(path, content).map_err(|_| AftError::FileNotFound {
-                path: path.display().to_string(),
-            })?;
+            write_restored_file(path, content)?;
         }
 
         log::info!("checkpoint restored: {}", name);
@@ -174,9 +172,7 @@ impl CheckpointStore {
                     .ok_or_else(|| AftError::FileNotFound {
                         path: path.display().to_string(),
                     })?;
-            std::fs::write(path, content).map_err(|_| AftError::FileNotFound {
-                path: path.display().to_string(),
-            })?;
+            write_restored_file(path, content)?;
         }
 
         log::info!("checkpoint restored: {}", name);
@@ -193,6 +189,18 @@ impl CheckpointStore {
     pub fn file_paths(&self, session: &str, name: &str) -> Result<Vec<PathBuf>, AftError> {
         let checkpoint = self.get(session, name)?;
         Ok(checkpoint.file_contents.keys().cloned().collect())
+    }
+
+    /// Delete a checkpoint from a session. Returns true when a checkpoint was removed.
+    pub fn delete(&mut self, session: &str, name: &str) -> bool {
+        let Some(session_checkpoints) = self.checkpoints.get_mut(session) else {
+            return false;
+        };
+        let removed = session_checkpoints.remove(name).is_some();
+        if session_checkpoints.is_empty() {
+            self.checkpoints.remove(session);
+        }
+        removed
     }
 
     /// List all checkpoints for this session with metadata.
@@ -236,6 +244,17 @@ impl CheckpointStore {
                 name: name.to_string(),
             })
     }
+}
+
+fn write_restored_file(path: &Path, content: &str) -> Result<(), AftError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| AftError::FileNotFound {
+            path: path.display().to_string(),
+        })?;
+    }
+    std::fs::write(path, content).map_err(|_| AftError::FileNotFound {
+        path: path.display().to_string(),
+    })
 }
 
 fn current_timestamp() -> u64 {
@@ -530,5 +549,32 @@ mod tests {
         fs::write(&path, "modified").unwrap();
         store.restore(DEFAULT_SESSION_ID, "from_tracked").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "tracked_content");
+    }
+
+    #[test]
+    fn restore_recreates_missing_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deeper").join("file.txt");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "original nested content").unwrap();
+
+        let backup_store = BackupStore::new();
+        let mut store = CheckpointStore::new();
+        store
+            .create(
+                DEFAULT_SESSION_ID,
+                "nested",
+                vec![path.clone()],
+                &backup_store,
+            )
+            .unwrap();
+
+        fs::remove_dir_all(dir.path().join("nested")).unwrap();
+
+        store.restore(DEFAULT_SESSION_ID, "nested").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "original nested content"
+        );
     }
 }

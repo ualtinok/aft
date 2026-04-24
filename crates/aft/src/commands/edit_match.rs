@@ -1,7 +1,7 @@
 //! Handler for the `edit_match` command: content-based string matching with
 //! disambiguation for multiple occurrences.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::context::AppContext;
 use crate::edit::{self, validate_syntax};
@@ -109,7 +109,7 @@ fn handle_glob_edit_match(
         format!("{}/{}", root.display(), pattern)
     };
 
-    let paths: Vec<std::path::PathBuf> = match glob::glob(&full_pattern) {
+    let mut paths: Vec<std::path::PathBuf> = match glob::glob(&full_pattern) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .filter(|p| p.is_file())
@@ -122,6 +122,7 @@ fn handle_glob_edit_match(
             );
         }
     };
+    paths.sort();
 
     if paths.is_empty() {
         return Response::error(
@@ -140,7 +141,8 @@ fn handle_glob_edit_match(
     // --- Phase 1: Bulk edit — backup + write all files (fast) ---
     struct PendingEdit {
         path: std::path::PathBuf,
-
+        file_str: String,
+        new_source: String,
         count: usize,
     }
     let mut pending: Vec<PendingEdit> = Vec::new();
@@ -183,45 +185,118 @@ fn handle_glob_edit_match(
             Err(resp) => return resp,
         };
 
-        if let Err(e) = edit::auto_backup(
-            ctx,
-            req.session(),
-            &validated_path,
-            &format!("glob_edit_match: {}", match_str),
-        ) {
-            return Response::error(&req.id, e.code(), e.to_string());
-        }
-
-        // Write immediately (fast — no formatting yet)
-        if let Err(e) = std::fs::write(&validated_path, &new_source) {
-            return Response::error(
-                &req.id,
-                "write_error",
-                format!("failed to write {}: {}", file_str, e),
-            );
-        }
-
         pending.push(PendingEdit {
             path: validated_path,
-
+            file_str,
+            new_source,
             count,
         });
         total_replacements += count;
         total_files += 1;
     }
 
+    if !dry_run && pending.is_empty() {
+        return Response::error(
+            &req.id,
+            "match_not_found",
+            format!(
+                "edit_match: '{}' not found in any files matching '{}'",
+                match_str, pattern
+            ),
+        );
+    }
+
+    let checkpoint_name = if dry_run {
+        None
+    } else {
+        let name = unique_glob_checkpoint_name();
+        let files = pending
+            .iter()
+            .map(|edit| edit.path.clone())
+            .collect::<Vec<_>>();
+        let checkpoint_result = {
+            let backup = ctx.backup().borrow();
+            ctx.checkpoint()
+                .borrow_mut()
+                .create(req.session(), &name, files, &backup)
+        };
+        if let Err(e) = checkpoint_result {
+            return Response::error(&req.id, e.code(), e.to_string());
+        }
+        Some(name)
+    };
+
+    if !dry_run {
+        let mut written_paths: Vec<PathBuf> = Vec::new();
+
+        for edit in &pending {
+            if let Err(e) = edit::auto_backup(
+                ctx,
+                req.session(),
+                &edit.path,
+                &format!("glob_edit_match: {}", match_str),
+            ) {
+                if let Some(name) = &checkpoint_name {
+                    delete_glob_checkpoint(ctx, req.session(), name);
+                }
+                return Response::error(&req.id, e.code(), e.to_string());
+            }
+        }
+
+        // Write all changed files under a checkpoint-backed transaction. If any
+        // write fails, restore files already written so callers never observe a
+        // partially-applied glob edit.
+        for edit in &pending {
+            if let Err(e) = std::fs::write(&edit.path, &edit.new_source) {
+                if let Some(name) = &checkpoint_name {
+                    restore_glob_checkpoint(ctx, req.session(), name, &written_paths);
+                    delete_glob_checkpoint(ctx, req.session(), name);
+                }
+                return Response::error(
+                    &req.id,
+                    "write_error",
+                    format!("failed to write {}: {}", edit.file_str, e),
+                );
+            }
+            written_paths.push(edit.path.clone());
+        }
+    }
+
     // --- Phase 2: Format all changed files (after all writes are done) ---
     for edit in &pending {
         let file_str = edit.path.display().to_string();
         let formatted = if !dry_run {
-            matches!(edit::write_format_only(&edit.path, &config), Ok(true))
+            match edit::write_format_only(&edit.path, &config) {
+                Ok(formatted) => formatted,
+                Err(e) => {
+                    if let Some(name) = &checkpoint_name {
+                        let paths = pending
+                            .iter()
+                            .map(|edit| edit.path.clone())
+                            .collect::<Vec<_>>();
+                        restore_glob_checkpoint(ctx, req.session(), name, &paths);
+                        delete_glob_checkpoint(ctx, req.session(), name);
+                    }
+                    return Response::error(&req.id, e.code(), e.to_string());
+                }
+            }
         } else {
             false
         };
         let syntax_valid = if !dry_run {
             match validate_syntax(&edit.path) {
                 Ok(valid) => valid,
-                Err(e) => return Response::error(&req.id, e.code(), e.to_string()),
+                Err(e) => {
+                    if let Some(name) = &checkpoint_name {
+                        let paths = pending
+                            .iter()
+                            .map(|edit| edit.path.clone())
+                            .collect::<Vec<_>>();
+                        restore_glob_checkpoint(ctx, req.session(), name, &paths);
+                        delete_glob_checkpoint(ctx, req.session(), name);
+                    }
+                    return Response::error(&req.id, e.code(), e.to_string());
+                }
             }
         } else {
             None
@@ -262,15 +337,8 @@ fn handle_glob_edit_match(
         );
     }
 
-    if file_results.is_empty() {
-        return Response::error(
-            &req.id,
-            "match_not_found",
-            format!(
-                "edit_match: '{}' not found in any files matching '{}'",
-                match_str, pattern
-            ),
-        );
+    if let Some(name) = &checkpoint_name {
+        delete_glob_checkpoint(ctx, req.session(), name);
     }
 
     log::debug!(
@@ -288,6 +356,35 @@ fn handle_glob_edit_match(
             "total_files": total_files,
         }),
     )
+}
+
+fn unique_glob_checkpoint_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("__edit_match_glob_{}__", nanos)
+}
+
+fn restore_glob_checkpoint(ctx: &AppContext, session: &str, name: &str, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Err(e) = ctx
+        .checkpoint()
+        .borrow()
+        .restore_validated(session, name, paths)
+    {
+        log::warn!(
+            "[aft] edit_match glob rollback: failed to restore checkpoint {}: {}",
+            name,
+            e
+        );
+    }
+}
+
+fn delete_glob_checkpoint(ctx: &AppContext, session: &str, name: &str) {
+    ctx.checkpoint().borrow_mut().delete(session, name);
 }
 
 fn validate_glob_edit_path(

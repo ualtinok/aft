@@ -178,9 +178,13 @@ pub fn handle_git_conflicts(ctx: &AppContext, req: &RawRequest) -> Response {
 
     for file_path in &files {
         let full_path = project_root.join(file_path);
+        let validated_path = match ctx.validate_path(&req.id, &full_path) {
+            Ok(path) => path,
+            Err(resp) => return resp,
+        };
 
         // Read file content
-        let content = match std::fs::read_to_string(&full_path) {
+        let content = match std::fs::read_to_string(&validated_path) {
             Ok(c) => c,
             Err(e) => {
                 output.push_str(&format!("── {} [error: {}] ──\n\n", file_path, e));

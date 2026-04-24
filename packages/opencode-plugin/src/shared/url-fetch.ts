@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import {
   existsSync,
   mkdirSync,
@@ -7,6 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import { log, warn } from "../logger";
 
@@ -16,6 +18,11 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Fetch timeout: 30 seconds */
 const FETCH_TIMEOUT_MS = 30_000;
+const MAX_REDIRECTS = 5;
+
+interface FetchUrlOptions {
+  allowPrivate?: boolean;
+}
 
 interface CacheMeta {
   url: string;
@@ -38,6 +45,198 @@ function metaPath(storageDir: string, hash: string): string {
 
 function contentPath(storageDir: string, hash: string, extension: string): string {
   return join(cacheDir(storageDir), `${hash}${extension}`);
+}
+
+/** Exported for unit tests. */
+export function _isPrivateIpv4(address: string): boolean {
+  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
+  const [a, b] = parts;
+  return (
+    a === 0 || // 0.0.0.0/8 — wildcard, blocked to prevent local-host bypass
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    a >= 224 // multicast (224/4) and reserved (240/4)
+  );
+}
+
+/**
+ * Expand a possibly-compressed IPv6 address to 8 hextets (numbers).
+ * Returns null on parse failure.
+ */
+function expandIpv6(addr: string): number[] | null {
+  if (addr === "::") return [0, 0, 0, 0, 0, 0, 0, 0];
+  // Reject more than one "::"
+  const dcMatches = addr.match(/::/g);
+  if (dcMatches && dcMatches.length > 1) return null;
+
+  // Handle dotted-quad tail by converting to two hextets.
+  let normalized = addr;
+  const lastColon = normalized.lastIndexOf(":");
+  if (lastColon !== -1) {
+    const tail = normalized.slice(lastColon + 1);
+    if (tail.includes(".")) {
+      const octets = tail.split(".").map((p) => Number.parseInt(p, 10));
+      if (octets.length !== 4 || octets.some((o) => Number.isNaN(o) || o < 0 || o > 255)) {
+        return null;
+      }
+      const h1 = ((octets[0] << 8) | octets[1]).toString(16);
+      const h2 = ((octets[2] << 8) | octets[3]).toString(16);
+      normalized = `${normalized.slice(0, lastColon)}:${h1}:${h2}`;
+    }
+  }
+
+  let parts: string[];
+  if (normalized.includes("::")) {
+    const [left, right] = normalized.split("::");
+    const leftParts = left ? left.split(":") : [];
+    const rightParts = right ? right.split(":") : [];
+    const fill = 8 - leftParts.length - rightParts.length;
+    if (fill < 0) return null;
+    parts = [...leftParts, ...Array(fill).fill("0"), ...rightParts];
+  } else {
+    parts = normalized.split(":");
+  }
+
+  if (parts.length !== 8) return null;
+  const hextets = parts.map((p) => {
+    const n = Number.parseInt(p, 16);
+    return Number.isNaN(n) || n < 0 || n > 0xffff ? -1 : n;
+  });
+  if (hextets.some((h) => h === -1)) return null;
+  return hextets;
+}
+
+function isPrivateIp(address: string): boolean {
+  if (!address.includes(":")) {
+    return _isPrivateIpv4(address);
+  }
+
+  const lower = address.toLowerCase();
+  // Strip optional zone identifier (fe80::1%eth0 → fe80::1).
+  const noZone = lower.split("%")[0];
+
+  // Expand to 8 hextets so we can reliably detect IPv4-mapped/compatible
+  // forms even after URL canonicalization (e.g. [::ffff:127.0.0.1] →
+  // [::ffff:7f00:1]).
+  const hextets = expandIpv6(noZone);
+  if (hextets) {
+    // IPv4-mapped (::ffff:X.X.X.X) and IPv4-compatible (::X.X.X.X) — extract
+    // the embedded IPv4 from the last two hextets and check against IPv4 ranges.
+    const top6Zero = hextets.slice(0, 6).every((h) => h === 0);
+    const isMapped =
+      hextets[0] === 0 &&
+      hextets[1] === 0 &&
+      hextets[2] === 0 &&
+      hextets[3] === 0 &&
+      hextets[4] === 0 &&
+      hextets[5] === 0xffff;
+    if (isMapped || top6Zero) {
+      const a = (hextets[6] >> 8) & 0xff;
+      const b = hextets[6] & 0xff;
+      const c = (hextets[7] >> 8) & 0xff;
+      const d = hextets[7] & 0xff;
+      const ipv4 = `${a}.${b}.${c}.${d}`;
+      // ::1 (loopback) and :: (unspecified) both fall into top6Zero and last
+      // hextet 0 or 1 — _isPrivateIpv4 already blocks 0.0.0.0 and 127/8.
+      if (top6Zero && hextets[6] === 0 && hextets[7] <= 1) {
+        return true;
+      }
+      return _isPrivateIpv4(ipv4);
+    }
+
+    const firstHextet = hextets[0];
+    return (
+      // fe80::/10 link-local
+      (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) ||
+      // fc00::/7 unique local
+      (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) ||
+      // ff00::/8 multicast
+      firstHextet >= 0xff00
+    );
+  }
+
+  // Could not expand — be conservative and block.
+  return true;
+}
+
+async function assertPublicUrl(url: URL, allowPrivate: boolean): Promise<void> {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Only http:// and https:// URLs are supported, got: ${url.protocol}`);
+  }
+  if (allowPrivate) return;
+
+  // URL.hostname returns IPv6 literals wrapped in brackets ("[::1]") per WHATWG.
+  // Strip them before checking the address.
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+
+  // If the hostname is already a literal IP, check it directly — skip DNS so we
+  // also catch malformed IPv6 forms (::127.0.0.1, ::ffff:127.0.0.1) that some
+  // resolvers reject as "not found" instead of returning the embedded IPv4.
+  if (isIP(hostname) || hostname.includes(":")) {
+    if (isPrivateIp(hostname)) {
+      throw new Error(`Blocked private URL host ${url.hostname} (${hostname})`);
+    }
+    return;
+  }
+
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  for (const { address } of addresses) {
+    if (isPrivateIp(address)) {
+      throw new Error(`Blocked private URL host ${url.hostname} (${address})`);
+    }
+  }
+}
+
+function resolveRedirectUrl(currentUrl: URL, location: string | null): URL {
+  if (!location) {
+    throw new Error(`Redirect from ${currentUrl.href} missing Location header`);
+  }
+  return new URL(location, currentUrl);
+}
+
+async function fetchWithRedirects(startUrl: URL, allowPrivate: boolean): Promise<Response> {
+  let currentUrl = startUrl;
+
+  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
+    await assertPublicUrl(currentUrl, allowPrivate);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(currentUrl.href, {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: {
+          "user-agent": "aft-opencode-plugin",
+          // Prioritize markdown for content-negotiating servers (GitHub API, many docs sites).
+          // `application/vnd.github.raw` is GitHub's custom type — returns raw markdown from
+          // repo file and readme endpoints. Falls back to HTML if markdown is not available.
+          accept:
+            "application/vnd.github.raw, text/markdown, text/x-markdown, text/html;q=0.9, text/plain;q=0.5",
+        },
+      });
+    } catch (err) {
+      throw new Error(`Failed to fetch ${currentUrl.href}: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+
+    if (redirectCount === MAX_REDIRECTS) {
+      throw new Error(`Too many redirects fetching ${startUrl.href}`);
+    }
+    currentUrl = resolveRedirectUrl(currentUrl, response.headers.get("location"));
+  }
+
+  throw new Error(`Too many redirects fetching ${startUrl.href}`);
 }
 
 /**
@@ -79,7 +278,11 @@ function resolveExtension(contentType: string): string | null {
  * Returns the cached file path the Rust outline/zoom command can read.
  * Throws on errors (invalid URL, network failure, unsupported content type, oversized body).
  */
-export async function fetchUrlToTempFile(url: string, storageDir: string): Promise<string> {
+export async function fetchUrlToTempFile(
+  url: string,
+  storageDir: string,
+  options: FetchUrlOptions = {},
+): Promise<string> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -89,6 +292,7 @@ export async function fetchUrlToTempFile(url: string, storageDir: string): Promi
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`Only http:// and https:// URLs are supported, got: ${parsed.protocol}`);
   }
+  const allowPrivate = options.allowPrivate === true;
 
   const dir = cacheDir(storageDir);
   mkdirSync(dir, { recursive: true });
@@ -112,28 +316,7 @@ export async function fetchUrlToTempFile(url: string, storageDir: string): Promi
   }
 
   log(`Fetching URL: ${url}`);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "user-agent": "aft-opencode-plugin",
-        // Prioritize markdown for content-negotiating servers (GitHub API, many docs sites).
-        // `application/vnd.github.raw` is GitHub's custom type — returns raw markdown from
-        // repo file and readme endpoints. Falls back to HTML if markdown is not available.
-        accept:
-          "application/vnd.github.raw, text/markdown, text/x-markdown, text/html;q=0.9, text/plain;q=0.5",
-      },
-    });
-  } catch (err) {
-    throw new Error(`Failed to fetch ${url}: ${(err as Error).message}`);
-  } finally {
-    clearTimeout(timer);
-  }
+  const response = await fetchWithRedirects(parsed, allowPrivate);
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText} fetching ${url}`);

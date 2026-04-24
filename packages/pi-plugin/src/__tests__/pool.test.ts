@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BridgePool } from "../pool.js";
 
 describe("Pi BridgePool", () => {
@@ -41,6 +44,24 @@ describe("Pi BridgePool", () => {
       expect(a).toBe(b);
       expect(c).toBe(d);
       expect(pool.size).toBe(2);
+    } finally {
+      pool.shutdown().catch(() => {});
+    }
+  });
+
+  test("canonical paths collapse trailing slash variants to one bridge", () => {
+    const real = realpathSync(mkdtempSync(join(tmpdir(), "aft-pi-pool-")));
+    const linkDir = realpathSync(mkdtempSync(join(tmpdir(), "aft-pi-pool-link-")));
+    const link = join(linkDir, "link");
+    symlinkSync(real, link);
+
+    const pool = new BridgePool("/tmp/aft", { timeoutMs: 1_000 });
+    try {
+      const a = pool.getBridge(link);
+      const b = pool.getBridge(`${link}/`);
+
+      expect(a).toBe(b);
+      expect(pool.size).toBe(1);
     } finally {
       pool.shutdown().catch(() => {});
     }

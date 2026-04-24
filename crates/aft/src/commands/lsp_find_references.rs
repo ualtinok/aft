@@ -27,7 +27,7 @@ fn default_include_declaration() -> bool {
 /// Params:
 ///   - `file` (string, required) — source file path
 ///   - `line` (integer, required, 1-based) — cursor line
-///   - `character` (integer, required, 0-based) — cursor column
+///   - `character` (integer, required, 1-based) — cursor column
 ///   - `include_declaration` (bool, optional) — include the symbol declaration itself (default: true)
 ///
 /// Returns: `{ references: [{ file, line, column, end_line, end_column }], total }`
@@ -48,6 +48,14 @@ pub fn handle_lsp_find_references(req: &RawRequest, ctx: &AppContext) -> Respons
             &req.id,
             "invalid_request",
             "lsp_find_references: 'line' must be >= 1",
+        );
+    }
+
+    if params.character == 0 {
+        return Response::error(
+            &req.id,
+            "invalid_request",
+            "lsp_find_references: 'character' must be >= 1",
         );
     }
 

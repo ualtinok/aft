@@ -52,6 +52,7 @@ export interface AftConfig {
   restrict_to_project_root?: boolean;
   experimental_search_index?: boolean;
   experimental_semantic_search?: boolean;
+  url_fetch_allow_private?: boolean;
   semantic?: SemanticConfig;
   /**
    * Maximum source files allowed for call-graph operations (callers, trace_to,
@@ -105,6 +106,7 @@ export const AftConfigSchema = z.object({
   restrict_to_project_root: z.boolean().optional(),
   experimental_search_index: z.boolean().optional(),
   experimental_semantic_search: z.boolean().optional(),
+  url_fetch_allow_private: z.boolean().optional(),
   semantic: SemanticConfigSchema.optional(),
   max_callgraph_files: z.number().int().positive().optional(),
 });

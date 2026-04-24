@@ -38,6 +38,33 @@ fn send(aft: &mut AftProcess, request: Value) -> Value {
     aft.send(&serde_json::to_string(&request).expect("serialize request"))
 }
 
+#[test]
+fn grep_rejects_invalid_regex_with_pattern_data() {
+    let project = setup_project(&[("src/main.rs", "fn main() {}\n")]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let response = send(
+        &mut aft,
+        json!({
+            "id": "grep-invalid-regex",
+            "command": "grep",
+            "pattern": "[",
+        }),
+    );
+
+    assert_eq!(response["success"], false, "grep should fail: {response:?}");
+    assert_eq!(response["code"], "invalid_pattern");
+    assert_eq!(response["pattern"], "[");
+    assert!(response["message"]
+        .as_str()
+        .expect("message")
+        .contains("invalid regex"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
 fn canonical_path_string(path: &Path) -> String {
     fs::canonicalize(path)
         .expect("canonicalize path")

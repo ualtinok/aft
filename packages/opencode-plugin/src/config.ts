@@ -89,6 +89,8 @@ export const AftConfigSchema = z.object({
   experimental_search_index: z.boolean().optional(),
   /** Enable experimental semantic search. Default: false. */
   experimental_semantic_search: z.boolean().optional(),
+  /** Allow URL fetch tools to request private/link-local hosts. Default: false. */
+  url_fetch_allow_private: z.boolean().optional(),
   /** External semantic backend configuration for embedding and retrieval. */
   semantic: SemanticConfigSchema.optional(),
   /**

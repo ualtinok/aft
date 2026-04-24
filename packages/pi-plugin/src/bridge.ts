@@ -5,6 +5,7 @@ import { error, getLogFilePath, log, warn } from "./logger.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
+const MAX_STDOUT_BUFFER = 64 * 1024 * 1024; // 64MB
 
 // ## Note on TypeScript `as` type assertions
 //
@@ -17,15 +18,41 @@ const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
 // per call with no practical safety benefit given the error guards.
 
 /**
- * Compare two semver version strings (major.minor.patch).
+ * Compare two semver version strings (major.minor.patch plus pre-release).
  * Returns: negative if a < b, 0 if equal, positive if a > b.
  */
-function compareSemver(a: string, b: string): number {
-  const pa = a.split("-")[0].split(".").map(Number);
-  const pb = b.split("-")[0].split(".").map(Number);
+export function compareSemver(a: string, b: string): number {
+  const [aMain, aPre] = a.split("-", 2);
+  const [bMain, bPre] = b.split("-", 2);
+  const aParts = aMain.split(".").map(Number);
+  const bParts = bMain.split(".").map(Number);
   for (let i = 0; i < 3; i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (diff !== 0) return diff;
+    if (aParts[i] !== bParts[i]) return (aParts[i] ?? 0) - (bParts[i] ?? 0);
+  }
+  if (!aPre && !bPre) return 0;
+  if (!aPre) return 1;
+  if (!bPre) return -1;
+
+  const aIds = aPre.split(".");
+  const bIds = bPre.split(".");
+  for (let i = 0; i < Math.max(aIds.length, bIds.length); i++) {
+    const ai = aIds[i];
+    const bi = bIds[i];
+    if (ai === undefined) return -1;
+    if (bi === undefined) return 1;
+    const aNum = /^\d+$/.test(ai);
+    const bNum = /^\d+$/.test(bi);
+    if (aNum && bNum) {
+      const diff = Number.parseInt(ai, 10) - Number.parseInt(bi, 10);
+      if (diff !== 0) return diff;
+    } else if (aNum) {
+      return -1;
+    } else if (bNum) {
+      return 1;
+    } else {
+      const cmp = ai.localeCompare(bi);
+      if (cmp !== 0) return cmp;
+    }
   }
   return 0;
 }
@@ -420,6 +447,12 @@ export class BinaryBridge {
 
   private onStdoutData(data: string): void {
     this.stdoutBuffer += data;
+    if (this.stdoutBuffer.length > MAX_STDOUT_BUFFER) {
+      this.handleCrash(
+        new Error(`aft bridge stdout buffer exceeded ${MAX_STDOUT_BUFFER} bytes — killing bridge`),
+      );
+      return;
+    }
 
     // Process complete lines
     let newlineIdx: number;
@@ -464,8 +497,12 @@ export class BinaryBridge {
     this.rejectAllPending(new Error(`[aft-pi] Bridge restarted after timeout${tail}`));
   }
 
-  private handleCrash(): void {
+  private handleCrash(cause?: Error): void {
+    const proc = this.process;
     this.process = null;
+    if (proc && proc.exitCode === null && !proc.killed) {
+      proc.kill("SIGKILL");
+    }
     this.clearRestartResetTimer();
     this.configured = false; // Force reconfigure on next command after restart
 
@@ -475,7 +512,9 @@ export class BinaryBridge {
     const tail = this.formatStderrTail();
 
     this.rejectAllPending(
-      new Error(`[aft-pi] Binary crashed (restarts: ${this._restartCount})${tail}`),
+      new Error(
+        `[aft-pi] Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""}${tail}`,
+      ),
     );
 
     // Auto-restart with exponential backoff

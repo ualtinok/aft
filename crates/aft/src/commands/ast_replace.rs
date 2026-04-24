@@ -109,9 +109,10 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
         .clone()
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Validate the pattern upfront. ast-grep-core panics (via unwrap) on patterns that
-    // parse to multiple AST nodes (e.g. bare `catch`/`finally` clauses), and the release
-    // binary uses panic="abort", so catch_unwind cannot save us.
+    // Validate the pattern upfront. ast-grep-core can panic (via unwrap) on patterns
+    // that parse to multiple AST nodes (e.g. bare `catch`/`finally` clauses).
+    // Release builds use panic="unwind", so catch_unwind is effective, but returning
+    // an explicit pattern error gives callers a better signal.
     {
         use ast_grep_core::matcher::Pattern as AstPattern;
         if let Err(e) = AstPattern::try_new(&pattern, lang.clone()) {

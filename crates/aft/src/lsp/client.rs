@@ -377,6 +377,9 @@ impl LspClient {
                 return Ok(());
             }
             if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                self.state = ServerState::Exited;
                 return Err(LspError::Timeout(format!(
                     "timed out waiting for {:?} to exit",
                     self.kind
@@ -418,6 +421,13 @@ impl LspClient {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(id);
         }
+    }
+}
+
+impl Drop for LspClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

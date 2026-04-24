@@ -55,10 +55,11 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
     // Treat `^` and `$` as line anchors (grep semantics), not file anchors.
     regex_builder.multi_line(true);
     if let Err(error) = regex_builder.build() {
-        return Response::error(
+        return Response::error_with_data(
             &req.id,
-            "invalid_request",
-            format!("grep: invalid regex: {}", error),
+            "invalid_pattern",
+            format!("invalid regex: {}", error),
+            serde_json::json!({"pattern": pattern}),
         );
     }
 

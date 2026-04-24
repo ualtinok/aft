@@ -159,8 +159,17 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     if let Some(v) = req.params.get("format_on_edit").and_then(|v| v.as_bool()) {
         ctx.config_mut().format_on_edit = v;
     }
-    if let Some(v) = req.params.get("validate_on_edit").and_then(|v| v.as_str()) {
-        ctx.config_mut().validate_on_edit = Some(v.to_string());
+    if let Some(raw) = req.params.get("validate_on_edit") {
+        if let Some(v) = raw.as_bool() {
+            ctx.config_mut().validate_on_edit = Some(if v { "syntax" } else { "off" }.to_string());
+        } else if let Some(v) = raw.as_str() {
+            let value = match v {
+                "true" => "syntax",
+                "false" => "off",
+                other => other,
+            };
+            ctx.config_mut().validate_on_edit = Some(value.to_string());
+        }
     }
     // Per-language formatter overrides: { "typescript": "biome", "python": "ruff" }
     if let Some(v) = req.params.get("formatter").and_then(|v| v.as_object()) {
@@ -279,6 +288,14 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
     let search_build_in_progress = ctx.search_index_rx().borrow().is_some();
     let semantic_build_in_progress = ctx.semantic_index_rx().borrow().is_some();
+    // Note: We intentionally only WARN on rapid reconfigure (rather than tracking
+    // JoinHandles to cancel old threads) because:
+    //   1. Old thread results are dropped when ctx.search_index_rx() is reset
+    //   2. Atomic tempfile writes via std::fs::rename are race-safe (last writer wins)
+    //   3. Only CPU is wasted; no correctness issue
+    //   4. Tracking handles would add complexity for negligible benefit
+    // If reconfigure rate becomes a real problem, switch to a single
+    // generation-counter + cancellation-token pattern.
     if search_build_in_progress {
         log::warn!(
             "[aft] configure called while search index build is still in progress; previous build will continue detached"

@@ -8,6 +8,7 @@
 use crate::protocol::RawRequest;
 use crate::symbols::SymbolMatch;
 use serde::Deserialize;
+use std::path::Path;
 
 /// A single LSP-sourced symbol hint: name, file path, line number, and optional kind.
 #[derive(Debug, Clone, Deserialize)]
@@ -96,9 +97,15 @@ pub fn apply_lsp_disambiguation(matches: Vec<SymbolMatch>, hints: &LspHints) -> 
 }
 
 /// Check if two file paths refer to the same file.
-/// Compares by suffix — the hint path may be absolute while the match path is relative.
+/// Compares canonical paths when possible, then falls back to separator-bounded suffix matching.
 fn paths_match(hint_path: &str, match_path: &str) -> bool {
-    // Normalize separators
+    if let (Ok(hint), Ok(m)) = (
+        std::fs::canonicalize(Path::new(hint_path)),
+        std::fs::canonicalize(Path::new(match_path)),
+    ) {
+        return hint == m;
+    }
+
     let hint = hint_path.replace('\\', "/");
     let m = match_path.replace('\\', "/");
 
@@ -106,8 +113,19 @@ fn paths_match(hint_path: &str, match_path: &str) -> bool {
         return true;
     }
 
-    // Suffix match: one path ends with the other
-    hint.ends_with(&m) || m.ends_with(&hint)
+    if hint.len() >= m.len() {
+        suffix_at_separator_boundary(&hint, &m)
+    } else {
+        suffix_at_separator_boundary(&m, &hint)
+    }
+}
+
+fn suffix_at_separator_boundary(longer: &str, shorter: &str) -> bool {
+    if shorter.is_empty() || longer.len() <= shorter.len() || !longer.ends_with(shorter) {
+        return false;
+    }
+
+    longer.as_bytes()[longer.len() - shorter.len() - 1] == b'/'
 }
 
 #[cfg(test)]
@@ -307,6 +325,17 @@ mod tests {
     #[test]
     fn paths_match_suffix() {
         assert!(paths_match("/home/user/project/src/app.ts", "src/app.ts"));
+    }
+
+    #[test]
+    fn paths_match_filename_suffix_at_separator_boundary() {
+        assert!(paths_match("/home/user/project/src/app.ts", "app.ts"));
+    }
+
+    #[test]
+    fn paths_do_not_match_partial_filename_suffixes() {
+        assert!(!paths_match("foo/bar/baz.ts", "z.ts"));
+        assert!(!paths_match("foo/bar.ts", "ar.ts"));
     }
 
     #[test]

@@ -65,6 +65,14 @@ const PLUGIN_VERSION: string = (() => {
   }
 })();
 
+const ALL_ONLY_TOOLS = new Set([
+  "aft_navigate",
+  "aft_delete",
+  "aft_move",
+  "aft_transform",
+  "aft_refactor",
+]);
+
 /** Resolve the AFT storage directory (auth + semantic index + ONNX cache). */
 function resolveStorageDir(): string {
   // Pi doesn't expose its data dir via a public API; use ~/.pi/agent/aft as convention.
@@ -72,6 +80,10 @@ function resolveStorageDir(): string {
 }
 
 /**
+ * Tool surface mirrors opencode-plugin: navigate/delete/move/transform/refactor
+ * are all-only. recommended exposes hoisted + read/safety/import/ast/lsp/conflicts
+ * + experimental search/semantic when enabled.
+ *
  * Returns the set of AFT tool names that should be registered given the
  * configured surface + disabled_tools filter. Pi's built-in tools are always
  * present; registering an AFT tool with the same name replaces them.
@@ -99,6 +111,7 @@ function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
   const surface = config.tool_surface ?? "recommended";
   const disabled = new Set(config.disabled_tools ?? []);
   const ok = (name: string): boolean => !disabled.has(name);
+  const allOnly = (name: string): boolean => ALL_ONLY_TOOLS.has(name) && ok(name);
 
   if (surface === "minimal") {
     return {
@@ -148,11 +161,11 @@ function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
   if (surface === "all") {
     return {
       ...base,
-      navigate: ok("aft_navigate"),
-      delete: ok("aft_delete"),
-      move: ok("aft_move"),
-      structure: ok("aft_transform"),
-      refactor: ok("aft_refactor"),
+      navigate: allOnly("aft_navigate"),
+      delete: allOnly("aft_delete"),
+      move: allOnly("aft_move"),
+      structure: allOnly("aft_transform"),
+      refactor: allOnly("aft_refactor"),
     };
   }
 
@@ -201,8 +214,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   // Build configure-time overrides forwarded to every bridge on spawn.
+  // Default to restrict_to_project_root: true for plugin-hosted agents.
+  // The Rust CLI default is false (documented — for direct/scripted use), but
+  // when agents call `aft_outline`, `aft_read`, etc. through the plugin there
+  // is no interactive permission prompt for reads, so we must enforce the
+  // project-root boundary by default. Users can opt out by explicitly setting
+  // `restrict_to_project_root: false` in their aft.jsonc.
   const configOverrides: Record<string, unknown> = {
     ...config,
+    restrict_to_project_root: config.restrict_to_project_root ?? true,
     storage_dir: storageDir,
   };
   if (ortDylibDir) {

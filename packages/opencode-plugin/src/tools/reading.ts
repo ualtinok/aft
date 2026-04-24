@@ -90,7 +90,9 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
 
         // URL mode: fetch to temp file, then outline the cached copy
         if (hasUrl) {
-          const cachedPath = await fetchUrlToTempFile(args.url as string, ctx.storageDir);
+          const cachedPath = await fetchUrlToTempFile(args.url as string, ctx.storageDir, {
+            allowPrivate: ctx.config.url_fetch_allow_private === true,
+          });
           const response = await callBridge(ctx, context, "outline", { file: cachedPath });
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
@@ -184,7 +186,9 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
 
         // URL mode: fetch to temp file, then zoom into the cached copy
         const file = hasUrl
-          ? await fetchUrlToTempFile(args.url as string, ctx.storageDir)
+          ? await fetchUrlToTempFile(args.url as string, ctx.storageDir, {
+              allowPrivate: ctx.config.url_fetch_allow_private === true,
+            })
           : (args.filePath as string);
 
         // Multi-symbol mode: make separate zoom calls in parallel and combine results
