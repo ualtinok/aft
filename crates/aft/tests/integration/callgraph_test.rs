@@ -1422,3 +1422,54 @@ fn callgraph_configure_accepts_positive_max_callgraph_files() {
 
     aft.shutdown();
 }
+
+/// `configure` rejects non-integer `max_callgraph_files` payloads with a clear
+/// `invalid_request` surface rather than silently clamping. `serde_json::Value::as_u64`
+/// returns `None` for floats, strings, booleans, nulls, and compound types,
+/// which are all funneled through the same rejection path.
+///
+/// Covers the follow-up gap Oracle flagged on v0.15.1: the predicate's truth
+/// table is correct by source inspection, but explicit regression tests only
+/// existed for integer cases (0, negative, positive). Added v0.15.2.
+#[test]
+fn callgraph_configure_rejects_non_integer_max_callgraph_files_payloads() {
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    // Each payload is a JSON fragment that will be inlined into the configure
+    // request. All should be rejected.
+    let rejected_payloads = [
+        ("float", "1.5"),
+        ("string", "\"twenty\""),
+        ("numeric_string", "\"20000\""),
+        ("bool_true", "true"),
+        ("bool_false", "false"),
+        ("null", "null"),
+        ("array", "[]"),
+        ("object", "{}"),
+    ];
+
+    for (label, payload) in rejected_payloads {
+        let mut aft = AftProcess::spawn();
+        let resp = aft.send(&format!(
+            r#"{{"id":"1","command":"configure","project_root":"{}","max_callgraph_files":{}}}"#,
+            root, payload
+        ));
+
+        assert_eq!(
+            resp["success"], false,
+            "configure should reject {label} payload ({payload})"
+        );
+        assert_eq!(
+            resp["code"], "invalid_request",
+            "configure should return invalid_request for {label} payload ({payload})"
+        );
+        let msg = resp["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("max_callgraph_files"),
+            "error message should mention max_callgraph_files for {label}: {msg}"
+        );
+
+        aft.shutdown();
+    }
+}

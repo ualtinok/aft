@@ -231,3 +231,194 @@ fn read_from_disk_rebuilds_v1_cache_when_fingerprint_is_expected() {
         "legacy semantic cache should be deleted after fingerprint mismatch"
     );
 }
+
+/// Regression: v0.15.2 — semantic index mtime precision.
+///
+/// Before v0.15.2, the on-disk format stored file mtimes as whole seconds
+/// (`Duration::as_secs()`), while live mtimes from `fs::metadata().modified()`
+/// carry subsecond precision on macOS APFS, ext4 with nsec, and NTFS. The
+/// equality comparison in `is_file_stale()` therefore reported every file as
+/// stale on every restart, triggering a ~500-file fastembed rebuild at
+/// ~800% CPU for 30-50s on every opencode restart.
+///
+/// This test asserts the round-trip preserves subsecond mtimes and the
+/// staleness check survives it.
+#[test]
+fn write_roundtrip_preserves_subsecond_mtime_precision() {
+    let project = tempfile::tempdir().expect("create project dir");
+    let storage = tempfile::tempdir().expect("create storage dir");
+    let (index, source_file) = build_test_index(project.path());
+
+    // Sanity: the live file must actually have subsecond mtime for this
+    // test to be meaningful (CI filesystems like tmpfs can lose nanos;
+    // APFS/ext4 with nsec/NTFS do not).
+    let live_mtime = fs::metadata(&source_file)
+        .expect("stat source file")
+        .modified()
+        .expect("read live mtime");
+    let live_nanos = live_mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("mtime >= epoch")
+        .subsec_nanos();
+    if live_nanos == 0 {
+        eprintln!(
+            "skipping subsecond roundtrip assertion: filesystem does not report subsecond mtime \
+             (live nanos == 0). Test still validates staleness on whole-second mtimes."
+        );
+    }
+
+    index.write_to_disk(storage.path(), "subsec-project");
+
+    let restored = SemanticIndex::read_from_disk(storage.path(), "subsec-project", None)
+        .expect("restore semantic index from disk");
+
+    // The source file has not been touched since index construction, so
+    // after round-trip it MUST NOT be flagged as stale. This is the
+    // actual regression: pre-v0.15.2, this assertion failed on any
+    // filesystem with subsecond mtime precision.
+    assert!(
+        !restored.is_file_stale(&source_file),
+        "unchanged file flagged stale after disk round-trip — mtime precision lost"
+    );
+    assert_eq!(
+        restored.count_stale_files(),
+        0,
+        "no file should be stale after a fresh round-trip"
+    );
+}
+
+/// Backward-compat: V2 caches (pre-v0.15.2) must still load. Users upgrading
+/// from v0.15.1 should not see parse errors on their existing
+/// `~/.local/share/opencode/storage/plugin/aft/semantic/.../semantic.bin`
+/// files. The V2 load reports all files as stale (nanos round-trip to 0,
+/// so equality fails) which triggers one final rebuild — that rebuild then
+/// persists as V3 and stabilises forever.
+#[test]
+fn v2_cache_still_loads_for_backward_compat() {
+    let project = tempfile::tempdir().expect("create project dir");
+    let storage = tempfile::tempdir().expect("create storage dir");
+    let (index, source_file) = build_test_index(project.path());
+
+    // Construct a V2 blob by hand (matches pre-v0.15.2 serialisation).
+    let fingerprint = SemanticIndexFingerprint {
+        backend: "fastembed".to_string(),
+        model: "all-MiniLM-L6-v2".to_string(),
+        base_url: "none".to_string(),
+        dimension: 4,
+    };
+    let fp_str = fingerprint.as_string();
+    let fp_bytes = fp_str.as_bytes();
+
+    let mut bytes = Vec::new();
+    bytes.push(2u8); // V2
+    bytes.extend_from_slice(&4u32.to_le_bytes()); // dimension
+    bytes.extend_from_slice(&(index.len() as u32).to_le_bytes()); // entry_count
+    bytes.extend_from_slice(&(fp_bytes.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(fp_bytes);
+
+    // Mtime table — 1 entry, whole seconds only (V2 layout).
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    push_string(&mut bytes, &source_file.to_string_lossy());
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // secs=0, no nanos field
+
+    // Reuse V3-written entries from the real index — the entry layout
+    // is identical across V1/V2/V3.
+    let v3_bytes = index.to_bytes();
+    // Skip V3 header to find where its mtime table ends and entries begin.
+    // Simpler: just append a single hand-rolled entry for one symbol.
+    push_string(&mut bytes, &source_file.to_string_lossy());
+    push_string(&mut bytes, "legacy_sym");
+    bytes.push(0u8); // SymbolKind::Function
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // start_line
+    bytes.extend_from_slice(&3u32.to_le_bytes()); // end_line
+    bytes.push(1u8); // exported
+    push_string(&mut bytes, "fn legacy_sym() {}");
+    push_string(&mut bytes, "file:src kind:function name:legacy_sym");
+    for value in [0.1f32, 0.2, 0.3, 0.4] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    // Overwrite entry count to 1 since we only wrote one entry.
+    bytes[5..9].copy_from_slice(&1u32.to_le_bytes());
+    let _ = v3_bytes; // keep the binding quiet for clippy
+
+    let semantic_dir = storage.path().join("semantic").join("v2-project");
+    fs::create_dir_all(&semantic_dir).expect("create semantic dir");
+    fs::write(semantic_dir.join("semantic.bin"), &bytes).expect("write v2 cache");
+
+    let restored = SemanticIndex::read_from_disk(storage.path(), "v2-project", Some(&fp_str))
+        .expect("V2 caches must still load post-upgrade");
+
+    assert_eq!(restored.len(), 1);
+    // V2 stored 0 nanos, so the live file (with real subsec nanos) will
+    // not match — that's the expected one-time rebuild on upgrade.
+    // We only assert the blob was parsed without error; the rebuild
+    // path is exercised by other tests.
+}
+
+/// Hardening: corrupt / malicious V3 caches must be rejected cleanly,
+/// not crash the aft process.
+///
+/// Pre-v0.15.2 hardening, `Duration::new(secs, nanos)` could panic if the
+/// nanosecond carry overflowed `secs`, and `SystemTime + Duration` could
+/// panic on carry past the platform's upper bound. A corrupted semantic.bin
+/// on disk (bit-flip, truncated download, hostile extension) could therefore
+/// kill every tool call until the user manually deleted the cache.
+///
+/// v0.15.2 adds explicit validation:
+///   - nanos >= 1_000_000_000 → Err("invalid semantic mtime: nanos ...")
+///   - secs/nanos combo overflows SystemTime → Err(".. overflows SystemTime")
+///
+/// Both surfaces are covered here via `from_bytes` (bypasses the on-disk
+/// rename dance, lets us hand-roll corrupt payloads).
+#[test]
+fn from_bytes_rejects_corrupt_v3_cache_payloads() {
+    // Shared helper: build a V3 blob with a single mtime entry using
+    // the supplied secs/nanos, then no vector entries (entry_count=0).
+    fn build_v3_with_mtime(secs: u64, nanos: u32) -> Vec<u8> {
+        let fingerprint = SemanticIndexFingerprint {
+            backend: "fastembed".to_string(),
+            model: "all-MiniLM-L6-v2".to_string(),
+            base_url: "none".to_string(),
+            dimension: 4,
+        };
+        let fp_bytes = fingerprint.as_string().into_bytes();
+        let mut bytes = Vec::new();
+        bytes.push(3u8); // V3
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // dimension
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // entry_count
+        bytes.extend_from_slice(&(fp_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&fp_bytes);
+        // Mtime table: 1 entry
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        push_string(&mut bytes, "/tmp/corrupt.rs");
+        bytes.extend_from_slice(&secs.to_le_bytes());
+        bytes.extend_from_slice(&nanos.to_le_bytes());
+        bytes
+    }
+
+    // Case 1: nanos >= 1e9 → reject with a specific message.
+    let bad_nanos = build_v3_with_mtime(0, 2_000_000_000);
+    let err =
+        SemanticIndex::from_bytes(&bad_nanos).expect_err("V3 with nanos >= 1e9 must be rejected");
+    assert!(
+        err.contains("nanos") && err.contains("1_000_000_000"),
+        "nanos-overflow error should explain the rejection: {err}"
+    );
+
+    // Case 2: secs close to u64::MAX → SystemTime overflow rejected without
+    // panicking. We pick secs = u64::MAX so adding any Duration carries past
+    // the platform's representable range on every target.
+    let overflow = build_v3_with_mtime(u64::MAX, 0);
+    let err =
+        SemanticIndex::from_bytes(&overflow).expect_err("V3 with secs=u64::MAX must be rejected");
+    assert!(
+        err.contains("overflows SystemTime"),
+        "SystemTime-overflow error should explain the rejection: {err}"
+    );
+
+    // Case 3: valid V3 payload with nanos = 999_999_999 (max valid) loads
+    // cleanly — proves the boundary is strictly < 1e9, not <=.
+    let boundary = build_v3_with_mtime(1_700_000_000, 999_999_999);
+    let _ =
+        SemanticIndex::from_bytes(&boundary).expect("V3 with nanos=999_999_999 must load cleanly");
+}

@@ -25,6 +25,11 @@ const ONNX_RUNTIME_INSTALL_HINT: &str =
 
 const SEMANTIC_INDEX_VERSION_V1: u8 = 1;
 const SEMANTIC_INDEX_VERSION_V2: u8 = 2;
+/// V3 adds subsec_nanos to the file-mtime table so staleness detection survives
+/// restart round-trips on filesystems with subsecond mtime precision (APFS,
+/// ext4 with nsec, NTFS). V1/V2 persisted whole-second mtimes only, which
+/// caused every restart to flag ~99% of files as stale and re-embed them.
+const SEMANTIC_INDEX_VERSION_V3: u8 = 3;
 const DEFAULT_OPENAI_EMBEDDING_PATH: &str = "/embeddings";
 const DEFAULT_OLLAMA_EMBEDDING_PATH: &str = "/api/embed";
 // Must stay below the bridge timeout (30s) to avoid bridge kills on slow backends.
@@ -1110,21 +1115,26 @@ impl SemanticIndex {
             }
         });
 
-        // Header: version(1) + dimension(4) + entry_count(4) [+ fingerprint_len(4)]
-        let version = if fingerprint_bytes.is_some() {
-            SEMANTIC_INDEX_VERSION_V2
-        } else {
-            SEMANTIC_INDEX_VERSION_V1
-        };
+        // Header: version(1) + dimension(4) + entry_count(4) + fingerprint_len(4) + fingerprint
+        //
+        // V3 (v0.15.2+) is the single write format. Layout:
+        //   - fingerprint is always represented (absent ⇒ fingerprint_len=0,
+        //     no bytes follow). Uniform format simplifies the reader.
+        //   - mtimes stored as secs(u64) + subsec_nanos(u32). Preserves full
+        //     APFS/ext4/NTFS precision so staleness checks survive restart
+        //     round-trips.
+        //
+        // V1/V2 remain readable for backward compatibility (see from_bytes).
+        let version = SEMANTIC_INDEX_VERSION_V3;
         buf.push(version);
         buf.extend_from_slice(&(self.dimension as u32).to_le_bytes());
         buf.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        if let Some(bytes) = &fingerprint_bytes {
-            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(bytes);
-        }
+        let fp_bytes_ref: &[u8] = fingerprint_bytes.as_deref().unwrap_or(&[]);
+        buf.extend_from_slice(&(fp_bytes_ref.len() as u32).to_le_bytes());
+        buf.extend_from_slice(fp_bytes_ref);
 
         // File mtime table: count(4) + entries
+        // V3 layout per entry: path_len(4) + path + secs(8) + subsec_nanos(4)
         buf.extend_from_slice(&(self.file_mtimes.len() as u32).to_le_bytes());
         for (path, mtime) in &self.file_mtimes {
             let path_bytes = path.to_string_lossy().as_bytes().to_vec();
@@ -1134,6 +1144,7 @@ impl SemanticIndex {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default();
             buf.extend_from_slice(&duration.as_secs().to_le_bytes());
+            buf.extend_from_slice(&duration.subsec_nanos().to_le_bytes());
         }
 
         // Entries: each is metadata + vector
@@ -1187,11 +1198,19 @@ impl SemanticIndex {
 
         let version = data[pos];
         pos += 1;
-        if version != SEMANTIC_INDEX_VERSION_V1 && version != SEMANTIC_INDEX_VERSION_V2 {
+        if version != SEMANTIC_INDEX_VERSION_V1
+            && version != SEMANTIC_INDEX_VERSION_V2
+            && version != SEMANTIC_INDEX_VERSION_V3
+        {
             return Err(format!("unsupported version: {}", version));
         }
-        if version == SEMANTIC_INDEX_VERSION_V2 && data.len() < HEADER_BYTES_V2 {
-            return Err("data too short for semantic index v2 header".to_string());
+        // V2 and V3 share the same header layout (V3 only differs in the
+        // per-mtime entry layout): version(1) + dimension(4) + entry_count(4)
+        // + fingerprint_len(4) + fingerprint bytes.
+        if (version == SEMANTIC_INDEX_VERSION_V2 || version == SEMANTIC_INDEX_VERSION_V3)
+            && data.len() < HEADER_BYTES_V2
+        {
+            return Err("data too short for semantic index v2/v3 header".to_string());
         }
 
         let dimension = read_u32(data, &mut pos)? as usize;
@@ -1203,17 +1222,28 @@ impl SemanticIndex {
             return Err(format!("too many semantic index entries: {}", entry_count));
         }
 
-        let fingerprint = if version == SEMANTIC_INDEX_VERSION_V2 {
+        // Fingerprint handling:
+        //   - V1: no fingerprint field at all.
+        //   - V2: fingerprint_len + fingerprint bytes; always present (writer
+        //     only emitted V2 when fingerprint was Some).
+        //   - V3: fingerprint_len always present; fingerprint_len==0 ⇒ None.
+        let has_fingerprint_field =
+            version == SEMANTIC_INDEX_VERSION_V2 || version == SEMANTIC_INDEX_VERSION_V3;
+        let fingerprint = if has_fingerprint_field {
             let fingerprint_len = read_u32(data, &mut pos)? as usize;
             if pos + fingerprint_len > data.len() {
                 return Err("unexpected end of data reading fingerprint".to_string());
             }
-            let raw = String::from_utf8_lossy(&data[pos..pos + fingerprint_len]).to_string();
-            pos += fingerprint_len;
-            Some(
-                serde_json::from_str::<SemanticIndexFingerprint>(&raw)
-                    .map_err(|error| format!("invalid semantic fingerprint: {error}"))?,
-            )
+            if fingerprint_len == 0 {
+                None
+            } else {
+                let raw = String::from_utf8_lossy(&data[pos..pos + fingerprint_len]).to_string();
+                pos += fingerprint_len;
+                Some(
+                    serde_json::from_str::<SemanticIndexFingerprint>(&raw)
+                        .map_err(|error| format!("invalid semantic fingerprint: {error}"))?,
+                )
+            }
         } else {
             None
         };
@@ -1236,7 +1266,37 @@ impl SemanticIndex {
         for _ in 0..mtime_count {
             let path = read_string(data, &mut pos)?;
             let secs = read_u64(data, &mut pos)?;
-            let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            // V3 persists subsec_nanos alongside secs so staleness checks
+            // survive restart round-trips. V1/V2 load with 0 nanos, which
+            // causes one rebuild on upgrade (they never matched live APFS
+            // mtimes anyway — the bug v0.15.2 fixes). After that rebuild,
+            // the cache is persisted as V3 and stabilises.
+            let nanos = if version == SEMANTIC_INDEX_VERSION_V3 {
+                read_u32(data, &mut pos)?
+            } else {
+                0
+            };
+            // Hardening against corrupt / maliciously crafted cache files
+            // (v0.15.2). `Duration::new(secs, nanos)` can panic when the
+            // nanosecond carry overflows the second counter, and
+            // `SystemTime + Duration` can panic on carry past the platform's
+            // upper bound. Explicit validation keeps a corrupted semantic.bin
+            // from taking down the whole aft process.
+            if nanos >= 1_000_000_000 {
+                return Err(format!(
+                    "invalid semantic mtime: nanos {} >= 1_000_000_000",
+                    nanos
+                ));
+            }
+            let duration = std::time::Duration::new(secs, nanos);
+            let mtime = SystemTime::UNIX_EPOCH
+                .checked_add(duration)
+                .ok_or_else(|| {
+                    format!(
+                        "invalid semantic mtime: secs={} nanos={} overflows SystemTime",
+                        secs, nanos
+                    )
+                })?;
             file_mtimes.insert(PathBuf::from(path), mtime);
         }
 
