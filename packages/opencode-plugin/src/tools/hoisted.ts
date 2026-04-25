@@ -29,40 +29,214 @@ function relativeToWorktree(fp: string, worktree: string): string {
   return path.relative(worktree, fp);
 }
 
-/** Build a simple unified diff string from before/after content. */
+/** Test-only export. Production code uses buildUnifiedDiff directly. */
+export const _buildUnifiedDiffForTest = (fp: string, before: string, after: string): string =>
+  buildUnifiedDiff(fp, before, after);
+
+/**
+ * Build a unified diff string from before/after content using a proper
+ * LCS-based diff algorithm with grouped hunks and 3 lines of context.
+ *
+ * The previous implementation compared lines by index, so any insertion
+ * or deletion that shifted line numbers caused every subsequent line to
+ * compare unequal — emitting the entire rest of the file as "changed"
+ * (issue #22, regression introduced in v0.15.3 when apply_patch started
+ * sending diffs).
+ *
+ * Output matches GNU diff -u style: --- /+++ headers, @@ hunk markers,
+ * one hunk per change cluster (consecutive changes within 6 lines of
+ * each other are merged into a single hunk).
+ */
 function buildUnifiedDiff(fp: string, before: string, after: string): string {
   // Skip diff for very large files to avoid blocking the event loop
   const SIZE_CAP = 100 * 1024; // 100KB
   if (before.length > SIZE_CAP || after.length > SIZE_CAP) {
     return `Index: ${fp}\n(diff skipped: file exceeds ${SIZE_CAP / 1024}KB)\n`;
   }
+
   const beforeLines = before.split("\n");
   const afterLines = after.split("\n");
-  let diff = `Index: ${fp}\n===================================================================\n--- ${fp}\n+++ ${fp}\n`;
-  let firstChange = -1;
-  let lastChange = -1;
-  const maxLen = Math.max(beforeLines.length, afterLines.length);
-  for (let i = 0; i < maxLen; i++) {
-    if ((beforeLines[i] ?? "") !== (afterLines[i] ?? "")) {
-      if (firstChange === -1) firstChange = i;
-      lastChange = i;
-    }
+  const ops = diffLines(beforeLines, afterLines);
+
+  // No changes → empty diff (caller decides whether to render the header).
+  if (ops.every((op) => op.tag === "eq")) {
+    return `Index: ${fp}\n===================================================================\n--- ${fp}\n+++ ${fp}\n`;
   }
-  if (firstChange === -1) return diff;
-  const ctxStart = Math.max(0, firstChange - 2);
-  const ctxEnd = Math.min(maxLen - 1, lastChange + 2);
-  diff += `@@ -${ctxStart + 1},${Math.min(beforeLines.length, ctxEnd + 1) - ctxStart} +${ctxStart + 1},${Math.min(afterLines.length, ctxEnd + 1) - ctxStart} @@\n`;
-  for (let i = ctxStart; i <= ctxEnd; i++) {
-    const bl = i < beforeLines.length ? beforeLines[i] : undefined;
-    const al = i < afterLines.length ? afterLines[i] : undefined;
-    if (bl === al) {
-      diff += ` ${bl}\n`;
-    } else {
-      if (bl !== undefined) diff += `-${bl}\n`;
-      if (al !== undefined) diff += `+${al}\n`;
+
+  const CONTEXT = 3;
+  const HUNK_GAP = CONTEXT * 2; // merge hunks closer than this
+  const hunks = groupIntoHunks(ops, CONTEXT, HUNK_GAP, beforeLines.length, afterLines.length);
+
+  let diff = `Index: ${fp}\n===================================================================\n--- ${fp}\n+++ ${fp}\n`;
+  for (const hunk of hunks) {
+    diff += `@@ -${hunk.beforeStart},${hunk.beforeCount} +${hunk.afterStart},${hunk.afterCount} @@\n`;
+    for (const line of hunk.lines) {
+      diff += `${line}\n`;
     }
   }
   return diff;
+}
+
+type DiffOp =
+  | { tag: "eq"; beforeIdx: number; afterIdx: number; line: string }
+  | { tag: "del"; beforeIdx: number; line: string }
+  | { tag: "ins"; afterIdx: number; line: string };
+
+/**
+ * LCS-based line diff. Builds a length table then walks back to produce ops.
+ * O(n*m) time and space — fine for the 100KB SIZE_CAP guard above.
+ */
+function diffLines(a: readonly string[], b: readonly string[]): DiffOp[] {
+  const n = a.length;
+  const m = b.length;
+
+  // dp[i][j] = LCS length of a[0..i] and b[0..j]
+  // Use a flat Uint32Array for memory efficiency on large files.
+  const dp = new Uint32Array((n + 1) * (m + 1));
+  const w = m + 1;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i * w + j] = dp[(i - 1) * w + (j - 1)] + 1;
+      } else {
+        const up = dp[(i - 1) * w + j];
+        const left = dp[i * w + (j - 1)];
+        dp[i * w + j] = up >= left ? up : left;
+      }
+    }
+  }
+
+  // Walk back to produce ops in reverse, then reverse at the end.
+  const ops: DiffOp[] = [];
+  let i = n;
+  let j = m;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) {
+      ops.push({ tag: "eq", beforeIdx: i - 1, afterIdx: j - 1, line: a[i - 1] });
+      i--;
+      j--;
+    } else if (dp[(i - 1) * w + j] >= dp[i * w + (j - 1)]) {
+      ops.push({ tag: "del", beforeIdx: i - 1, line: a[i - 1] });
+      i--;
+    } else {
+      ops.push({ tag: "ins", afterIdx: j - 1, line: b[j - 1] });
+      j--;
+    }
+  }
+  while (i > 0) {
+    ops.push({ tag: "del", beforeIdx: i - 1, line: a[i - 1] });
+    i--;
+  }
+  while (j > 0) {
+    ops.push({ tag: "ins", afterIdx: j - 1, line: b[j - 1] });
+    j--;
+  }
+  ops.reverse();
+  return ops;
+}
+
+interface Hunk {
+  beforeStart: number; // 1-based
+  beforeCount: number;
+  afterStart: number; // 1-based
+  afterCount: number;
+  lines: string[]; // each prefixed with " ", "+", or "-"
+}
+
+/**
+ * Group ops into hunks. Consecutive change ops are clustered with `context`
+ * lines on each side; clusters closer than `gap` are merged into one hunk.
+ */
+function groupIntoHunks(
+  ops: DiffOp[],
+  context: number,
+  gap: number,
+  beforeLen: number,
+  afterLen: number,
+): Hunk[] {
+  // Find indices of change ops (ins or del).
+  const changeIdx: number[] = [];
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].tag !== "eq") changeIdx.push(k);
+  }
+  if (changeIdx.length === 0) return [];
+
+  // Build hunk ranges in op-index space, then merge nearby ones.
+  const ranges: Array<[number, number]> = [];
+  for (const idx of changeIdx) {
+    const start = Math.max(0, idx - context);
+    const end = Math.min(ops.length - 1, idx + context);
+    if (ranges.length > 0 && start <= ranges[ranges.length - 1][1] + gap) {
+      ranges[ranges.length - 1][1] = Math.max(ranges[ranges.length - 1][1], end);
+    } else {
+      ranges.push([start, end]);
+    }
+  }
+
+  // Materialize each range as a hunk. Track 1-based line numbers from the
+  // first op's recorded indices.
+  const hunks: Hunk[] = [];
+  for (const [start, end] of ranges) {
+    let beforeStart = -1;
+    let afterStart = -1;
+    let beforeCount = 0;
+    let afterCount = 0;
+    const lines: string[] = [];
+    for (let k = start; k <= end; k++) {
+      const op = ops[k];
+      if (op.tag === "eq") {
+        if (beforeStart === -1) beforeStart = op.beforeIdx + 1;
+        if (afterStart === -1) afterStart = op.afterIdx + 1;
+        beforeCount++;
+        afterCount++;
+        lines.push(` ${op.line}`);
+      } else if (op.tag === "del") {
+        if (beforeStart === -1) beforeStart = op.beforeIdx + 1;
+        if (afterStart === -1) {
+          // Pure-deletion hunk at start: position after-cursor is one past
+          // the last preceding equal op. Walk forward to find the next
+          // ins/eq to anchor afterStart, otherwise clamp to end.
+          afterStart = inferAfterStart(ops, k, afterLen);
+        }
+        beforeCount++;
+        lines.push(`-${op.line}`);
+      } else {
+        if (afterStart === -1) afterStart = op.afterIdx + 1;
+        if (beforeStart === -1) {
+          beforeStart = inferBeforeStart(ops, k, beforeLen);
+        }
+        afterCount++;
+        lines.push(`+${op.line}`);
+      }
+    }
+    // Empty file edge case: GNU diff uses 0 for line numbers when count is 0.
+    if (beforeCount === 0) beforeStart = 0;
+    if (afterCount === 0) afterStart = 0;
+    hunks.push({ beforeStart, beforeCount, afterStart, afterCount, lines });
+  }
+  return hunks;
+}
+
+/** Find what afterStart should be when a hunk begins with deletions. */
+function inferAfterStart(ops: DiffOp[], from: number, afterLen: number): number {
+  // Look forward for any op carrying an afterIdx.
+  for (let k = from; k < ops.length; k++) {
+    const op = ops[k];
+    if (op.tag === "eq") return op.afterIdx + 1;
+    if (op.tag === "ins") return op.afterIdx + 1;
+  }
+  // No future after-line — point past the last line.
+  return afterLen;
+}
+
+/** Find what beforeStart should be when a hunk begins with insertions. */
+function inferBeforeStart(ops: DiffOp[], from: number, beforeLen: number): number {
+  for (let k = from; k < ops.length; k++) {
+    const op = ops[k];
+    if (op.tag === "eq") return op.beforeIdx + 1;
+    if (op.tag === "del") return op.beforeIdx + 1;
+  }
+  return beforeLen;
 }
 
 const z = tool.schema;
