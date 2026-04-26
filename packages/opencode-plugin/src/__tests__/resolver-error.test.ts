@@ -20,7 +20,15 @@ function mockNoBinaryEnvironment(downloadedBinary: string | null = null) {
     getCachedBinaryPath: () => null,
     ensureBinary: async () => downloadedBinary,
   }));
-  mock.module("node:fs", () => ({ existsSync: () => false }));
+  // NOTE: do NOT mock "node:fs" here. A global mock.module("node:fs", ...) leaks
+  // to every test file imported afterwards in the same bun test run, breaking
+  // any code that uses real fs (e.g. notifications.ts dedup file). The other
+  // mocks already prevent the resolver from reaching real fs paths:
+  //   - getCachedBinaryPath returns null (skips cache)
+  //   - createRequire().resolve throws (skips npm package)
+  //   - execSync throws (skips PATH)
+  //   - homedir() returns /tmp/aft-home so the cargo fallback resolves to a
+  //     path that does not exist on CI runners.
   mock.module("node:child_process", () => ({ execSync: execMock }));
   mock.module("node:module", () => ({
     createRequire: () => ({ resolve: resolveMock }),
