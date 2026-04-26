@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use ast_grep_core::tree_sitter::LanguageExt;
 
 use crate::ast_grep_lang::AstGrepLang;
+use crate::commands::ast_scope::collect_ast_files;
 use crate::context::AppContext;
 use crate::edit::dry_run_diff;
 use crate::protocol::{RawRequest, Response};
@@ -127,7 +128,11 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    let files = collect_files(&project_root, &lang, &paths, &globs);
+    let scope =
+        match collect_ast_files(&req.id, "ast_replace", &project_root, &lang, &paths, &globs) {
+            Ok(scope) => scope,
+            Err(resp) => return resp,
+        };
 
     let mut file_results: Vec<serde_json::Value> = Vec::new();
     let mut total_replacements = 0usize;
@@ -135,7 +140,7 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
     let mut files_searched = 0usize;
     let mut files_with_matches = 0usize;
 
-    for file_path in &files {
+    for file_path in &scope.files {
         files_searched += 1;
         let original = match std::fs::read_to_string(file_path.as_path()) {
             Ok(s) => s,
@@ -226,6 +231,8 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
             "total_files": total_files,
             "files_with_matches": files_with_matches,
             "files_searched": files_searched,
+            "no_files_matched_scope": scope.no_files_matched_scope,
+            "scope_warnings": scope.scope_warnings,
             "dry_run": dry_run,
         }),
     )
@@ -237,80 +244,4 @@ fn validate_matched_file_path(
     file_path: &Path,
 ) -> Result<PathBuf, Response> {
     ctx.validate_path(req_id, file_path)
-}
-
-fn collect_files(
-    project_root: &Path,
-    lang: &AstGrepLang,
-    paths: &[String],
-    globs: &[String],
-) -> Vec<PathBuf> {
-    use ignore::WalkBuilder;
-
-    let mut override_builder = ignore::overrides::OverrideBuilder::new(project_root);
-    for g in globs {
-        let _ = override_builder.add(g);
-    }
-    let overrides = override_builder.build().ok();
-
-    let roots: Vec<PathBuf> = if paths.is_empty() {
-        vec![project_root.to_path_buf()]
-    } else {
-        paths
-            .iter()
-            .map(|p| {
-                let pb = PathBuf::from(p);
-                if pb.is_absolute() {
-                    pb
-                } else {
-                    project_root.join(p)
-                }
-            })
-            .collect()
-    };
-
-    let mut result = Vec::new();
-
-    for root in &roots {
-        let mut builder = WalkBuilder::new(root);
-        builder
-            .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true);
-
-        if let Some(ref ov) = overrides {
-            builder.overrides(ov.clone());
-        }
-
-        builder.filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            if entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                return !matches!(
-                    name.as_ref(),
-                    "node_modules"
-                        | "target"
-                        | "venv"
-                        | ".venv"
-                        | ".git"
-                        | "__pycache__"
-                        | ".tox"
-                        | "dist"
-                        | "build"
-                );
-            }
-            true
-        });
-
-        for entry in builder.build().filter_map(|e| e.ok()) {
-            if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                let path = entry.into_path();
-                if lang.matches_path(&path) {
-                    result.push(path);
-                }
-            }
-        }
-    }
-
-    result
 }

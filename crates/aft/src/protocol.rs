@@ -48,6 +48,50 @@ impl RawRequest {
 /// `data` is flattened into the top-level JSON object, so a response like
 /// `Response { id: "1", success: true, data: json!({"command": "pong"}) }`
 /// serializes to `{"id":"1","success":true,"command":"pong"}`.
+///
+/// # Honest reporting convention (tri-state)
+///
+/// Tools that search, check, or otherwise produce results MUST follow this
+/// convention so agents can distinguish "did the work, found nothing" from
+/// "couldn't do the work" from "partially did the work":
+///
+/// 1. **`success: false`** — the requested work could not be performed.
+///    Includes a `code` (e.g., `"path_not_found"`, `"no_lsp_server"`,
+///    `"project_too_large"`) and a human-readable `message`. The agent
+///    should treat this as an error and read the message.
+///
+/// 2. **`success: true` + completion signaling** — the work was performed.
+///    Tools must report whether the result is *complete* OR which subset
+///    was actually performed. Conventional fields:
+///    - `complete: true` — full result, agent can trust absence of items
+///    - `complete: false` + `pending_files: [...]` / `unchecked_files: [...]`
+///      / `scope_warnings: [...]` — partial result, with named gaps
+///    - `removed: true|false` (for mutations) — did the file actually change
+///    - `skipped_files: [{file, reason}]` — files we couldn't process inside
+///      the requested scope
+///    - `no_files_matched_scope: bool` — the scope (path/glob) found zero
+///      candidates (distinct from "candidates found, no matches")
+///
+/// 3. **Side-effect skip codes** — when the main work succeeded but a
+///    non-essential side step was skipped (e.g., post-write formatting),
+///    use a `<step>_skipped_reason` field. Approved values:
+///    - `format_skipped_reason`: `"unsupported_language"` |
+///      `"no_formatter_configured"` | `"formatter_not_installed"` |
+///      `"timeout"` | `"error"`
+///    - `validate_skipped_reason`: `"unsupported_language"` |
+///      `"no_checker_configured"` | `"checker_not_installed"` |
+///      `"timeout"` | `"error"`
+///
+/// **Anti-patterns to avoid:**
+/// - Returning `success: true` with empty results when the scope didn't
+///   resolve to any files — agent reads as "all clear" but really nothing
+///   was checked. Use `no_files_matched_scope: true` or
+///   `success: false, code: "path_not_found"`.
+/// - Reusing `format_skipped_reason: "not_found"` for two different causes
+///   ("no formatter configured" vs "configured formatter binary missing").
+///   The agent can't act on the ambiguous code.
+///
+/// See ARCHITECTURE.md "Honest reporting convention" for the full rationale.
 #[derive(Debug, Serialize)]
 pub struct Response {
     pub id: String,

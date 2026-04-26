@@ -99,6 +99,13 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface ConfigureWarningsContext {
+  projectRoot: string;
+  sessionId?: string;
+  client?: unknown;
+  warnings: unknown[];
+}
+
 export interface BridgeOptions {
   /** Request timeout in milliseconds. Default: 30000 */
   timeoutMs?: number;
@@ -108,6 +115,13 @@ export interface BridgeOptions {
   minVersion?: string;
   /** Called when binary version is older than minVersion. Receives (binaryVersion, minVersion). */
   onVersionMismatch?: (binaryVersion: string, minVersion: string) => void;
+  /** Called after the first successful configure returns user-visible warnings. */
+  onConfigureWarnings?: (context: ConfigureWarningsContext) => void | Promise<void>;
+}
+
+interface SendOptions {
+  timeoutMs?: number;
+  configureWarningClient?: unknown;
 }
 
 /**
@@ -137,6 +151,9 @@ export class BinaryBridge {
   private configOverrides: Record<string, unknown>;
   private minVersion: string | undefined;
   private onVersionMismatch: ((binaryVersion: string, minVersion: string) => void) | undefined;
+  private onConfigureWarnings:
+    | ((context: ConfigureWarningsContext) => void | Promise<void>)
+    | undefined;
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -152,6 +169,7 @@ export class BinaryBridge {
     this.configOverrides = clampSemanticTimeout(configOverrides ?? {}, this.timeoutMs);
     this.minVersion = options?.minVersion;
     this.onVersionMismatch = options?.onVersionMismatch;
+    this.onConfigureWarnings = options?.onConfigureWarnings;
   }
 
   /** Number of times the binary has been restarted after a crash. */
@@ -171,7 +189,7 @@ export class BinaryBridge {
   async send(
     command: string,
     params: Record<string, unknown> = {},
-    options?: { timeoutMs?: number },
+    options?: SendOptions,
   ): Promise<Record<string, unknown>> {
     if (this._shuttingDown) {
       throw new Error(`[aft-pi] Bridge is shutting down, cannot send "${command}"`);
@@ -202,6 +220,7 @@ export class BinaryBridge {
               // Large-repo warning is emitted by the Rust side via log::warn!
               // and relayed through stderr → plugin log. No need to re-log here
               // (doing so would just duplicate the same line in aft-pi.log).
+              await this.deliverConfigureWarnings(configResult, params, options);
               await this.checkVersion();
               // Re-check liveness after version check — checkVersion() swallows
               // errors as best-effort, so the bridge may have died without throwing.
@@ -266,6 +285,29 @@ export class BinaryBridge {
         }
       });
     });
+  }
+
+  private async deliverConfigureWarnings(
+    configResult: Record<string, unknown>,
+    params: Record<string, unknown>,
+    options: SendOptions | undefined,
+  ): Promise<void> {
+    if (!this.onConfigureWarnings || !Array.isArray(configResult.warnings)) return;
+    if (configResult.warnings.length === 0) return;
+
+    try {
+      const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
+      await this.onConfigureWarnings({
+        projectRoot: this.cwd,
+        sessionId,
+        client: options?.configureWarningClient,
+        warnings: configResult.warnings,
+      });
+    } catch (err) {
+      warn(
+        `configure warning delivery failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Kill the child process and reject all pending requests. */

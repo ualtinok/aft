@@ -10,32 +10,53 @@ const z = tool.schema;
 export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
   const diagnosticsTool: ToolDefinition = {
     description:
-      "Get errors, warnings, hints from a language server. " +
-      "Returns: { diagnostics: Array<{ file, line, column, end_line, end_column, severity, message, code }>, total: number, files_with_errors: number }.",
+      "On-demand LSP file/scope check. Spawns the relevant language server (if " +
+      "registered for the file's extension), opens the document, prefers LSP 3.17 " +
+      "pull diagnostics when supported, and falls back to push + waitMs otherwise. " +
+      "NOT a project-wide type checker — for full coverage run `tsc --noEmit`, " +
+      "`cargo check`, `pyright`, etc.\n" +
+      "\n" +
+      "Returns: {\n" +
+      "  diagnostics: Array<{file, line, column, end_line, end_column, severity, message, code, source}>,\n" +
+      "  total: number,\n" +
+      "  files_with_errors: number,\n" +
+      "  complete: boolean,                  // true = trustable absence; false = partial\n" +
+      "  lsp_servers_used: Array<{           // honest per-server status\n" +
+      "    server_id, scope: 'file'|'workspace', status: 'pull_ok'|'pull_unchanged'|'push_only'|'no_root_marker (...)' |\n" +
+      "    'binary_not_installed: <name>'|'spawn_failed: ...'|'pull_failed: ...'|'workspace_pull_unsupported'|...\n" +
+      "  }>,\n" +
+      "  unchecked_files?: string[],         // directory mode only — files we have no info for\n" +
+      "  walk_truncated?: boolean,           // directory walk hit the 200-file cap\n" +
+      "  note?: string                       // present when no LSP server is registered for the file's extension\n" +
+      "}\n" +
+      "\n" +
+      "**Reading the response honestly:**\n" +
+      "- `total: 0, complete: true, lsp_servers_used: [{status: 'pull_ok'}]` → file is genuinely clean.\n" +
+      "- `total: 0, lsp_servers_used: []` → no server registered for this extension; nothing was checked.\n" +
+      "- `lsp_servers_used: [{status: 'binary_not_installed: bash-language-server'}]` → install the server to get diagnostics.\n" +
+      "- `complete: false` (directory mode) → some files in the directory weren't checked; see `unchecked_files`.",
     args: {
       filePath: z
         .string()
         .optional()
         .describe(
-          "Path to file to get diagnostics for. Provide 'filePath' for a single file, 'directory' for all files under a path, or omit both for all tracked files",
+          "Path to a file to check. Mutually exclusive with 'directory'. Omit both to dump all cached diagnostics.",
         ),
       directory: z
         .string()
         .optional()
         .describe(
-          "Path to directory to get diagnostics for all files under it. Mutually exclusive with 'filePath'",
+          "Path to a directory. Returns cached diagnostics + workspace pull from active servers; lists files we have no info for in 'unchecked_files'. Capped at 200 walked files.",
         ),
       severity: z
         .enum(["error", "warning", "information", "hint", "all"])
         .optional()
-        .describe(
-          "Filter by severity — 'error', 'warning', 'information', 'hint', 'all' (default: 'all')",
-        ),
+        .describe("Filter by severity (default: 'all')."),
       waitMs: z
         .number()
         .optional()
         .describe(
-          "Wait N ms for fresh diagnostics before returning (max 10000, default: 0). Use after edits to let the server re-analyze.",
+          "Wait up to N ms (max 10000, default 0) for push diagnostics to arrive. Only matters for servers that don't support LSP 3.17 pull (bash-language-server, yaml-language-server). Use after an edit to let the server re-analyze.",
         ),
     },
     execute: async (args, context): Promise<string> => {

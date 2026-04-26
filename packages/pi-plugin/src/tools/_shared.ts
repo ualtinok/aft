@@ -70,10 +70,14 @@ export async function callBridge(
   if (sessionId) {
     merged.session_id = sessionId;
   }
+  const sendOptions = {
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    configureWarningClient: extCtx,
+  };
   const response = await bridge.send(
     command,
     merged,
-    timeoutMs !== undefined ? { timeoutMs } : undefined,
+    Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
   );
   if (response.success === false) {
     const message =

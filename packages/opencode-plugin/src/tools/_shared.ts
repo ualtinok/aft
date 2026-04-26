@@ -115,9 +115,13 @@ export function callBridge(
     merged.session_id = runtime.sessionID;
   }
   const timeoutMs = timeoutForCommand(command);
+  const sendOptions = {
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    configureWarningClient: ctx.client,
+  };
   return bridgeFor(ctx, runtime).send(
     command,
     merged,
-    timeoutMs !== undefined ? { timeoutMs } : undefined,
+    Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
   );
 }

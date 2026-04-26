@@ -37,6 +37,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerStatusCommand } from "./commands/aft-status.js";
 import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
 import { log, warn } from "./logger.js";
+import { type ConfigureWarning, deliverConfigureWarnings } from "./notifications.js";
 import { ensureOnnxRuntime, getManualInstallHint } from "./onnx-runtime.js";
 import { BridgePool } from "./pool.js";
 import { findBinary } from "./resolver.js";
@@ -72,6 +73,21 @@ const ALL_ONLY_TOOLS = new Set([
   "aft_transform",
   "aft_refactor",
 ]);
+
+function isConfigureWarning(value: unknown): value is ConfigureWarning {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const warning = value as Record<string, unknown>;
+  return (
+    (warning.kind === "formatter_not_installed" ||
+      warning.kind === "checker_not_installed" ||
+      warning.kind === "lsp_binary_missing") &&
+    typeof warning.hint === "string"
+  );
+}
+
+function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
+  return warnings.filter(isConfigureWarning);
+}
 
 /** Resolve the AFT storage directory (auth + semantic index + ONNX cache). */
 function resolveStorageDir(): string {
@@ -231,7 +247,28 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     (configOverrides as Record<string, unknown>)._ort_dylib_dir = ortDylibDir;
   }
 
-  const pool = new BridgePool(binaryPath, { minVersion: PLUGIN_VERSION }, configOverrides);
+  const pool = new BridgePool(
+    binaryPath,
+    {
+      minVersion: PLUGIN_VERSION,
+      onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
+        if (!sessionId || !client) return;
+        const validWarnings = coerceConfigureWarnings(warnings);
+        if (validWarnings.length === 0) return;
+        await deliverConfigureWarnings(
+          {
+            client,
+            sessionId,
+            storageDir,
+            pluginVersion: PLUGIN_VERSION,
+            projectRoot,
+          },
+          validWarnings,
+        );
+      },
+    },
+    configOverrides,
+  );
   const ctx: PluginContext = { pool, config, storageDir };
 
   const surface = resolveToolSurface(config);

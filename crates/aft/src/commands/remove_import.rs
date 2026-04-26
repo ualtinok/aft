@@ -109,11 +109,42 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
         .collect();
 
     if matching.is_empty() {
-        return Response::error(
-            &req.id,
-            "import_not_found",
-            format!("remove_import: no import found for module '{}'", module),
-        );
+        let mut result = serde_json::json!({
+            "file": file,
+            "removed": false,
+            "module": module,
+            "reason": "module_not_found",
+        });
+        if let Some(ref n) = name {
+            result["name"] = serde_json::json!(n);
+        }
+        return Response::success(&req.id, result);
+    }
+
+    // --- Determine edit ---
+    let new_source = if let Some(ref target_name) = name {
+        remove_name_from_imports(&source, &matching, target_name, lang)
+    } else {
+        remove_entire_imports(&source, &matching)
+    };
+    let removed = new_source != source;
+
+    if !removed {
+        let reason = if name.is_some() {
+            "name_not_found"
+        } else {
+            "no_matching_import_removed"
+        };
+        let mut result = serde_json::json!({
+            "file": file,
+            "removed": false,
+            "module": module,
+            "reason": reason,
+        });
+        if let Some(ref n) = name {
+            result["name"] = serde_json::json!(n);
+        }
+        return Response::success(&req.id, result);
     }
 
     // --- Auto-backup (skip for dry-run) ---
@@ -128,20 +159,13 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
         None
     };
 
-    // --- Determine edit ---
-    let new_source = if let Some(ref target_name) = name {
-        remove_name_from_imports(&source, &matching, target_name, lang)
-    } else {
-        remove_entire_imports(&source, &matching)
-    };
-
     // Dry-run: return diff without modifying disk
     if edit::is_dry_run(&req.params) {
         let dr = edit::dry_run_diff(&source, &new_source, &path);
         return Response::success(
             &req.id,
             serde_json::json!({
-                "ok": true, "dry_run": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
+                "ok": true, "dry_run": true, "removed": true, "diff": dr.diff, "syntax_valid": dr.syntax_valid,
             }),
         );
     }
@@ -164,7 +188,7 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
     // --- Build response ---
     let mut result = serde_json::json!({
         "file": file,
-        "removed": true,
+        "removed": removed,
         "module": module,
         "formatted": write_result.formatted,
     });

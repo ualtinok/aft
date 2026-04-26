@@ -128,6 +128,33 @@
 
 **Strategy:** Return structured Rust `Response::error` payloads from command handlers, convert failed responses into plugin-side exceptions, and restart hung or crashed worker processes in `packages/opencode-plugin/src/bridge.ts`.
 
+## Honest Reporting Convention
+
+**Goal:** an agent reading any AFT response must be able to distinguish three states without ambiguity: (1) the work could not be performed, (2) the work was performed and the result is complete, (3) the work was performed but the result is partial.
+
+**Rule (tri-state):**
+
+1. **`success: false` + `code` + `message`** — the requested work could not be performed. Codes are machine-actionable strings such as `"path_not_found"`, `"no_lsp_server"`, `"project_too_large"`, `"invalid_request"`, `"ambiguous_match"`. The agent must read the message before continuing.
+
+2. **`success: true` + completion signaling** — the work was performed. Tools that produce results MUST report whether the result is complete and, if not, name the gaps. Conventional fields:
+    - `complete: true` — the agent can trust absence of items in the result
+    - `complete: false` + a named gap field — partial result. Gap fields include `pending_files`, `unchecked_files`, `scope_warnings`, `skipped_files: [{file, reason}]`, `walk_truncated`
+    - `removed: bool` (mutations) — did the file actually change? `false` is a valid success when the requested change was a no-op.
+    - `no_files_matched_scope: bool` (search tools) — distinguishes "the path/glob you gave me resolved to zero files" from "I searched N files and found nothing"
+
+3. **Side-effect skip codes** — when the main work succeeded but a non-essential side step was skipped (e.g. post-write formatting), use a `<step>_skipped_reason` field so the agent gets specific feedback without treating the whole call as a failure. Approved values:
+    - `format_skipped_reason`: `"unsupported_language"` | `"no_formatter_configured"` | `"formatter_not_installed"` | `"timeout"` | `"error"`
+    - `validate_skipped_reason`: `"unsupported_language"` | `"no_checker_configured"` | `"checker_not_installed"` | `"timeout"` | `"error"`
+
+**Anti-patterns this convention exists to prevent:**
+
+- Returning `success: true` with empty results when the scope (path/glob) didn't resolve to any files — the agent reads it as "all clear" but really nothing was checked. Return `no_files_matched_scope: true` (when the scope was syntactically valid but matched zero files) or `success: false, code: "path_not_found"` (when a passed path doesn't exist).
+- Reusing one skip-reason string for two distinct causes (e.g., `"not_found"` for both "language has no formatter configured" and "configured formatter binary missing"). The agent has different remediations for each — split them.
+- Silently dropping files that fail to parse / open / decode inside a multi-file or directory operation. Always include a `skipped_files: [{file, reason}]` array so the agent knows X out of Y files were actually processed.
+- Asserting `success: true` after a partial transaction without a `complete: false` flag and a list of pending work.
+
+**Where this is documented in code:** `crates/aft/src/protocol.rs` `Response` doc comment carries the canonical rule and the approved field set. New tools must follow this convention; existing tools are migrating.
+
 ## Cross-Cutting Concerns
 
 **Logging:** Write plugin logs through `packages/opencode-plugin/src/logger.ts` and Rust logs through `env_logger` in `crates/aft/src/main.rs`.

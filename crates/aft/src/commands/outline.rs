@@ -3,8 +3,13 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::context::AppContext;
+use crate::edit;
+use crate::error::AftError;
+use crate::parser::detect_language;
 use crate::protocol::{RawRequest, Response};
 use crate::symbols::{Range, Symbol};
+
+const MAX_OUTLINE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// A single entry in the outline tree.
 ///
@@ -33,43 +38,53 @@ pub struct OutlineEntry {
 pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
     const MAX_OUTPUT_BYTES: usize = 30 * 1024;
 
+    if let Some(directory) = req.params.get("directory").and_then(|v| v.as_str()) {
+        let dir_path = match ctx.validate_path(&req.id, Path::new(directory)) {
+            Ok(path) => path,
+            Err(resp) => return resp,
+        };
+        if !dir_path.is_dir() {
+            return Response::error(
+                &req.id,
+                "file_not_found",
+                format!("directory not found: {}", directory),
+            );
+        }
+
+        let files = discover_outline_files(&dir_path);
+        let project_root = ctx.config().project_root.clone();
+        let (file_outlines, skipped_files) =
+            match outline_many_files(&files, ctx, &req.id, project_root.as_deref()) {
+                Ok(result) => result,
+                Err(resp) => return resp,
+            };
+
+        let text = format_multi_file_tree(&file_outlines, MAX_OUTPUT_BYTES, files.len());
+        return Response::success(
+            &req.id,
+            serde_json::json!({ "text": text, "skipped_files": skipped_files }),
+        );
+    }
+
     // Multi-file mode: if "files" array is present, outline each file
     if let Some(files_arr) = req.params.get("files").and_then(|v| v.as_array()) {
         let project_root = ctx.config().project_root.clone();
-        let mut file_outlines: Vec<FileOutline> = Vec::with_capacity(files_arr.len());
+        let files: Vec<String> = files_arr
+            .iter()
+            .filter_map(|file_val| file_val.as_str().map(String::from))
+            .collect();
         let total_files_requested = files_arr.len();
-
-        for file_val in files_arr {
-            let file = match file_val.as_str() {
-                Some(f) => f,
-                None => continue,
-            };
-            let path = match ctx.validate_path(&req.id, Path::new(file)) {
-                Ok(path) => path,
+        let (file_outlines, skipped_files) =
+            match outline_many_files(&files, ctx, &req.id, project_root.as_deref()) {
+                Ok(result) => result,
                 Err(resp) => return resp,
             };
-            if !path.exists() {
-                continue;
-            }
-            match ctx.provider().list_symbols(&path) {
-                Ok(symbols) => {
-                    let entries = build_outline_tree(&symbols);
-                    let rel_path = project_root
-                        .as_ref()
-                        .and_then(|root| path.strip_prefix(root).ok())
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| file.to_string());
-                    file_outlines.push(FileOutline {
-                        path: rel_path,
-                        entries,
-                    });
-                }
-                Err(_) => continue,
-            }
-        }
 
         let text = format_multi_file_tree(&file_outlines, MAX_OUTPUT_BYTES, total_files_requested);
-        return Response::success(&req.id, serde_json::json!({ "text": text }));
+        return Response::success(
+            &req.id,
+            serde_json::json!({ "text": text, "skipped_files": skipped_files }),
+        );
     }
 
     // Single-file mode (original behavior)
@@ -79,7 +94,7 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
             return Response::error(
                 &req.id,
                 "invalid_request",
-                "outline: missing required param 'file' or 'files'",
+                "outline: missing required param 'file', 'files', or 'directory'",
             );
         }
     };
@@ -194,6 +209,159 @@ fn insert_at_scope(
 struct FileOutline {
     path: String, // relative path
     entries: Vec<OutlineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkippedFile {
+    file: String,
+    reason: String,
+}
+
+impl SkippedFile {
+    fn new(file: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            file: file.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+fn outline_many_files(
+    files: &[String],
+    ctx: &AppContext,
+    req_id: &str,
+    project_root: Option<&Path>,
+) -> Result<(Vec<FileOutline>, Vec<SkippedFile>), Response> {
+    let mut file_outlines: Vec<FileOutline> = Vec::with_capacity(files.len());
+    let mut skipped_files: Vec<SkippedFile> = Vec::new();
+
+    for file in files {
+        let path = match ctx.validate_path(req_id, Path::new(file)) {
+            Ok(path) => path,
+            Err(resp) => return Err(resp),
+        };
+        if !path.exists() {
+            skipped_files.push(SkippedFile::new(file, "file_not_found"));
+            continue;
+        }
+
+        let rel_path = display_path(&path, file, project_root);
+        if let Some(reason) = outline_skip_reason(&path) {
+            skipped_files.push(SkippedFile::new(rel_path, reason));
+            continue;
+        }
+
+        match ctx.provider().list_symbols(&path) {
+            Ok(symbols) => {
+                let entries = build_outline_tree(&symbols);
+                file_outlines.push(FileOutline {
+                    path: rel_path,
+                    entries,
+                });
+            }
+            Err(e) => skipped_files.push(SkippedFile::new(rel_path, outline_error_reason(&e))),
+        }
+    }
+
+    Ok((file_outlines, skipped_files))
+}
+
+fn discover_outline_files(directory: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_outline_files(directory, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
+    if files.len() >= 200 {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if files.len() >= 200 {
+            return;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if should_skip_directory(&path) {
+                continue;
+            }
+            collect_outline_files(&path, files);
+        } else if path.is_file() {
+            files.push(path.to_string_lossy().to_string());
+        }
+    }
+}
+
+fn should_skip_directory(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | "dist"
+            | "build"
+            | "out"
+            | ".next"
+            | ".nuxt"
+            | "target"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "vendor"
+            | ".turbo"
+            | "coverage"
+            | ".nyc_output"
+            | ".cache"
+    ) || name.starts_with('.')
+}
+
+fn display_path(path: &Path, fallback: &str, project_root: Option<&Path>) -> String {
+    project_root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn outline_skip_reason(path: &Path) -> Option<&'static str> {
+    if !path.is_file() {
+        return Some("file_not_found");
+    }
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Some("file_not_found"),
+    };
+    if metadata.len() > MAX_OUTLINE_FILE_BYTES {
+        return Some("too_large");
+    }
+
+    if detect_language(path).is_none() {
+        return Some("unsupported_language");
+    }
+
+    match edit::validate_syntax(path) {
+        Ok(Some(false)) => Some("parse_error"),
+        Ok(Some(true)) | Ok(None) => None,
+        Err(e) => Some(outline_error_reason(&e)),
+    }
+}
+
+fn outline_error_reason(error: &AftError) -> &'static str {
+    match error.code() {
+        "invalid_request" => "unsupported_language",
+        "parse_error" => "parse_error",
+        "file_not_found" => "file_not_found",
+        "project_too_large" => "too_large",
+        _ => "error",
+    }
 }
 
 /// Short kind abbreviation for compact display.

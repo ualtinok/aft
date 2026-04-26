@@ -46,6 +46,7 @@ export class BridgePool {
       maxRestarts: options.maxRestarts,
       minVersion: options.minVersion,
       onVersionMismatch: options.onVersionMismatch,
+      onConfigureWarnings: options.onConfigureWarnings,
     };
     this.configOverrides = configOverrides;
     if (Number.isFinite(this.idleTimeoutMs)) {

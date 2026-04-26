@@ -122,7 +122,7 @@ export function registerLspTools(pi: ExtensionAPI, ctx: PluginContext): void {
     name: "lsp_diagnostics",
     label: "lsp diagnostics",
     description:
-      "Get errors, warnings, hints from a language server. Provide `filePath` for a single file, `directory` for all files under a path, or omit both for all tracked files.",
+      "On-demand LSP file/scope check. Spawns the relevant language server (if registered for the extension), opens the document, prefers LSP 3.17 pull diagnostics where supported, falls back to push + waitMs otherwise. NOT a project-wide type checker — for full coverage run `tsc --noEmit`, `cargo check`, `pyright`, etc.\n\nResponse fields: `diagnostics`, `total`, `files_with_errors`, `complete` (true = trustable absence), `lsp_servers_used` (per-server status, e.g. `pull_ok`, `push_only`, `binary_not_installed: bash-language-server`, `no_root_marker (...)`), and (directory mode) `unchecked_files`.\n\nReading honestly: `total: 0` + empty `lsp_servers_used` means **nothing was checked** — install the relevant LSP server. `total: 0` + `pull_ok` means the file is genuinely clean.\n\nProvide `filePath` for a single file, `directory` for files under a path (workspace pull from active servers + 200-file walk for unchecked listing), or omit both to dump cached diagnostics.",
     parameters: LspDiagnosticsParams,
     async execute(
       _toolCallId: string,

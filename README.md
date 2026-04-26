@@ -480,21 +480,49 @@ in dry-run mode, or writes changes with backups when applied.
 
 ### lsp_diagnostics
 
-Get errors, warnings, and hints from the language server. Lazily spawns the appropriate server
-(typescript-language-server, pyright, rust-analyzer, gopls) on first use.
+On-demand LSP file/scope check. Lazily spawns the relevant language server, opens the document, prefers
+LSP 3.17 pull diagnostics where supported (rust-analyzer, gopls, ty), and falls back to push + waitMs
+for servers that don't support pull (bash-language-server, yaml-language-server, typescript-language-server).
+
+**Not** a project-wide type checker — for full coverage run `tsc --noEmit`, `cargo check`,
+`pyright src/`, etc. AFT's LSP is for fast feedback during edits.
+
+**Built-in servers (6 + 1 experimental):** TypeScript (`.ts`/`.tsx`/`.js`/`.jsx`), Pyright (Python),
+rust-analyzer (Rust), gopls (Go), bash-language-server (`.sh`/`.bash`/`.zsh`),
+yaml-language-server (`.yaml`/`.yml`), and ty (Python, gated by `experimental_lsp_ty`).
+
+User-defined servers go in `lsp.servers` (see Configuration). Disable any built-in via `lsp.disabled`.
 
 ```json
-// Check a single file
+// Check a single file (pull where supported, push fallback otherwise)
 { "filePath": "src/api.ts", "severity": "error" }
 
-// Check all files in a directory
+// Check files under a directory (workspace pull from active servers + 200-file walk for unchecked listing)
 { "directory": "src/", "severity": "all" }
 
-// Wait for fresh diagnostics after an edit
-{ "filePath": "src/api.ts", "waitMs": 2000 }
+// Wait up to 2s for push diagnostics on push-only servers (bash, yaml, typescript)
+{ "filePath": "deploy.sh", "waitMs": 2000 }
 ```
 
-Returns `{ file, line, column, severity, message, code }` per diagnostic.
+Response shape:
+
+```jsonc
+{
+  "diagnostics": [{ "file", "line", "column", "end_line", "end_column", "severity", "message", "code" }],
+  "total": 2,
+  "files_with_errors": 1,
+  "complete": true,                 // true = trustable absence of diagnostics; false = partial result
+  "lsp_servers_used": [             // per-server status; empty array means nothing was checked
+    { "id": "rust-analyzer", "status": "pull_ok" },
+    { "id": "bash-language-server", "status": "binary_not_installed" }
+  ],
+  "unchecked_files": []              // directory mode only — files we couldn't get info for
+}
+```
+
+**Reading honestly:** `total: 0` with empty `lsp_servers_used` means **nothing was checked** —
+install the relevant LSP server (see warnings on plugin startup). `total: 0` with `pull_ok` /
+`push_only` means the file is genuinely clean.
 
 ---
 
@@ -949,11 +977,22 @@ Both files are JSONC (comments allowed).
         "extensions": [".typ"],
         "binary": "tinymist",
         "args": [],
-        "root_markers": [".git", "typst.toml"]
+        "root_markers": [".git", "typst.toml"],
+        "env": {                  // optional — extra env vars passed to the spawned server
+          "TYPST_FONT_PATHS": "/usr/share/fonts"
+        },
+        "initialization_options": {  // optional — server-specific LSP `initializationOptions`
+          "formatterMode": "typstyle"
+        }
       }
     },
     "disabled": ["pyright"],
-    "python": "ty"   // "auto" (default) | "pyright" | "ty"
+    "python": "ty",  // "auto" (default) | "pyright" | "ty"
+
+    // LRU cap for the in-memory diagnostic cache.
+    // Bigger = more files retained across the session.
+    // Default: 5000. Set to 0 to disable cap (live dangerously on huge monorepos).
+    "diagnostic_cache_size": 5000
   },
 
   // Enable Astral's experimental ty Python type checker. Implied when lsp.python === "ty".
@@ -996,6 +1035,24 @@ configuration above shows registering `tinymist` for Typst files. Required field
 
 **Disabling a built-in:** add the server's id (`"pyright"`, `"yaml-language-server"`, etc.) to
 `lsp.disabled`. IDs are case-insensitive.
+
+**Custom server fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `extensions` | yes | Array of file extensions (leading `.` is stripped) |
+| `binary` | yes | Binary name resolved against `PATH` |
+| `args` | no | Args passed to the server (default: `[]`) |
+| `root_markers` | no | Filenames whose presence anchors the workspace root (default: `[".git"]`) |
+| `env` | no | Extra environment variables for the spawned process |
+| `initialization_options` | no | Passed to the server's LSP `initialize` request |
+| `disabled` | no | Skip this server even though it's registered |
+
+**Missing-tool warnings:** on startup, AFT detects configured-but-missing formatters, type
+checkers, and LSP binaries (for languages your project actually uses) and surfaces a one-time
+notification per warning via OpenCode's ignored-message channel. Dismissed warnings do not
+re-fire on plugin updates — dedupe is per-warning-content, persisted in
+`<storage_dir>/warned_tools.json`.
 
 ### Working with large repositories
 

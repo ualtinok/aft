@@ -145,17 +145,11 @@ fn format_integration_unsupported_language() {
     assert!(status.success());
 }
 
-/// Write a .py file when no Python formatter is available → not_found.
+/// Write a .py file without a formatter config → no_formatter_configured.
 #[test]
-fn format_integration_not_found() {
-    // This test only makes sense if neither ruff nor black is on PATH
-    if is_on_path("ruff") || is_on_path("black") {
-        eprintln!("SKIP: ruff or black is on PATH, cannot test not_found path");
-        return;
-    }
-
-    let dir = format_test_dir("not_found");
-    let target = dir.join("format_not_found.py");
+fn format_integration_no_formatter_configured() {
+    let dir = format_test_dir("no_formatter_configured");
+    let target = dir.join("format_no_formatter_configured.py");
     let _ = fs::remove_file(&target);
 
     let mut aft = AftProcess::spawn();
@@ -170,8 +164,38 @@ fn format_integration_not_found() {
         "should not be formatted without formatter"
     );
     assert_eq!(
-        resp["format_skipped_reason"], "not_found",
-        "skip reason should be not_found"
+        resp["format_skipped_reason"], "no_formatter_configured",
+        "skip reason should be no_formatter_configured"
+    );
+
+    let _ = fs::remove_file(&target);
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+/// A configured formatter whose binary is missing → formatter_not_installed.
+#[test]
+fn format_integration_formatter_not_installed() {
+    let dir = format_test_dir("formatter_not_installed");
+    fs::write(dir.join("biome.json"), "{}\n").unwrap();
+    let target = dir.join("format_formatter_not_installed.ts");
+    let _ = fs::remove_file(&target);
+
+    let path = prepend_path(&std::ffi::OsString::new(), &dir);
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+    let cfg = aft.configure(&dir);
+    assert_eq!(cfg["success"], true, "configure should succeed: {:?}", cfg);
+    let resp = aft.send(&format!(
+        r#"{{"id":"fmt-3b","command":"write","file":"{}","content":"const x = 1;\n"}}"#,
+        target.display()
+    ));
+
+    assert_eq!(resp["success"], true, "write should succeed: {:?}", resp);
+    assert_eq!(resp["formatted"], false);
+    assert_eq!(
+        resp["format_skipped_reason"], "formatter_not_installed",
+        "skip reason should be formatter_not_installed: {:?}",
+        resp
     );
 
     let _ = fs::remove_file(&target);
@@ -261,10 +285,7 @@ fn format_integration_edit_symbol_with_format() {
 }
 
 /// Verify that the `formatted` field is always present in mutation responses,
-/// even for unsupported languages. Tests across write, add_import (which
-
-/// even for unsupported languages. Tests across write, add_import (which
-/// would fail on .txt), and edit_symbol.
+/// even for unsupported languages.
 #[test]
 fn format_integration_fields_always_present() {
     let dir = format_test_dir("fields_present");
@@ -294,7 +315,7 @@ fn format_integration_fields_always_present() {
         resp
     );
     assert_eq!(resp["formatted"], false);
-    assert_eq!(resp["format_skipped_reason"], "not_found");
+    assert_eq!(resp["format_skipped_reason"], "unsupported_language");
 
     // Test 2: write to a .rs file — formatted field present with value true (if rustfmt available)
     let rs_target = dir.join("format_fields_check.rs");
@@ -495,6 +516,58 @@ fn validate_full_unsupported_language() {
     assert_eq!(
         resp["validate_skipped_reason"], "unsupported_language",
         "should skip validation for unsupported language: {:?}",
+        resp
+    );
+
+    let _ = fs::remove_file(&target);
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn validate_full_no_checker_configured() {
+    let dir = format_test_dir("validate_no_checker_configured");
+    let target = dir.join("validate_no_checker_configured.ts");
+    let _ = fs::remove_file(&target);
+
+    let mut aft = AftProcess::spawn();
+    let resp = aft.send(&format!(
+        r#"{{"id":"val-3b","command":"write","file":"{}","content":"const x = 1;\n","validate":"full"}}"#,
+        target.display()
+    ));
+
+    assert_eq!(resp["success"], true, "write should succeed: {:?}", resp);
+    assert_eq!(
+        resp["validate_skipped_reason"], "no_checker_configured",
+        "should skip validation without checker config: {:?}",
+        resp
+    );
+
+    let _ = fs::remove_file(&target);
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn validate_full_checker_not_installed() {
+    let dir = format_test_dir("validate_checker_not_installed");
+    fs::write(dir.join("tsconfig.json"), "{}\n").unwrap();
+    let target = dir.join("validate_checker_not_installed.ts");
+    let _ = fs::remove_file(&target);
+
+    let path = prepend_path(&std::ffi::OsString::new(), &dir);
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+    let cfg = aft.configure(&dir);
+    assert_eq!(cfg["success"], true, "configure should succeed: {:?}", cfg);
+    let resp = aft.send(&format!(
+        r#"{{"id":"val-3c","command":"write","file":"{}","content":"const x = 1;\n","validate":"full"}}"#,
+        target.display()
+    ));
+
+    assert_eq!(resp["success"], true, "write should succeed: {:?}", resp);
+    assert_eq!(
+        resp["validate_skipped_reason"], "checker_not_installed",
+        "should report missing checker binary: {:?}",
         resp
     );
 

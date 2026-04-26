@@ -4,6 +4,7 @@ pub mod add_import;
 pub mod add_member;
 pub mod add_struct_tags;
 pub mod ast_replace;
+pub mod ast_scope;
 pub mod ast_search;
 pub mod batch;
 pub mod call_tree;

@@ -820,18 +820,16 @@ fn remove_import_specific_name_from_multi_ts() {
 }
 
 #[test]
-fn remove_import_not_found_returns_error() {
+fn remove_import_missing_module_reports_not_removed() {
     let mut aft = AftProcess::spawn();
     let file = temp_copy("imports_ts.ts");
     let file_str = file.display().to_string();
 
     let resp = send_remove_import(&mut aft, "rm-3", &file_str, "nonexistent-module", None);
 
-    assert_eq!(
-        resp["success"], false,
-        "should fail for non-existent module"
-    );
-    assert_eq!(resp["code"], "import_not_found");
+    assert_eq!(resp["success"], true, "request should complete: {resp:?}");
+    assert_eq!(resp["removed"], false, "nothing should be removed");
+    assert_eq!(resp["reason"], "module_not_found");
 
     fs::remove_file(&file).ok();
     aft.shutdown();

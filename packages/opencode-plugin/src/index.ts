@@ -10,7 +10,9 @@ import { error, log, warn } from "./logger.js";
 import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import {
+  type ConfigureWarning,
   cleanupWarnings,
+  deliverConfigureWarnings,
   type NotificationOptions,
   sendFeatureAnnouncement,
   sendWarning,
@@ -55,6 +57,21 @@ function isTuiMode(): boolean {
 
 function throwSentinel(command: string): never {
   throw new Error(`${SENTINEL_PREFIX}${command.toUpperCase().replace(/-/g, "_")}_HANDLED__`);
+}
+
+function isConfigureWarning(value: unknown): value is ConfigureWarning {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const warning = value as Record<string, unknown>;
+  return (
+    (warning.kind === "formatter_not_installed" ||
+      warning.kind === "checker_not_installed" ||
+      warning.kind === "lsp_binary_missing") &&
+    typeof warning.hint === "string"
+  );
+}
+
+function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
+  return warnings.filter(isConfigureWarning);
 }
 
 async function sendIgnoredMessage(client: unknown, sessionID: string, text: string): Promise<void> {
@@ -231,6 +248,21 @@ const plugin: Plugin = async (input) => {
               `Auto-download failed: ${(err as Error).message}. Install manually: cargo install agent-file-tools@${minVersion}`,
             );
           },
+        );
+      },
+      onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
+        if (!sessionId) return;
+        const validWarnings = coerceConfigureWarnings(warnings);
+        if (validWarnings.length === 0) return;
+        await deliverConfigureWarnings(
+          {
+            client: client ?? input.client,
+            sessionId,
+            storageDir: configOverrides.storage_dir as string,
+            pluginVersion: PLUGIN_VERSION,
+            projectRoot,
+          },
+          validWarnings,
         );
       },
     },

@@ -3,9 +3,9 @@
 //! Provides subprocess execution with timeout protection, language-to-formatter
 //! mapping, and the `auto_format` entry point used by `write_format_validate`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -33,6 +33,30 @@ pub enum FormatError {
     Failed { tool: String, stderr: String },
     /// No formatter is configured for this language.
     UnsupportedLanguage,
+}
+
+/// A configured formatter/checker that cannot be resolved for configure warnings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MissingTool {
+    pub kind: String,
+    pub language: String,
+    pub tool: String,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCandidate {
+    tool: String,
+    source: String,
+    args: Vec<String>,
+    required: bool,
+}
+
+#[derive(Debug, Clone)]
+enum ToolDetection {
+    Found(String, Vec<String>),
+    NotConfigured,
+    NotInstalled { tool: String },
 }
 
 impl std::fmt::Display for FormatError {
@@ -155,28 +179,7 @@ pub fn clear_tool_cache() {
     }
 }
 
-/// Check if a command exists by attempting to spawn it with `--version`.
-///
-/// First checks `<project_root>/node_modules/.bin/<command>` (for locally installed tools
-/// like biome, prettier), then falls back to PATH lookup.
-/// Results are cached for 60 seconds to avoid repeated subprocess spawning.
-fn tool_available(command: &str, project_root: Option<&Path>) -> bool {
-    let key = tool_cache_key(command, project_root);
-    if let Ok(cache) = TOOL_CACHE.lock() {
-        if let Some((available, checked_at)) = cache.get(&key) {
-            if checked_at.elapsed() < TOOL_CACHE_TTL {
-                return *available;
-            }
-        }
-    }
-    let result = resolve_tool(command, project_root).is_some();
-    if let Ok(mut cache) = TOOL_CACHE.lock() {
-        cache.insert(key, (result, Instant::now()));
-    }
-    result
-}
-
-/// Like `tool_available` but also checks node_modules/.bin relative to project_root.
+/// Resolve a tool by checking node_modules/.bin relative to project_root, then PATH.
 /// Returns the full path to the tool if found, otherwise None.
 fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
     // 1. Check node_modules/.bin/<command> relative to project root
@@ -288,24 +291,19 @@ fn ruff_format_available_uncached(project_root: Option<&Path>) -> bool {
     (major, minor, patch) >= (0, 1, 2)
 }
 
-/// Detect the appropriate formatter command and arguments for a file.
-///
-/// Priority per language:
-/// - TypeScript/JavaScript/TSX: `prettier --write <file>`
-/// - Python: `ruff format <file>` (fallback: `black <file>`)
-/// - Rust: `rustfmt <file>`
-/// - Go: `gofmt -w <file>`
-///
-/// Returns `None` if no formatter is available for the language.
-pub fn detect_formatter(
-    path: &Path,
-    lang: LangId,
-    config: &Config,
-) -> Option<(String, Vec<String>)> {
-    let file_str = path.to_string_lossy().to_string();
+fn resolve_candidate_tool(
+    candidate: &ToolCandidate,
+    project_root: Option<&Path>,
+) -> Option<String> {
+    if candidate.tool == "ruff" && !ruff_format_available(project_root) {
+        return None;
+    }
 
-    // 1. Per-language override from plugin config
-    let lang_key = match lang {
+    resolve_tool(&candidate.tool, project_root)
+}
+
+fn lang_key(lang: LangId) -> &'static str {
+    match lang {
         LangId::TypeScript | LangId::JavaScript | LangId::Tsx => "typescript",
         LangId::Python => "python",
         LangId::Rust => "rust",
@@ -317,28 +315,53 @@ pub fn detect_formatter(
         LangId::Bash => "bash",
         LangId::Html => "html",
         LangId::Markdown => "markdown",
-    };
-    let project_root = config.project_root.as_deref();
-    if let Some(preferred) = config.formatter.get(lang_key) {
-        return resolve_explicit_formatter(preferred, &file_str, lang, project_root);
     }
+}
 
-    // 2. Project config file detection only — no config file means no formatting.
-    //    This avoids silently reformatting code in projects without formatter setup.
+fn has_formatter_support(lang: LangId) -> bool {
+    matches!(
+        lang,
+        LangId::TypeScript
+            | LangId::JavaScript
+            | LangId::Tsx
+            | LangId::Python
+            | LangId::Rust
+            | LangId::Go
+    )
+}
+
+fn has_checker_support(lang: LangId) -> bool {
+    matches!(
+        lang,
+        LangId::TypeScript
+            | LangId::JavaScript
+            | LangId::Tsx
+            | LangId::Python
+            | LangId::Rust
+            | LangId::Go
+    )
+}
+
+fn formatter_candidates(lang: LangId, config: &Config, file_str: &str) -> Vec<ToolCandidate> {
+    let project_root = config.project_root.as_deref();
+    if let Some(preferred) = config.formatter.get(lang_key(lang)) {
+        return explicit_formatter_candidate(preferred, file_str);
+    }
 
     match lang {
         LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
-            // biome.json / biome.jsonc → biome (check node_modules/.bin first)
             if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
-                if let Some(biome_cmd) = resolve_tool("biome", project_root) {
-                    return Some((
-                        biome_cmd,
-                        vec!["format".to_string(), "--write".to_string(), file_str],
-                    ));
-                }
-            }
-            // .prettierrc / .prettierrc.* / prettier.config.* → prettier (check node_modules/.bin first)
-            if has_project_config(
+                vec![ToolCandidate {
+                    tool: "biome".to_string(),
+                    source: "biome.json".to_string(),
+                    args: vec![
+                        "format".to_string(),
+                        "--write".to_string(),
+                        file_str.to_string(),
+                    ],
+                    required: true,
+                }]
+            } else if has_project_config(
                 project_root,
                 &[
                     ".prettierrc",
@@ -354,115 +377,514 @@ pub fn detect_formatter(
                     "prettier.config.mjs",
                 ],
             ) {
-                if let Some(prettier_cmd) = resolve_tool("prettier", project_root) {
-                    return Some((prettier_cmd, vec!["--write".to_string(), file_str]));
-                }
+                vec![ToolCandidate {
+                    tool: "prettier".to_string(),
+                    source: "Prettier config".to_string(),
+                    args: vec!["--write".to_string(), file_str.to_string()],
+                    required: true,
+                }]
+            } else if has_project_config(project_root, &["deno.json", "deno.jsonc"]) {
+                vec![ToolCandidate {
+                    tool: "deno".to_string(),
+                    source: "deno.json".to_string(),
+                    args: vec!["fmt".to_string(), file_str.to_string()],
+                    required: true,
+                }]
+            } else {
+                Vec::new()
             }
-            // deno.json / deno.jsonc → deno fmt
-            if has_project_config(project_root, &["deno.json", "deno.jsonc"])
-                && tool_available("deno", project_root)
-            {
-                return Some(("deno".to_string(), vec!["fmt".to_string(), file_str]));
-            }
-            // No config file found → do not format
-            None
         }
         LangId::Python => {
-            // ruff.toml or pyproject.toml with ruff config → ruff
-            if (has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
-                || has_pyproject_tool(project_root, "ruff"))
-                && ruff_format_available(project_root)
+            if has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
+                || has_pyproject_tool(project_root, "ruff")
             {
-                return Some(("ruff".to_string(), vec!["format".to_string(), file_str]));
+                vec![ToolCandidate {
+                    tool: "ruff".to_string(),
+                    source: "ruff config".to_string(),
+                    args: vec!["format".to_string(), file_str.to_string()],
+                    required: true,
+                }]
+            } else if has_pyproject_tool(project_root, "black") {
+                vec![ToolCandidate {
+                    tool: "black".to_string(),
+                    source: "pyproject.toml".to_string(),
+                    args: vec![file_str.to_string()],
+                    required: true,
+                }]
+            } else {
+                Vec::new()
             }
-            // pyproject.toml with black config → black
-            if has_pyproject_tool(project_root, "black") && tool_available("black", project_root) {
-                return Some(("black".to_string(), vec![file_str]));
-            }
-            // No config file found → do not format
-            None
         }
         LangId::Rust => {
-            // Cargo.toml implies standard Rust formatting
-            if has_project_config(project_root, &["Cargo.toml"])
-                && tool_available("rustfmt", project_root)
-            {
-                Some(("rustfmt".to_string(), vec![file_str]))
+            if has_project_config(project_root, &["Cargo.toml"]) {
+                vec![ToolCandidate {
+                    tool: "rustfmt".to_string(),
+                    source: "Cargo.toml".to_string(),
+                    args: vec![file_str.to_string()],
+                    required: true,
+                }]
             } else {
-                None
+                Vec::new()
             }
         }
         LangId::Go => {
-            // go.mod implies a Go project
             if has_project_config(project_root, &["go.mod"]) {
-                if tool_available("goimports", project_root) {
-                    Some(("goimports".to_string(), vec!["-w".to_string(), file_str]))
-                } else if tool_available("gofmt", project_root) {
-                    Some(("gofmt".to_string(), vec!["-w".to_string(), file_str]))
-                } else {
-                    None
-                }
+                vec![
+                    ToolCandidate {
+                        tool: "goimports".to_string(),
+                        source: "go.mod".to_string(),
+                        args: vec!["-w".to_string(), file_str.to_string()],
+                        required: false,
+                    },
+                    ToolCandidate {
+                        tool: "gofmt".to_string(),
+                        source: "go.mod".to_string(),
+                        args: vec!["-w".to_string(), file_str.to_string()],
+                        required: true,
+                    },
+                ]
             } else {
-                None
+                Vec::new()
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => None,
-        LangId::Html => None,
-        LangId::Markdown => None,
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::Html => Vec::new(),
+        LangId::Markdown => Vec::new(),
     }
 }
 
-/// Resolve an explicitly configured formatter name to a command + args.
-/// Uses resolve_tool() to find the binary in node_modules/.bin or PATH,
-/// so locally-installed tools (biome, prettier) are found even when not on PATH.
-fn resolve_explicit_formatter(
-    name: &str,
-    file_str: &str,
-    lang: LangId,
+fn checker_candidates(lang: LangId, config: &Config, file_str: &str) -> Vec<ToolCandidate> {
+    let project_root = config.project_root.as_deref();
+    if let Some(preferred) = config.checker.get(lang_key(lang)) {
+        return explicit_checker_candidate(preferred, file_str);
+    }
+
+    match lang {
+        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
+            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
+                vec![ToolCandidate {
+                    tool: "biome".to_string(),
+                    source: "biome.json".to_string(),
+                    args: vec!["check".to_string(), file_str.to_string()],
+                    required: true,
+                }]
+            } else if has_project_config(project_root, &["tsconfig.json"]) {
+                vec![ToolCandidate {
+                    tool: "tsc".to_string(),
+                    source: "tsconfig.json".to_string(),
+                    args: vec![
+                        "--noEmit".to_string(),
+                        "--pretty".to_string(),
+                        "false".to_string(),
+                    ],
+                    required: true,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Python => {
+            if has_project_config(project_root, &["pyrightconfig.json"])
+                || has_pyproject_tool(project_root, "pyright")
+            {
+                vec![ToolCandidate {
+                    tool: "pyright".to_string(),
+                    source: "pyright config".to_string(),
+                    args: vec!["--outputjson".to_string(), file_str.to_string()],
+                    required: true,
+                }]
+            } else if has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
+                || has_pyproject_tool(project_root, "ruff")
+            {
+                vec![ToolCandidate {
+                    tool: "ruff".to_string(),
+                    source: "ruff config".to_string(),
+                    args: vec![
+                        "check".to_string(),
+                        "--output-format=json".to_string(),
+                        file_str.to_string(),
+                    ],
+                    required: true,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Rust => {
+            if has_project_config(project_root, &["Cargo.toml"]) {
+                vec![ToolCandidate {
+                    tool: "cargo".to_string(),
+                    source: "Cargo.toml".to_string(),
+                    args: vec!["check".to_string(), "--message-format=json".to_string()],
+                    required: true,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Go => {
+            if has_project_config(project_root, &["go.mod"]) {
+                vec![
+                    ToolCandidate {
+                        tool: "staticcheck".to_string(),
+                        source: "go.mod".to_string(),
+                        args: vec![file_str.to_string()],
+                        required: false,
+                    },
+                    ToolCandidate {
+                        tool: "go".to_string(),
+                        source: "go.mod".to_string(),
+                        args: vec!["vet".to_string(), file_str.to_string()],
+                        required: true,
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::Html => Vec::new(),
+        LangId::Markdown => Vec::new(),
+    }
+}
+
+fn explicit_formatter_candidate(name: &str, file_str: &str) -> Vec<ToolCandidate> {
+    match name {
+        "none" | "off" | "false" => Vec::new(),
+        "biome" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec![
+                "format".to_string(),
+                "--write".to_string(),
+                file_str.to_string(),
+            ],
+            required: true,
+        }],
+        "prettier" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec!["--write".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "deno" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec!["fmt".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "ruff" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec!["format".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "black" | "rustfmt" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec![file_str.to_string()],
+            required: true,
+        }],
+        "goimports" | "gofmt" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "formatter config".to_string(),
+            args: vec!["-w".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn explicit_checker_candidate(name: &str, file_str: &str) -> Vec<ToolCandidate> {
+    match name {
+        "none" | "off" | "false" => Vec::new(),
+        "tsc" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec![
+                "--noEmit".to_string(),
+                "--pretty".to_string(),
+                "false".to_string(),
+            ],
+            required: true,
+        }],
+        "cargo" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec!["check".to_string(), "--message-format=json".to_string()],
+            required: true,
+        }],
+        "go" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec!["vet".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "biome" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec!["check".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "pyright" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec!["--outputjson".to_string(), file_str.to_string()],
+            required: true,
+        }],
+        "ruff" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec![
+                "check".to_string(),
+                "--output-format=json".to_string(),
+                file_str.to_string(),
+            ],
+            required: true,
+        }],
+        "staticcheck" => vec![ToolCandidate {
+            tool: name.to_string(),
+            source: "checker config".to_string(),
+            args: vec![file_str.to_string()],
+            required: true,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_tool_candidates(
+    candidates: Vec<ToolCandidate>,
     project_root: Option<&Path>,
-) -> Option<(String, Vec<String>)> {
-    let cmd = match name {
-        "none" | "off" | "false" => return None,
-        "biome" | "prettier" | "deno" | "ruff" | "black" | "rustfmt" | "goimports" | "gofmt" => {
-            // Resolve through node_modules/.bin first, then PATH
-            match resolve_tool(name, project_root) {
-                Some(resolved) => resolved,
-                None => {
-                    log::warn!(
-                        "[aft] format: configured formatter '{}' not found in node_modules/.bin or PATH",
-                        name
-                    );
-                    return None;
+) -> ToolDetection {
+    if candidates.is_empty() {
+        return ToolDetection::NotConfigured;
+    }
+
+    let mut missing_required = None;
+    for candidate in candidates {
+        if let Some(command) = resolve_candidate_tool(&candidate, project_root) {
+            return ToolDetection::Found(command, candidate.args);
+        }
+        if candidate.required && missing_required.is_none() {
+            missing_required = Some(candidate.tool);
+        }
+    }
+
+    match missing_required {
+        Some(tool) => ToolDetection::NotInstalled { tool },
+        None => ToolDetection::NotConfigured,
+    }
+}
+
+fn checker_command(candidate: &ToolCandidate, resolved: String) -> String {
+    match candidate.tool.as_str() {
+        "tsc" => resolved,
+        "cargo" => "cargo".to_string(),
+        "go" => "go".to_string(),
+        _ => resolved,
+    }
+}
+
+fn checker_args(candidate: &ToolCandidate) -> Vec<String> {
+    if candidate.tool == "tsc" {
+        vec![
+            "--noEmit".to_string(),
+            "--pretty".to_string(),
+            "false".to_string(),
+        ]
+    } else {
+        candidate.args.clone()
+    }
+}
+
+fn detect_formatter_for_path(path: &Path, lang: LangId, config: &Config) -> ToolDetection {
+    let file_str = path.to_string_lossy().to_string();
+    resolve_tool_candidates(
+        formatter_candidates(lang, config, &file_str),
+        config.project_root.as_deref(),
+    )
+}
+
+fn detect_checker_for_path(path: &Path, lang: LangId, config: &Config) -> ToolDetection {
+    let file_str = path.to_string_lossy().to_string();
+    let candidates = checker_candidates(lang, config, &file_str);
+    if candidates.is_empty() {
+        return ToolDetection::NotConfigured;
+    }
+
+    let project_root = config.project_root.as_deref();
+    let mut missing_required = None;
+    for candidate in candidates {
+        if let Some(command) = resolve_candidate_tool(&candidate, project_root) {
+            return ToolDetection::Found(
+                checker_command(&candidate, command),
+                checker_args(&candidate),
+            );
+        }
+        if candidate.required && missing_required.is_none() {
+            missing_required = Some(candidate.tool);
+        }
+    }
+
+    match missing_required {
+        Some(tool) => ToolDetection::NotInstalled { tool },
+        None => ToolDetection::NotConfigured,
+    }
+}
+
+fn languages_in_project(project_root: &Path) -> HashSet<LangId> {
+    crate::callgraph::walk_project_files(project_root)
+        .filter_map(|path| detect_language(&path))
+        .collect()
+}
+
+fn placeholder_file_for_language(project_root: &Path, lang: LangId) -> PathBuf {
+    let filename = match lang {
+        LangId::TypeScript => "aft-tool-detection.ts",
+        LangId::Tsx => "aft-tool-detection.tsx",
+        LangId::JavaScript => "aft-tool-detection.js",
+        LangId::Python => "aft-tool-detection.py",
+        LangId::Rust => "aft_tool_detection.rs",
+        LangId::Go => "aft_tool_detection.go",
+        LangId::C => "aft_tool_detection.c",
+        LangId::Cpp => "aft_tool_detection.cpp",
+        LangId::Zig => "aft_tool_detection.zig",
+        LangId::CSharp => "aft_tool_detection.cs",
+        LangId::Bash => "aft_tool_detection.sh",
+        LangId::Html => "aft-tool-detection.html",
+        LangId::Markdown => "aft-tool-detection.md",
+    };
+    project_root.join(filename)
+}
+
+pub(crate) fn install_hint(tool: &str) -> String {
+    match tool {
+        "biome" => {
+            "Run `bun add -d --workspace-root @biomejs/biome` or install globally.".to_string()
+        }
+        "prettier" => "Run `npm install -D prettier` or install globally.".to_string(),
+        "tsc" => "Run `npm install -D typescript` or install globally.".to_string(),
+        "pyright" | "pyright-langserver" => "Install: `npm install -g pyright`".to_string(),
+        "ruff" => {
+            "Install: `pip install ruff` or your Python package manager equivalent.".to_string()
+        }
+        "black" => {
+            "Install: `pip install black` or your Python package manager equivalent.".to_string()
+        }
+        "rustfmt" => "Install: `rustup component add rustfmt`".to_string(),
+        "rust-analyzer" => "Install: `rustup component add rust-analyzer`".to_string(),
+        "cargo" => "Install Rust from https://rustup.rs/.".to_string(),
+        "go" => "Install Go from https://go.dev/dl/.".to_string(),
+        "gopls" => "Install: `go install golang.org/x/tools/gopls@latest`".to_string(),
+        "bash-language-server" => "Install: `npm install -g bash-language-server`".to_string(),
+        "yaml-language-server" => "Install: `npm install -g yaml-language-server`".to_string(),
+        "typescript-language-server" => {
+            "Install: `npm install -g typescript-language-server typescript`".to_string()
+        }
+        "deno" => "Install Deno from https://deno.com/.".to_string(),
+        "goimports" => "Install: `go install golang.org/x/tools/cmd/goimports@latest`".to_string(),
+        "staticcheck" => {
+            "Install: `go install honnef.co/go/tools/cmd/staticcheck@latest`".to_string()
+        }
+        other => format!("Install `{other}` and ensure it is on PATH."),
+    }
+}
+
+fn configured_tool_hint(tool: &str, source: &str) -> String {
+    format!(
+        "{tool} is configured in {source} but not installed. {}",
+        install_hint(tool)
+    )
+}
+
+fn missing_tool_warning(
+    kind: &str,
+    language: &str,
+    candidate: &ToolCandidate,
+    project_root: Option<&Path>,
+) -> Option<MissingTool> {
+    if !candidate.required || resolve_candidate_tool(candidate, project_root).is_some() {
+        return None;
+    }
+
+    Some(MissingTool {
+        kind: kind.to_string(),
+        language: language.to_string(),
+        tool: candidate.tool.clone(),
+        hint: configured_tool_hint(&candidate.tool, &candidate.source),
+    })
+}
+
+/// Detect configured formatters/checkers that are missing for languages present in the project.
+pub fn detect_missing_tools(project_root: &Path, config: &Config) -> Vec<MissingTool> {
+    let languages = languages_in_project(project_root);
+    let mut warnings = Vec::new();
+    let mut seen = HashSet::new();
+
+    for lang in languages {
+        let language = lang_key(lang);
+        let placeholder = placeholder_file_for_language(project_root, lang);
+        let file_str = placeholder.to_string_lossy().to_string();
+
+        for candidate in formatter_candidates(lang, config, &file_str) {
+            if let Some(warning) = missing_tool_warning(
+                "formatter_not_installed",
+                language,
+                &candidate,
+                config.project_root.as_deref(),
+            ) {
+                if seen.insert((
+                    warning.kind.clone(),
+                    warning.language.clone(),
+                    warning.tool.clone(),
+                )) {
+                    warnings.push(warning);
                 }
             }
         }
-        _ => {
-            log::debug!(
-                "[aft] format: unknown preferred_formatter '{}' for {:?}, falling back to auto",
-                name,
-                lang
-            );
-            return None;
+
+        for candidate in checker_candidates(lang, config, &file_str) {
+            if let Some(warning) = missing_tool_warning(
+                "checker_not_installed",
+                language,
+                &candidate,
+                config.project_root.as_deref(),
+            ) {
+                if seen.insert((
+                    warning.kind.clone(),
+                    warning.language.clone(),
+                    warning.tool.clone(),
+                )) {
+                    warnings.push(warning);
+                }
+            }
         }
-    };
+    }
 
-    let args = match name {
-        "biome" => vec![
-            "format".to_string(),
-            "--write".to_string(),
-            file_str.to_string(),
-        ],
-        "prettier" => vec!["--write".to_string(), file_str.to_string()],
-        "deno" => vec!["fmt".to_string(), file_str.to_string()],
-        "ruff" => vec!["format".to_string(), file_str.to_string()],
-        "black" => vec![file_str.to_string()],
-        "rustfmt" => vec![file_str.to_string()],
-        "goimports" => vec!["-w".to_string(), file_str.to_string()],
-        "gofmt" => vec!["-w".to_string(), file_str.to_string()],
-        _ => unreachable!(), // Already handled above
-    };
+    warnings.sort_by(|left, right| {
+        (&left.kind, &left.language, &left.tool).cmp(&(&right.kind, &right.language, &right.tool))
+    });
+    warnings
+}
 
-    Some((cmd, args))
+/// Detect the appropriate formatter command and arguments for a file.
+///
+/// Priority per language:
+/// - TypeScript/JavaScript/TSX: `prettier --write <file>`
+/// - Python: `ruff format <file>` (fallback: `black <file>`)
+/// - Rust: `rustfmt <file>`
+/// - Go: `gofmt -w <file>`
+///
+/// Returns `None` if no formatter is available for the language.
+pub fn detect_formatter(
+    path: &Path,
+    lang: LangId,
+    config: &Config,
+) -> Option<(String, Vec<String>)> {
+    match detect_formatter_for_path(path, lang, config) {
+        ToolDetection::Found(cmd, args) => Some((cmd, args)),
+        ToolDetection::NotConfigured | ToolDetection::NotInstalled { .. } => None,
+    }
 }
 
 /// Check if any of the given config file names exist in the project root.
@@ -499,11 +921,12 @@ fn has_pyproject_tool(project_root: Option<&Path>, tool_name: &str) -> bool {
 /// - `(true, None)` — file was successfully formatted
 /// - `(false, Some(reason))` — formatting was skipped, reason explains why
 ///
-/// Skip reasons: `"unsupported_language"`, `"not_found"`, `"timeout"`, `"error"`
+/// Skip reasons: `"unsupported_language"`, `"no_formatter_configured"`,
+/// `"formatter_not_installed"`, `"timeout"`, `"error"`
 pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
     // Check if formatting is disabled via plugin config
     if !config.format_on_edit {
-        return (false, Some("disabled".to_string()));
+        return (false, Some("no_formatter_configured".to_string()));
     }
 
     let lang = match detect_language(path) {
@@ -516,12 +939,30 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
             return (false, Some("unsupported_language".to_string()));
         }
     };
+    if !has_formatter_support(lang) {
+        log::debug!(
+            "[aft] format: {} (skipped: unsupported_language)",
+            path.display()
+        );
+        return (false, Some("unsupported_language".to_string()));
+    }
 
-    let (cmd, args) = match detect_formatter(path, lang, config) {
-        Some(pair) => pair,
-        None => {
-            log::warn!("format: {} (skipped: not_found)", path.display());
-            return (false, Some("not_found".to_string()));
+    let (cmd, args) = match detect_formatter_for_path(path, lang, config) {
+        ToolDetection::Found(cmd, args) => (cmd, args),
+        ToolDetection::NotConfigured => {
+            log::debug!(
+                "[aft] format: {} (skipped: no_formatter_configured)",
+                path.display()
+            );
+            return (false, Some("no_formatter_configured".to_string()));
+        }
+        ToolDetection::NotInstalled { tool } => {
+            log::warn!(
+                "format: {} (skipped: formatter_not_installed: {})",
+                path.display(),
+                tool
+            );
+            return (false, Some("formatter_not_installed".to_string()));
         }
     };
 
@@ -545,8 +986,11 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
             (false, Some("timeout".to_string()))
         }
         Err(FormatError::NotFound { .. }) => {
-            log::warn!("format: {} (skipped: not_found)", path.display());
-            (false, Some("not_found".to_string()))
+            log::warn!(
+                "format: {} (skipped: formatter_not_installed)",
+                path.display()
+            );
+            (false, Some("formatter_not_installed".to_string()))
         }
         Err(FormatError::Failed { stderr, .. }) => {
             log::debug!(
@@ -671,192 +1115,10 @@ pub fn detect_type_checker(
     lang: LangId,
     config: &Config,
 ) -> Option<(String, Vec<String>)> {
-    let file_str = path.to_string_lossy().to_string();
-    let project_root = config.project_root.as_deref();
-
-    // Per-language override from plugin config
-    let lang_key = match lang {
-        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => "typescript",
-        LangId::Python => "python",
-        LangId::Rust => "rust",
-        LangId::Go => "go",
-        LangId::C => "c",
-        LangId::Cpp => "cpp",
-        LangId::Zig => "zig",
-        LangId::CSharp => "csharp",
-        LangId::Bash => "bash",
-        LangId::Html => "html",
-        LangId::Markdown => "markdown",
-    };
-    if let Some(preferred) = config.checker.get(lang_key) {
-        return resolve_explicit_checker(preferred, &file_str, lang, project_root);
+    match detect_checker_for_path(path, lang, config) {
+        ToolDetection::Found(cmd, args) => Some((cmd, args)),
+        ToolDetection::NotConfigured | ToolDetection::NotInstalled { .. } => None,
     }
-
-    match lang {
-        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
-            // biome.json → biome check (lint + type errors, check node_modules/.bin first)
-            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
-                if let Some(biome_cmd) = resolve_tool("biome", project_root) {
-                    return Some((biome_cmd, vec!["check".to_string(), file_str]));
-                }
-            }
-            // tsconfig.json → tsc (check node_modules/.bin first)
-            if has_project_config(project_root, &["tsconfig.json"]) {
-                if let Some(tsc_cmd) = resolve_tool("tsc", project_root) {
-                    return Some((
-                        tsc_cmd,
-                        vec![
-                            "--noEmit".to_string(),
-                            "--pretty".to_string(),
-                            "false".to_string(),
-                        ],
-                    ));
-                } else if tool_available("npx", project_root) {
-                    return Some((
-                        "npx".to_string(),
-                        vec![
-                            "tsc".to_string(),
-                            "--noEmit".to_string(),
-                            "--pretty".to_string(),
-                            "false".to_string(),
-                        ],
-                    ));
-                }
-            }
-            None
-        }
-        LangId::Python => {
-            // pyrightconfig.json or pyproject.toml with pyright → pyright
-            if has_project_config(project_root, &["pyrightconfig.json"])
-                || has_pyproject_tool(project_root, "pyright")
-            {
-                if let Some(pyright_cmd) = resolve_tool("pyright", project_root) {
-                    return Some((pyright_cmd, vec!["--outputjson".to_string(), file_str]));
-                }
-            }
-            // ruff.toml or pyproject.toml with ruff → ruff check
-            if (has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
-                || has_pyproject_tool(project_root, "ruff"))
-                && ruff_format_available(project_root)
-            {
-                return Some((
-                    "ruff".to_string(),
-                    vec![
-                        "check".to_string(),
-                        "--output-format=json".to_string(),
-                        file_str,
-                    ],
-                ));
-            }
-            None
-        }
-        LangId::Rust => {
-            // Cargo.toml implies cargo check
-            if has_project_config(project_root, &["Cargo.toml"])
-                && tool_available("cargo", project_root)
-            {
-                Some((
-                    "cargo".to_string(),
-                    vec!["check".to_string(), "--message-format=json".to_string()],
-                ))
-            } else {
-                None
-            }
-        }
-        LangId::Go => {
-            // go.mod implies Go project
-            if has_project_config(project_root, &["go.mod"]) {
-                if tool_available("staticcheck", project_root) {
-                    Some(("staticcheck".to_string(), vec![file_str]))
-                } else if tool_available("go", project_root) {
-                    Some(("go".to_string(), vec!["vet".to_string(), file_str]))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => None,
-        LangId::Html => None,
-        LangId::Markdown => None,
-    }
-}
-
-/// Resolve an explicitly configured checker name to a command + args.
-/// Uses resolve_tool() to find the binary in node_modules/.bin or PATH,
-/// so locally-installed tools (biome, tsc, pyright) are found even when not on PATH.
-fn resolve_explicit_checker(
-    name: &str,
-    file_str: &str,
-    _lang: LangId,
-    project_root: Option<&Path>,
-) -> Option<(String, Vec<String>)> {
-    match name {
-        "none" | "off" | "false" => return None,
-        _ => {}
-    }
-
-    // tsc is special — always runs via npx
-    if name == "tsc" {
-        return Some((
-            "npx".to_string(),
-            vec![
-                "tsc".to_string(),
-                "--noEmit".to_string(),
-                "--pretty".to_string(),
-                "false".to_string(),
-            ],
-        ));
-    }
-    // cargo and go are system tools, not in node_modules
-    if name == "cargo" {
-        return Some((
-            "cargo".to_string(),
-            vec!["check".to_string(), "--message-format=json".to_string()],
-        ));
-    }
-    if name == "go" {
-        return Some((
-            "go".to_string(),
-            vec!["vet".to_string(), file_str.to_string()],
-        ));
-    }
-
-    // For node-ecosystem tools, resolve through node_modules/.bin first
-    let known_tools = ["biome", "pyright", "ruff", "staticcheck"];
-    if known_tools.contains(&name) {
-        let cmd = match resolve_tool(name, project_root) {
-            Some(resolved) => resolved,
-            None => {
-                log::warn!(
-                    "[aft] validate: configured checker '{}' not found in node_modules/.bin or PATH",
-                    name
-                );
-                return None;
-            }
-        };
-
-        let args = match name {
-            "biome" => vec!["check".to_string(), file_str.to_string()],
-            "pyright" => vec!["--outputjson".to_string(), file_str.to_string()],
-            "ruff" => vec![
-                "check".to_string(),
-                "--output-format=json".to_string(),
-                file_str.to_string(),
-            ],
-            "staticcheck" => vec![file_str.to_string()],
-            _ => unreachable!(),
-        };
-
-        return Some((cmd, args));
-    }
-
-    log::debug!(
-        "[aft] validate: unknown preferred_checker '{}', falling back to auto",
-        name
-    );
-    None
 }
 
 /// Parse type checker output into structured validation errors.
@@ -869,7 +1131,11 @@ pub fn parse_checker_output(
     file: &Path,
     checker: &str,
 ) -> Vec<ValidationError> {
-    match checker {
+    let checker_name = Path::new(checker)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(checker);
+    match checker_name {
         "npx" | "tsc" => parse_tsc_output(stdout, stderr, file),
         "pyright" => parse_pyright_output(stdout, file),
         "cargo" => parse_cargo_output(stdout, stderr, file),
@@ -1097,7 +1363,8 @@ fn parse_go_vet_output(stderr: &str, file: &Path) -> Vec<ValidationError> {
 /// - `(errors, None)` — checker ran, errors may be empty (= valid code)
 /// - `([], Some(reason))` — checker was skipped
 ///
-/// Skip reasons: `"unsupported_language"`, `"not_found"`, `"timeout"`, `"error"`
+/// Skip reasons: `"unsupported_language"`, `"no_checker_configured"`,
+/// `"checker_not_installed"`, `"timeout"`, `"error"`
 pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Option<String>) {
     let lang = match detect_language(path) {
         Some(l) => l,
@@ -1109,12 +1376,30 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
             return (Vec::new(), Some("unsupported_language".to_string()));
         }
     };
+    if !has_checker_support(lang) {
+        log::debug!(
+            "[aft] validate: {} (skipped: unsupported_language)",
+            path.display()
+        );
+        return (Vec::new(), Some("unsupported_language".to_string()));
+    }
 
-    let (cmd, args) = match detect_type_checker(path, lang, config) {
-        Some(pair) => pair,
-        None => {
-            log::warn!("validate: {} (skipped: not_found)", path.display());
-            return (Vec::new(), Some("not_found".to_string()));
+    let (cmd, args) = match detect_checker_for_path(path, lang, config) {
+        ToolDetection::Found(cmd, args) => (cmd, args),
+        ToolDetection::NotConfigured => {
+            log::debug!(
+                "[aft] validate: {} (skipped: no_checker_configured)",
+                path.display()
+            );
+            return (Vec::new(), Some("no_checker_configured".to_string()));
+        }
+        ToolDetection::NotInstalled { tool } => {
+            log::warn!(
+                "validate: {} (skipped: checker_not_installed: {})",
+                path.display(),
+                tool
+            );
+            return (Vec::new(), Some("checker_not_installed".to_string()));
         }
     };
 
@@ -1144,8 +1429,11 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
             (Vec::new(), Some("timeout".to_string()))
         }
         Err(FormatError::NotFound { .. }) => {
-            log::warn!("validate: {} (skipped: not_found)", path.display());
-            (Vec::new(), Some("not_found".to_string()))
+            log::warn!(
+                "validate: {} (skipped: checker_not_installed)",
+                path.display()
+            );
+            (Vec::new(), Some("checker_not_installed".to_string()))
         }
         Err(FormatError::Failed { stderr, .. }) => {
             log::debug!(
@@ -1241,7 +1529,7 @@ mod tests {
             ..Config::default()
         };
         let result = detect_formatter(&path, LangId::Rust, &config);
-        if tool_available("rustfmt", config.project_root.as_deref()) {
+        if resolve_tool("rustfmt", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
             assert_eq!(cmd, "rustfmt");
             assert!(args.iter().any(|a| a.ends_with("test.rs")));
@@ -1260,11 +1548,11 @@ mod tests {
             ..Config::default()
         };
         let result = detect_formatter(&path, LangId::Go, &config);
-        if tool_available("goimports", config.project_root.as_deref()) {
+        if resolve_tool("goimports", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
             assert_eq!(cmd, "goimports");
             assert!(args.contains(&"-w".to_string()));
-        } else if tool_available("gofmt", config.project_root.as_deref()) {
+        } else if resolve_tool("gofmt", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
             assert_eq!(cmd, "gofmt");
             assert!(args.contains(&"-w".to_string()));
@@ -1321,8 +1609,10 @@ mod tests {
         }
 
         let path = Path::new("test.ts");
-        let mut config = Config::default();
-        config.project_root = Some(dir.path().to_path_buf());
+        let mut config = Config {
+            project_root: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
         config
             .formatter
             .insert("typescript".to_string(), "biome".to_string());
@@ -1335,7 +1625,7 @@ mod tests {
 
     #[test]
     fn auto_format_happy_path_rustfmt() {
-        if !tool_available("rustfmt", None) {
+        if resolve_tool("rustfmt", None).is_none() {
             log::warn!("skipping: rustfmt not available");
             return;
         }
@@ -1462,7 +1752,7 @@ mod tests {
             ..Config::default()
         };
         let result = detect_type_checker(&path, LangId::Rust, &config);
-        if tool_available("cargo", config.project_root.as_deref()) {
+        if resolve_tool("cargo", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
             assert_eq!(cmd, "cargo");
             assert!(args.contains(&"check".to_string()));
@@ -1481,7 +1771,7 @@ mod tests {
             ..Config::default()
         };
         let result = detect_type_checker(&path, LangId::Go, &config);
-        if tool_available("go", config.project_root.as_deref()) {
+        if resolve_tool("go", config.project_root.as_deref()).is_some() {
             let (cmd, _args) = result.unwrap();
             // Could be staticcheck or go vet depending on what's installed
             assert!(cmd == "go" || cmd == "staticcheck");

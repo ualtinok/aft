@@ -393,6 +393,14 @@ fn ast_search_and_replace_report_empty_results_for_valid_patterns() {
     assert_eq!(search["total_matches"], 0);
     assert_eq!(search["files_with_matches"], 0);
     assert_eq!(search["files_searched"], 1);
+    assert_eq!(search["no_files_matched_scope"], false);
+    assert_eq!(
+        search["scope_warnings"]
+            .as_array()
+            .expect("scope warnings")
+            .len(),
+        0
+    );
 
     let replace = send(
         &mut aft,
@@ -414,8 +422,143 @@ fn ast_search_and_replace_report_empty_results_for_valid_patterns() {
     assert_eq!(replace["total_files"], 0);
     assert_eq!(replace["files_with_matches"], 0);
     assert_eq!(replace["files_searched"], 1);
+    assert_eq!(replace["no_files_matched_scope"], false);
+    assert_eq!(
+        replace["scope_warnings"]
+            .as_array()
+            .expect("scope warnings")
+            .len(),
+        0
+    );
     assert_eq!(replace["files"].as_array().expect("files array").len(), 0);
     assert_eq!(read_file(project.path(), "sample.ts"), original);
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_search_and_replace_reject_nonexistent_paths() {
+    let project = setup_project(&[("sample.ts", "console.log(value);\n")]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let missing_absolute = project.path().join("missing.ts");
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "missing-absolute-search",
+            "command": "ast_search",
+            "pattern": "console.log($ARG)",
+            "lang": "typescript",
+            "paths": [missing_absolute.display().to_string()],
+        }),
+    );
+
+    assert_eq!(
+        search["success"], false,
+        "missing search path should fail: {search:?}"
+    );
+    assert_eq!(search["code"], "path_not_found");
+    assert!(search["message"]
+        .as_str()
+        .expect("search error message")
+        .contains(&missing_absolute.display().to_string()));
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "missing-relative-replace",
+            "command": "ast_replace",
+            "pattern": "console.log($ARG)",
+            "rewrite": "logger.info($ARG)",
+            "lang": "typescript",
+            "paths": ["does-not-exist"],
+            "dry_run": true,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], false,
+        "missing replace path should fail: {replace:?}"
+    );
+    assert_eq!(replace["code"], "path_not_found");
+    assert!(replace["message"]
+        .as_str()
+        .expect("replace error message")
+        .contains("does-not-exist"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_search_and_replace_report_globs_matching_no_files() {
+    let original = "console.log(value);\n";
+    let project = setup_project(&[("src/sample.ts", original)]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let search = send(
+        &mut aft,
+        json!({
+            "id": "empty-glob-search",
+            "command": "ast_search",
+            "pattern": "console.log($ARG)",
+            "lang": "typescript",
+            "paths": ["src"],
+            "globs": ["*.go"],
+        }),
+    );
+
+    assert_eq!(
+        search["success"], true,
+        "empty glob search should succeed: {search:?}"
+    );
+    assert_eq!(
+        search["matches"].as_array().expect("matches array").len(),
+        0
+    );
+    assert_eq!(search["total_matches"], 0);
+    assert_eq!(search["files_with_matches"], 0);
+    assert_eq!(search["files_searched"], 0);
+    assert_eq!(search["no_files_matched_scope"], true);
+    assert_eq!(
+        search["scope_warnings"].as_array().expect("scope warnings"),
+        &vec![Value::String("*.go → no files".to_string())]
+    );
+
+    let replace = send(
+        &mut aft,
+        json!({
+            "id": "empty-glob-replace",
+            "command": "ast_replace",
+            "pattern": "console.log($ARG)",
+            "rewrite": "logger.info($ARG)",
+            "lang": "typescript",
+            "paths": ["src"],
+            "globs": ["*.go"],
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        replace["success"], true,
+        "empty glob replace should succeed: {replace:?}"
+    );
+    assert_eq!(replace["files"].as_array().expect("files array").len(), 0);
+    assert_eq!(replace["total_replacements"], 0);
+    assert_eq!(replace["total_files"], 0);
+    assert_eq!(replace["files_with_matches"], 0);
+    assert_eq!(replace["files_searched"], 0);
+    assert_eq!(replace["no_files_matched_scope"], true);
+    assert_eq!(
+        replace["scope_warnings"]
+            .as_array()
+            .expect("scope warnings"),
+        &vec![Value::String("*.go → no files".to_string())]
+    );
+    assert_eq!(read_file(project.path(), "src/sample.ts"), original);
 
     let status = aft.shutdown();
     assert!(status.success());

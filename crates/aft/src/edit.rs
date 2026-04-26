@@ -250,13 +250,15 @@ pub struct WriteResult {
     pub syntax_valid: Option<bool>,
     /// Whether the file was auto-formatted.
     pub formatted: bool,
-    /// Why formatting was skipped, if it was. Values: "not_found", "timeout", "error", "unsupported_language".
+    /// Why formatting was skipped, if it was. Values: "unsupported_language",
+    /// "no_formatter_configured", "formatter_not_installed", "timeout", "error".
     pub format_skipped_reason: Option<String>,
     /// Whether full validation was requested (controls whether validation_errors is included in response).
     pub validate_requested: bool,
     /// Structured type-checker errors (only populated when validate:"full" is requested).
     pub validation_errors: Vec<format::ValidationError>,
-    /// Why validation was skipped, if it was. Values: "not_found", "timeout", "error", "unsupported_language".
+    /// Why validation was skipped, if it was. Values: "unsupported_language",
+    /// "no_checker_configured", "checker_not_installed", "timeout", "error".
     pub validate_skipped_reason: Option<String>,
     /// LSP diagnostics for the edited file. Only populated when `diagnostics: true` is
     /// passed in the edit request AND a language server is available.

@@ -5,12 +5,13 @@ use std::thread;
 
 use crossbeam_channel::unbounded;
 use notify::{RecursiveMode, Watcher};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 
 use crate::callgraph::CallGraph;
 use crate::config::{SemanticBackend, SemanticBackendConfig, UserServerDef};
 use crate::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
+use crate::lsp::registry::{servers_for_file, ServerKind};
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
     build_path_filters, current_git_head, resolve_cache_dir, walk_project_files, SearchIndex,
@@ -257,6 +258,56 @@ fn parse_disabled_lsp(value: &Value) -> Result<std::collections::HashSet<String>
                 .ok_or_else(|| format!("configure: disabled_lsp[{index}] must be a string"))
         })
         .collect()
+}
+
+fn is_custom_server(kind: &ServerKind) -> bool {
+    matches!(kind, ServerKind::Custom(_))
+}
+
+fn lsp_missing_hint(binary: &str) -> String {
+    crate::format::install_hint(binary)
+}
+
+fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config) -> Vec<Value> {
+    let mut warnings = Vec::new();
+    let mut seen = HashSet::new();
+
+    for file in crate::callgraph::walk_project_files(root_path) {
+        for server in servers_for_file(&file, config) {
+            if is_custom_server(&server.kind) || which::which(&server.binary).is_ok() {
+                continue;
+            }
+
+            let key = (server.kind.id_str().to_string(), server.binary.clone());
+            if seen.insert(key) {
+                warnings.push(json!({
+                    "kind": "lsp_binary_missing",
+                    "server": server.binary,
+                    "binary": server.binary,
+                    "hint": lsp_missing_hint(&server.binary),
+                }));
+            }
+        }
+    }
+
+    for server in &config.lsp_servers {
+        if server.disabled || which::which(&server.binary).is_ok() {
+            continue;
+        }
+
+        let key = (server.id.clone(), server.binary.clone());
+        if seen.insert(key) {
+            warnings.push(json!({
+                "kind": "lsp_binary_missing",
+                "server": server.id,
+                "binary": server.binary,
+                "hint": lsp_missing_hint(&server.binary),
+            }));
+        }
+    }
+
+    warnings.sort_by_key(|warning| warning.to_string());
+    warnings
 }
 
 /// Handle a `configure` request.
@@ -706,13 +757,21 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
     log::info!("project root set: {}", root_path.display());
 
+    let config_snapshot = ctx.config().clone();
+    let mut warnings = crate::format::detect_missing_tools(&root_path, &config_snapshot)
+        .into_iter()
+        .map(|warning| json!(warning))
+        .collect::<Vec<_>>();
+    warnings.extend(detect_missing_lsp_binaries(&root_path, &config_snapshot));
+
     Response::success(
         &req.id,
-        serde_json::json!({
+        json!({
             "project_root": root_path.display().to_string(),
             "source_file_count": source_file_count,
             "source_file_count_exceeds_max": exceeds,
-            "max_callgraph_files": ctx.config().max_callgraph_files,
+            "max_callgraph_files": config_snapshot.max_callgraph_files,
+            "warnings": warnings,
         }),
     )
 }
