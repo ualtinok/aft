@@ -129,7 +129,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return response.text as string;
+          return formatOutlineText(response);
         }
 
         if (Array.isArray(args.files) && args.files.length > 0) {
@@ -137,13 +137,13 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return response.text as string;
+          return formatOutlineText(response);
         }
         const response = await callBridge(ctx, context, "outline", { file: args.filePath });
         if (response.success === false) {
           throw new Error((response.message as string) || "outline failed");
         }
-        return response.text as string;
+        return formatOutlineText(response);
       },
     },
 
@@ -270,4 +270,26 @@ async function discoverSourceFiles(dir: string, maxFiles = 200): Promise<string[
   await walk(dir);
   files.sort();
   return files;
+}
+
+/**
+ * Format an outline response into agent-readable text, appending honest skip
+ * reporting when files were intentionally skipped (parse error, unsupported
+ * language, file not found, too large). Without this, agents only see the tree
+ * and assume all input files were processed.
+ */
+interface SkippedOutlineFile {
+  file: string;
+  reason: string;
+}
+
+function formatOutlineText(response: Record<string, unknown>): string {
+  const text = (response.text as string | undefined) ?? "";
+  const skipped = response.skipped_files as SkippedOutlineFile[] | undefined;
+  if (!skipped || skipped.length === 0) {
+    return text;
+  }
+  const lines = skipped.map(({ file, reason }) => `  ${file} — ${reason}`).join("\n");
+  const header = text.length > 0 ? `${text}\n\n` : "";
+  return `${header}Skipped ${skipped.length} file(s):\n${lines}`;
 }

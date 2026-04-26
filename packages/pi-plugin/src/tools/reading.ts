@@ -237,16 +237,16 @@ export function registerReadingTools(
             return textResult(`No source files found under ${dirArg}`);
           }
           const response = await callBridge(bridge, "outline", { files }, extCtx);
-          return textResult((response.text as string | undefined) ?? "");
+          return textResult(formatOutlineText(response));
         }
 
         if (hasFiles) {
           const response = await callBridge(bridge, "outline", { files: params.files }, extCtx);
-          return textResult((response.text as string | undefined) ?? "");
+          return textResult(formatOutlineText(response));
         }
 
         const response = await callBridge(bridge, "outline", { file: params.filePath }, extCtx);
-        return textResult((response.text as string | undefined) ?? "");
+        return textResult(formatOutlineText(response));
       },
       renderCall(args, theme, context) {
         return renderOutlineCall(args, theme, context);
@@ -302,4 +302,26 @@ export function registerReadingTools(
       },
     });
   }
+}
+
+/**
+ * Format an outline response into agent-readable text, appending honest skip
+ * reporting when files were intentionally skipped (parse error, unsupported
+ * language, file not found, too large). Without this, agents only see the tree
+ * and assume all input files were processed.
+ */
+interface SkippedOutlineFile {
+  file: string;
+  reason: string;
+}
+
+function formatOutlineText(response: Record<string, unknown>): string {
+  const text = (response.text as string | undefined) ?? "";
+  const skipped = response.skipped_files as SkippedOutlineFile[] | undefined;
+  if (!skipped || skipped.length === 0) {
+    return text;
+  }
+  const lines = skipped.map(({ file, reason }) => `  ${file} — ${reason}`).join("\n");
+  const header = text.length > 0 ? `${text}\n\n` : "";
+  return `${header}Skipped ${skipped.length} file(s):\n${lines}`;
 }
