@@ -11,7 +11,9 @@
 
 <p align="center">
   <a href="https://crates.io/crates/agent-file-tools"><img src="https://img.shields.io/crates/v/agent-file-tools?label=crate&color=blue&style=flat-square" alt="crates.io"></a>
-  <a href="https://www.npmjs.com/package/@cortexkit/aft-opencode"><img src="https://img.shields.io/npm/v/@cortexkit/aft-opencode?color=blue&style=flat-square" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/aft"><img src="https://img.shields.io/npm/v/@cortexkit/aft?label=cli&color=blue&style=flat-square" alt="npm @cortexkit/aft"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/aft-opencode"><img src="https://img.shields.io/npm/v/@cortexkit/aft-opencode?label=opencode&color=blue&style=flat-square" alt="npm @cortexkit/aft-opencode"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/aft-pi"><img src="https://img.shields.io/npm/v/@cortexkit/aft-pi?label=pi&color=blue&style=flat-square" alt="npm @cortexkit/aft-pi"></a>
   <a href="https://github.com/cortexkit/aft/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
 </p>
 
@@ -77,18 +79,30 @@ The unified `@cortexkit/aft` CLI works across every supported harness:
 |---|---|
 | `bunx --bun @cortexkit/aft setup` | Interactive first-time setup — auto-detects installed harnesses and registers AFT with each |
 | `bunx --bun @cortexkit/aft doctor` | Check configuration and auto-fix common issues across all detected harnesses |
-| `bunx --bun @cortexkit/aft doctor --force` | Force-clear the OpenCode plugin cache (fixes stale `@latest` resolution) |
+| `bunx --bun @cortexkit/aft doctor --clear` | Interactive cache cleanup — pick which caches to clear (plugin packages, binary, LSP, semantic) |
 | `bunx --bun @cortexkit/aft doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
 
 Add `--harness opencode` or `--harness pi` to any command to target one harness explicitly.
 
-**`setup`** — Registers AFT with each installed harness (edits `opencode.jsonc`'s `plugin` array for OpenCode, runs `pi install npm:@cortexkit/aft-pi` for Pi). When multiple harnesses are detected, prompts you to pick which ones to configure.
+**`setup`** — Registers AFT with each installed harness (edits the harness config to enable
+the AFT plugin). When multiple harnesses are detected, prompts you to pick which ones to
+configure.
 
-**`doctor`** — Checks everything that can go wrong per harness: host install, plugin registration, plugin cache version, binary cache, config parse errors, ONNX Runtime availability (for semantic search), storage directory sizes, log file status. Auto-fixes missing plugin entries and outdated caches.
+**`doctor`** — Checks everything that can go wrong per harness: host install, plugin
+registration, plugin cache version, binary cache, config parse errors, ONNX Runtime
+availability (for semantic search), storage directory sizes, log file status. Auto-fixes
+missing plugin entries and outdated caches.
 
-**`doctor --force`** — Same as `doctor` but always clears the OpenCode plugin cache, forcing a fresh download. Use when you're on an old version and `@latest` doesn't seem to update (OpenCode caches npm packages aggressively).
+**`doctor --clear`** — Walks you through interactive cache cleanup. Useful when you're on
+an old version and `@latest` doesn't seem to update (some harness installers cache npm
+packages aggressively), or when you want to reset the LSP server cache to force a fresh
+download. Targets harness plugin cache, binary cache, downloaded LSP servers, and semantic
+index storage.
 
-**`doctor --issue`** — Collects a full diagnostic report, sanitizes your username and home path out of the logs, and files a GitHub issue. If you have `gh` installed, it submits directly; otherwise it writes the report to `./aft-issue-<timestamp>.md` and opens the new-issue page in your browser.
+**`doctor --issue`** — Collects a full diagnostic report, sanitizes your username and home
+path out of the logs, and files a GitHub issue. If you have `gh` installed, it submits
+directly; otherwise it writes the report to `./aft-issue-<timestamp>.md` and opens the
+new-issue page in your browser.
 
 ---
 
@@ -105,17 +119,20 @@ sit in a file right now. Agents can outline a file's structure in one call, zoom
 function, edit it by name, then follow its callers across the workspace. All without reading a
 single line they don't need.
 
-AFT **hoists** itself into opencode's built-in tool slots. The `read`, `write`, `edit`,
-`apply_patch`, `ast_grep_search`, `ast_grep_replace`, and `lsp_diagnostics` tools are replaced
-by AFT-enhanced versions — same names the agent already knows, but now backed by the Rust binary
-for backups, formatting, inline diagnostics, and symbol-aware operations. With the experimental
-search index enabled, `grep` and `glob` are also hoisted with a trigram index for sub-millisecond
-search on any project size.
+AFT **hoists** itself into the host harness's built-in tool slots. Whichever tools your
+harness exposes natively (`read`, `write`, `edit`, `apply_patch`, `grep`, `ast_grep_search`,
+`lsp_diagnostics`, etc.) are replaced by AFT-enhanced versions — same names the agent already
+knows, but now backed by the Rust binary for backups, formatting, inline diagnostics, and
+symbol-aware operations. With the experimental search index enabled, `grep` and `glob` are
+also hoisted with a trigram index for sub-millisecond search on any project size.
 
 The toolkit is a two-component system: a Rust binary that does the heavy lifting (parsing,
-analysis, edits, formatting) and a TypeScript plugin that integrates with OpenCode. The binary
-ships pre-built for all major platforms and downloads automatically on first use — no install
-ceremony required.
+analysis, edits, formatting) and a thin TypeScript plugin per harness that adapts the binary
+to the harness's plugin API. The binary ships pre-built for all major platforms and downloads
+automatically on first use — no install ceremony required.
+
+**Currently supported harnesses:** [OpenCode](https://opencode.ai) and [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent).
+MCP support for Claude Code / Cursor is on the roadmap.
 
 ---
 
@@ -258,10 +275,10 @@ instant cold starts and stays fresh via file watcher and mtime verification.
 - **Safety & recovery** — undo last edit, named checkpoints, restore to any checkpoint
 - **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
 - **Git conflict viewer** — show all merge conflicts across the repository in a single call with line-numbered regions
-- **Indexed search** *(experimental)* — trigram-indexed `grep` and `glob` that hoist opencode's built-ins, with background index building, disk persistence, and compressed output mode
+- **Indexed search** *(experimental)* — trigram-indexed `grep` and `glob` that hoist the host harness's built-ins, with background index building, disk persistence, and compressed output mode
 - **Semantic search** *(experimental)* — search code by meaning using local embeddings (fastembed + all-MiniLM-L6-v2), with cAST-style symbol chunking, cosine similarity ranking, and disk persistence
 - **Inline diagnostics** — write and edit return LSP errors detected after the change
-- **UI metadata** — the OpenCode desktop shows file paths and diff previews (`+N/-N`) for every edit
+- **UI metadata** — diff previews (`+N/-N`) and file paths surface in the harness UI (OpenCode desktop, Pi terminal renderer)
 - **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
 
 ---
@@ -292,20 +309,24 @@ from "ran but partial":
 
 ### Hoisted tools
 
-These replace opencode's built-ins. Registered under the same names by default. When
+These replace the host harness's built-ins. Registered under the same names by default. When
 `hoist_builtin_tools: false`, they get the `aft_` prefix instead (e.g. `aft_read`).
 
-| Tool | Replaces | Description | Key Params |
-|------|----------|-------------|------------|
-| `read` | opencode read | File read, directory listing, image/PDF detection | `filePath`, `startLine`, `endLine`, `offset`, `limit` |
-| `write` | opencode write | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
-| `edit` | opencode edit | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
-| `apply_patch` | opencode apply_patch | `*** Begin Patch` multi-file patch format | `patchText` |
-| `ast_grep_search` | oh-my-opencode ast_grep | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
-| `ast_grep_replace` | oh-my-opencode ast_grep | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
-| `lsp_diagnostics` | opencode lsp_diagnostics | Errors/warnings from language server | `filePath`, `directory`, `severity`, `waitMs` |
-| `grep` | opencode grep *(experimental)* | Trigram-indexed regex search with compressed output | `pattern`, `path`, `include`, `exclude` |
-| `glob` | opencode glob *(experimental)* | Indexed file discovery with compressed output | `pattern`, `path` |
+Tools that don't exist natively in a given harness are simply registered as new tools — no
+hoisting needed. (Pi, for example, doesn't ship `apply_patch` or `lsp_diagnostics`; AFT adds
+them either way when the surface tier includes them.)
+
+| Tool | Description | Key Params |
+|------|-------------|------------|
+| `read` | File read, directory listing, image/PDF detection | `filePath`, `startLine`, `endLine`, `offset`, `limit` |
+| `write` | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
+| `edit` | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
+| `apply_patch` | `*** Begin Patch` multi-file patch format | `patchText` |
+| `ast_grep_search` | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
+| `ast_grep_replace` | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
+| `lsp_diagnostics` | Errors/warnings from language server | `filePath`, `directory`, `severity`, `waitMs` |
+| `grep` *(experimental)* | Trigram-indexed regex search with compressed output | `pattern`, `path`, `include`, `exclude` |
+| `glob` *(experimental)* | Indexed file discovery with compressed output | `pattern`, `path` |
 
 ### AFT-only tools
 
@@ -630,12 +651,13 @@ suggesting `aft_conflicts` to the bash output.
 
 ### grep *(experimental)*
 
-Trigram-indexed regex search that hoists opencode's built-in `grep`. Requires
+Trigram-indexed regex search that hoists the host harness's built-in `grep`. Requires
 `experimental_search_index: true` in config. The trigram index is built in a background thread
 at session start, persisted to disk for fast cold starts, and kept fresh via file watcher.
 Falls back to direct file scanning when the index isn't ready.
 
-For out-of-project paths, shells out to ripgrep matching opencode's exact flags.
+For out-of-project paths, shells out to ripgrep with the same flag set the harness's native
+grep would have used.
 
 ```json
 { "pattern": "handleRequest", "include": "*.ts" }
@@ -665,7 +687,7 @@ Parameters: `pattern` (required), `path` (optional — scope to subdirectory or 
 
 ### glob *(experimental)*
 
-Indexed file discovery that hoists opencode's built-in `glob`. Requires
+Indexed file discovery that hoists the host harness's built-in `glob`. Requires
 `experimental_search_index: true`. Returns absolute paths sorted by modification time,
 capped at 100 files.
 
@@ -917,25 +939,32 @@ Backup and recovery for risky edits.
 ## Configuration
 
 AFT uses a two-level config system: user-level defaults plus project-level overrides.
-Both files are JSONC (comments allowed).
+Both files are JSONC (comments allowed). Config paths are harness-specific:
 
-**User config** — applies to all projects:
-```
-~/.config/opencode/aft.jsonc
-```
+**OpenCode**
 
-**Project config** — overrides user config for a specific project:
-```
-.opencode/aft.jsonc
-```
+| Scope | Path |
+|---|---|
+| User | `~/.config/opencode/aft.jsonc` |
+| Project | `<project>/.opencode/aft.jsonc` |
+
+**Pi**
+
+| Scope | Path |
+|---|---|
+| User | `~/.pi/agent/aft.jsonc` |
+| Project | `<project>/.pi/aft.jsonc` |
+
+The schema is identical across harnesses. Only file location differs.
 
 ### Config Options
 
 ```jsonc
 {
-  // Replace opencode's built-in read/write/edit/apply_patch and
-  // ast_grep_search/ast_grep_replace/lsp_diagnostics with AFT-enhanced versions.
-  // Default: true. Set to false to use aft_ prefix on all tools instead.
+  // Replace the host harness's built-in tools (read/write/edit/apply_patch/grep/etc.)
+  // with AFT-enhanced versions. Default: true. Set to false to use aft_ prefix on all
+  // tools instead — useful when you want to keep the harness defaults and access AFT
+  // tools alongside them under explicit names.
   "hoist_builtin_tools": true,
 
   // Auto-format files after every edit. Default: true
@@ -972,7 +1001,7 @@ Both files are JSONC (comments allowed).
 
   // --- Experimental ---
 
-  // Enable trigram-indexed grep/glob that hoist opencode's built-ins.
+  // Enable trigram-indexed grep/glob that hoist the host harness's built-ins.
   // Builds a background index on session start, persists to disk, updates via file watcher.
   // Falls back to direct scanning when the index isn't ready or for out-of-project paths.
   // Default: false
@@ -986,7 +1015,8 @@ Both files are JSONC (comments allowed).
   "experimental_semantic_search": false,
 
   // Restrict all file operations to the project root directory.
-  // Default: false (matches opencode's permission-based model — operations prompt via ctx.ask)
+  // Default: false (most harnesses gate out-of-root access via permission prompts; AFT
+  // defers to the harness's permission UX rather than imposing a hard rejection here)
   "restrict_to_project_root": false,
 
   // Maximum source files allowed for call-graph operations (callers, trace_to,
@@ -1087,9 +1117,9 @@ configuration above shows registering `tinymist` for Typst files. Required field
 
 **Missing-tool warnings:** on startup, AFT detects configured-but-missing formatters, type
 checkers, and LSP binaries (for languages your project actually uses) and surfaces a one-time
-notification per warning via OpenCode's ignored-message channel. Dismissed warnings do not
-re-fire on plugin updates — dedupe is per-warning-content, persisted in
-`<storage_dir>/warned_tools.json`.
+notification per warning through whatever notification channel the harness exposes (OpenCode's
+ignored-message channel, Pi's status messages). Dismissed warnings do not re-fire on plugin
+updates — dedupe is per-warning-content, persisted in `<storage_dir>/warned_tools.json`.
 
 ### LSP auto-install
 
@@ -1123,10 +1153,10 @@ Configure via `lsp.*`:
 ```
 
 **Trust boundary:** `lsp.auto_install`, `lsp.grace_days`, `lsp.versions`, `lsp.servers`, and
-`lsp.disabled` are **user-only** — values from project `.opencode/aft.jsonc` are stripped on
-load. A hostile repository cannot weaken your supply-chain defenses, redirect AFT to download
-a different binary, or silently disable LSPs you rely on. The plugin logs a warning when it
-strips a project-level setting.
+`lsp.disabled` are **user-only** — values from project config (`.opencode/aft.jsonc` or
+`.pi/aft.jsonc`) are stripped on load. A hostile repository cannot weaken your supply-chain
+defenses, redirect AFT to download a different binary, or silently disable LSPs you rely on.
+The plugin logs a warning when it strips a project-level setting.
 
 **Trust-On-First-Use (TOFU) verification:** AFT records the SHA-256 of every downloaded
 GitHub release archive in `.aft-installed`. If the same tag is ever re-installed with a
@@ -1159,34 +1189,56 @@ For best results in very large trees, point AFT at a specific project subdirecto
 
 ## Architecture
 
-AFT is two components that talk over JSON-over-stdio:
+AFT is a Rust binary that any AI coding harness can drive over JSON-over-stdio, plus a thin
+adapter package per harness:
 
 ```
-OpenCode agent
-     |
-     | tool calls
-     v
-@cortexkit/aft-opencode (TypeScript plugin)
-  - Hoists enhanced read/write/edit/apply_patch/ast_grep_*/lsp_diagnostics/grep/glob
-  - Registers aft_outline/navigate/import/transform/refactor/safety/delete/move/search
-  - Manages a BridgePool (one aft process per session)
-  - Resolves the binary path (cache → npm → PATH → cargo → download)
-     |
-     | JSON-over-stdio (newline-delimited)
-     v
-aft binary (Rust)
-  - tree-sitter parsing (14 language grammars)
-  - Symbol resolution, call graph, diff generation
-  - Format-on-edit (shells out to biome / rustfmt / etc.)
-  - Backup/checkpoint management
-  - Trigram search index (experimental: background thread, disk persistence, file watcher)
-  - Semantic search with local embeddings (experimental: fastembed + all-MiniLM-L6-v2)
-  - Persistent storage at ~/.local/share/opencode/storage/plugin/aft/
+   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+   │  OpenCode   │    │     Pi      │    │  Future…    │
+   │   agent     │    │   agent     │    │  (MCP, …)   │
+   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+          │ tool calls       │ tool calls       │
+          ▼                  ▼                  ▼
+   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+   │ aft-opencode │   │   aft-pi     │   │     …        │  ← thin adapters per harness
+   │  (TS plugin) │   │  (TS plugin) │   │              │    Each: hoist tools, manage
+   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘    BridgePool, resolve binary,
+          │                  │                  │            translate harness API
+          └──────────────────┴──────────────────┘
+                             │
+                             │ JSON-over-stdio
+                             ▼
+                  ┌────────────────────────┐
+                  │     aft binary         │  ← shared core
+                  │       (Rust)           │
+                  ├────────────────────────┤
+                  │ • tree-sitter (15 lang)│
+                  │ • symbols & call graph │
+                  │ • diff/format/backup   │
+                  │ • LSP client           │
+                  │ • trigram index (exp)  │
+                  │ • semantic index (exp) │
+                  └────────────────────────┘
 ```
 
-The binary speaks a simple request/response protocol: the plugin writes a JSON object to stdin,
-the binary writes a JSON object to stdout. One process per session stays alive for the session
-lifetime — warm parse trees, isolated undo history, no re-spawn overhead per call.
+Per-harness adapter responsibilities:
+- **Hoist** the harness's built-in tool slots (`read`, `write`, `edit`, etc.) and register
+  AFT-only tools (`aft_outline`, `aft_navigate`, etc.) under whatever names the harness
+  expects.
+- **Manage a BridgePool** — one persistent `aft` process per session — for warm parse trees,
+  isolated undo history, and zero per-call respawn cost.
+- **Resolve the binary path** through the standard chain (`~/.cache/aft/bin/<v>/` → npm
+  platform package → `PATH` → cargo install → GitHub release download).
+- **Translate** between the harness's plugin API (permission prompts, metadata renderers,
+  notification channels) and AFT's request/response protocol.
+
+The binary speaks a simple request/response protocol: the adapter writes a JSON object to
+stdin, the binary writes a JSON object to stdout. One process per session stays alive for the
+session lifetime.
+
+**Persistent storage:** AFT data lives under a per-harness storage directory (OpenCode:
+`~/.local/share/opencode/storage/plugin/aft/`; Pi: `~/.pi/agent/aft/`). Backups, search
+indexes, and downloaded LSP servers persist there across sessions.
 
 ---
 
@@ -1241,14 +1293,17 @@ bun run format      # biome format + cargo fmt
 ```
 opencode-aft/
 ├── crates/
-│   └── aft/              # Rust binary (tree-sitter core)
+│   └── aft/              # Rust binary — shared core (tree-sitter, search, LSP, etc.)
 │       └── src/
 ├── packages/
-│   ├── opencode-plugin/  # TypeScript OpenCode plugin (@cortexkit/aft-opencode)
+│   ├── aft-cli/          # Unified CLI (@cortexkit/aft) — setup/doctor across all harnesses
+│   ├── opencode-plugin/  # OpenCode adapter (@cortexkit/aft-opencode)
 │   │   └── src/
 │   │       ├── tools/    # One file per tool group
 │   │       ├── config.ts # Config loading and schema
 │   │       └── downloader.ts
+│   ├── pi-plugin/        # Pi adapter (@cortexkit/aft-pi)
+│   │   └── src/
 │   └── npm/              # Platform-specific binary packages
 └── scripts/
     └── version-sync.mjs  # Keeps npm and cargo versions in sync
@@ -1258,10 +1313,14 @@ opencode-aft/
 
 ## Roadmap
 
-- MCP server for Claude Code, Cursor, and other MCP-compatible hosts
-- LSP integration for type-aware symbol resolution (partially implemented)
-- Streaming responses for large call trees
-- Watch mode for live outline updates
+- **Additional harnesses** — MCP server for Claude Code, Cursor, and any other
+  MCP-compatible host. Same Rust binary, new thin adapter.
+- **Hardened ONNX Runtime download** — share the same size-cap / extraction-validation /
+  TOFU pipeline used for LSP installs.
+- **Streaming responses** — for large call trees and very large outline directories.
+- **Watch mode** — live outline updates as files change.
+- **Vetted checksum allowlist** — full supply-chain trust beyond the current TOFU + grace
+  window defenses.
 
 ---
 
@@ -1271,8 +1330,14 @@ Bug reports and pull requests are welcome. For larger changes, open an issue fir
 the approach.
 
 The binary protocol is documented in `crates/aft/src/main.rs`. Adding a new command means
-implementing it in Rust and adding a corresponding tool definition (or extending an existing one)
-in `packages/opencode-plugin/src/tools/`.
+implementing it in Rust and adding a corresponding tool definition (or extending an existing
+one) in each harness adapter that should expose it (`packages/opencode-plugin/src/tools/` and
+`packages/pi-plugin/src/tools/`).
+
+**Adding a new harness adapter:** the existing OpenCode and Pi adapters are the reference
+templates. Each one is roughly 1500 lines of TypeScript and reuses shared primitives
+(downloader, resolver, BridgePool, config loader, LSP cache) that are currently duplicated
+between the two — extracting these into a shared package is on the roadmap.
 
 Run `bun run format` and `cargo fmt` before submitting. The CI will reject unformatted code.
 
