@@ -124,6 +124,13 @@ pub struct Config {
     pub lsp_servers: Vec<UserServerDef>,
     /// Lowercase LSP server IDs disabled by user config.
     pub disabled_lsp: HashSet<String>,
+    /// Extra directories to search when resolving LSP binaries.
+    /// The plugin populates these from its own auto-install cache (e.g.
+    /// `~/.cache/aft/lsp-packages/<pkg>/node_modules/.bin/`) so a binary AFT
+    /// installed itself is discoverable without needing it on PATH.
+    /// Resolution order: `<project_root>/node_modules/.bin/<bin>` →
+    /// `lsp_paths_extra/<bin>` (in order) → PATH via `which`.
+    pub lsp_paths_extra: Vec<PathBuf>,
     /// Persistent storage directory for indexes (trigram, semantic).
     /// Set by the plugin to the XDG-compliant path (e.g. ~/.local/share/opencode/storage/plugin/aft/).
     /// Falls back to ~/.cache/aft/ if not set.
@@ -163,6 +170,7 @@ impl Default for Config {
             experimental_lsp_ty: false,
             lsp_servers: Vec::new(),
             disabled_lsp: HashSet::new(),
+            lsp_paths_extra: Vec::new(),
             storage_dir: None,
             diagnostic_cache_size: 5000,
         }

@@ -272,3 +272,126 @@ fn configure_rejects_malformed_lsp_servers() {
     let shutdown = aft.shutdown();
     assert!(shutdown.success());
 }
+
+/// `lsp_paths_extra` provided by the plugin should reach the Rust LSP resolver,
+/// so a binary placed in one of those directories is picked up before PATH.
+///
+/// This is the contract that the plugin-side auto-installer depends on:
+/// the plugin maintains its own LSP cache directory, sends it as
+/// `lsp_paths_extra` on configure, and Rust resolves binaries from there
+/// without needing them on PATH. Stage 5 of the auto-install design hinges
+/// on this passing.
+#[test]
+fn configure_accepts_lsp_paths_extra() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing_bin = dir.path().join("lsp-cache").join("typescript").join(".bin");
+    let pending_bin = dir.path().join("lsp-cache").join("clangd").join("bin");
+    std::fs::create_dir_all(&existing_bin).unwrap();
+    let mut aft = AftProcess::spawn();
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-lsp-paths-extra",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_paths_extra": [
+                existing_bin,
+                pending_bin,
+            ],
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should accept lsp_paths_extra: {configure:?}"
+    );
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
+fn configure_rejects_existing_file_lsp_paths_extra() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, "not a directory").unwrap();
+    let mut aft = AftProcess::spawn();
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-lsp-paths-file",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_paths_extra": [file],
+        })
+        .to_string(),
+    );
+
+    assert_eq!(configure["success"], false);
+    assert_eq!(configure["code"], "invalid_request");
+    assert!(configure["message"]
+        .as_str()
+        .unwrap()
+        .contains("must resolve to a directory"));
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+/// Malformed `lsp_paths_extra` (non-array, empty strings, or non-absolute
+/// paths) must be rejected with `invalid_request`. This guards against the
+/// plugin sending bad data — Rust must not silently accept it because the
+/// resolver would then fail late and in confusing ways.
+#[test]
+fn configure_rejects_malformed_lsp_paths_extra() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Non-array → invalid_request.
+    let mut aft = AftProcess::spawn();
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-lsp-paths-not-array",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_paths_extra": "not-an-array",
+        })
+        .to_string(),
+    );
+    assert_eq!(configure["success"], false);
+    assert_eq!(configure["code"], "invalid_request");
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+
+    // Empty string entry → invalid_request.
+    let mut aft = AftProcess::spawn();
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-lsp-paths-empty",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_paths_extra": [""],
+        })
+        .to_string(),
+    );
+    assert_eq!(configure["success"], false);
+    assert_eq!(configure["code"], "invalid_request");
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+
+    // Relative path → invalid_request.
+    let mut aft = AftProcess::spawn();
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-lsp-paths-relative",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_paths_extra": ["relative/path"],
+        })
+        .to_string(),
+    );
+    assert_eq!(configure["success"], false);
+    assert_eq!(configure["code"], "invalid_request");
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}

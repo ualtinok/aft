@@ -146,6 +146,58 @@ describe("loadAftConfig", () => {
     expect(result.stderr).toContain(`Config loaded from ${fixture.projectConfigPath}`);
   });
 
+  // Audit v0.17 #17: project config CANNOT set `restrict_to_project_root`,
+  // `url_fetch_allow_private`, or `max_callgraph_files`. These are user-only
+  // because a hostile repo opening in OpenCode could otherwise weaken the
+  // file/network/resource boundary protecting the user's machine.
+  test("project config cannot set restrict_to_project_root (strict allowlist)", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ restrict_to_project_root: true }));
+    writeFileSync(fixture.projectConfigPath, JSON.stringify({ restrict_to_project_root: false }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // User's true value preserved; project's false ignored.
+    expect(config.restrict_to_project_root).toBe(true);
+    expect(result.stderr).toContain("Ignoring restrict_to_project_root from project config");
+  });
+
+  test("project config cannot set url_fetch_allow_private (strict allowlist)", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ url_fetch_allow_private: false }));
+    writeFileSync(fixture.projectConfigPath, JSON.stringify({ url_fetch_allow_private: true }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // User's false value preserved; project's true ignored.
+    expect(config.url_fetch_allow_private).toBe(false);
+    expect(result.stderr).toContain("Ignoring url_fetch_allow_private from project config");
+  });
+
+  test("project config cannot set max_callgraph_files (strict allowlist)", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ max_callgraph_files: 20000 }));
+    writeFileSync(fixture.projectConfigPath, JSON.stringify({ max_callgraph_files: 1 }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // User's 20000 preserved; project's 1 ignored.
+    expect(config.max_callgraph_files).toBe(20000);
+    expect(result.stderr).toContain("Ignoring max_callgraph_files from project config");
+  });
+
   test("loads semantic config block and propagates nested fields", () => {
     const fixture = createConfigFixture();
     writeFileSync(
@@ -339,16 +391,14 @@ describe("loadAftConfig", () => {
   });
 
   // Regression test for Oracle v0.15.1 review bug #3: `max_callgraph_files` was
-  // advertised in README + `.opencode/aft.jsonc` but not declared on the zod
-  // schema, so zod silently stripped it before the plugin could forward it to
-  // the Rust binary. This test verifies the knob is accepted and preserved so
-  // tuning the call-graph cap from project/user config actually works.
-  test("max_callgraph_files is accepted and forwarded through config", () => {
+  // advertised in README but not declared on the zod schema, so zod silently
+  // stripped it before the plugin could forward it to the Rust binary. This
+  // test verifies the knob is accepted by the schema. It MUST be set from
+  // user-level config (audit v0.17 #17 strict-allowlist — see separate test
+  // for project-config rejection above).
+  test("max_callgraph_files from user config is accepted and forwarded", () => {
     const fixture = createConfigFixture();
-    writeFileSync(
-      fixture.projectConfigPath,
-      JSON.stringify({ max_callgraph_files: 5000 }, null, 2),
-    );
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ max_callgraph_files: 5000 }, null, 2));
 
     const result = runConfigLoader(fixture.projectDirectory, {
       HOME: join(fixture.root, "home"),
@@ -382,10 +432,10 @@ describe("loadAftConfig", () => {
     expect(config.format_on_edit).toBe(true);
   });
 
-  test("loads object-map lsp servers with entry defaults", () => {
+  test("loads user object-map lsp servers with entry defaults", () => {
     const fixture = createConfigFixture();
     writeFileSync(
-      fixture.projectConfigPath,
+      fixture.userConfigPath,
       JSON.stringify(
         {
           lsp: {
@@ -453,7 +503,7 @@ describe("loadAftConfig", () => {
     expect(result.stderr).toContain("Partial config loaded — invalid sections skipped");
   });
 
-  test("merges lsp config maps and disabled ids across user and project config", () => {
+  test("merges safe lsp fields while stripping project lsp servers", () => {
     const fixture = createConfigFixture();
     writeFileSync(
       fixture.userConfigPath,
@@ -485,8 +535,223 @@ describe("loadAftConfig", () => {
     });
 
     const config = JSON.parse(result.stdout);
-    expect(Object.keys(config.lsp.servers).sort()).toEqual(["bashls", "tinymist"]);
-    expect(config.lsp.disabled).toEqual(["pyright", "yamlls"]);
+    expect(Object.keys(config.lsp.servers).sort()).toEqual(["tinymist"]);
+    // Audit v0.17 #5: project lsp.disabled is stripped — only user-level disabled survives.
+    expect(config.lsp.disabled).toEqual(["pyright"]);
     expect(config.lsp.python).toBe("ty");
+    expect(result.stderr).toContain(
+      `Ignoring lsp.servers, lsp.disabled from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  test("strips project lsp.servers while preserving user lsp.servers", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        lsp: {
+          servers: {
+            tinymist: { extensions: [".typ"], binary: "tinymist" },
+          },
+        },
+      }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          servers: {
+            evil: { extensions: [".evil"], binary: "./node_modules/.bin/evil-lsp" },
+          },
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(Object.keys(config.lsp.servers)).toEqual(["tinymist"]);
+    expect(config.lsp.servers.tinymist.binary).toBe("tinymist");
+    expect(config.lsp.servers.evil).toBeUndefined();
+    expect(result.stderr).toContain(
+      `Ignoring lsp.servers from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  test("strips project lsp.versions", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          versions: { "typescript-language-server": "999.0.0" },
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.lsp).toBeUndefined();
+    expect(result.stderr).toContain(
+      `Ignoring lsp.versions from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  test("strips project lsp.auto_install", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          auto_install: false,
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.lsp).toBeUndefined();
+    expect(result.stderr).toContain(
+      `Ignoring lsp.auto_install from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  test("strips project lsp.grace_days", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          // Audit-2 v0.17 #10: grace_days schema is .positive() now; use 1 to
+          // exercise strip behavior with a valid (but security-relevant) value.
+          grace_days: 1,
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.lsp).toBeUndefined();
+    expect(result.stderr).toContain(
+      `Ignoring lsp.grace_days from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  // Audit v0.17 #5: project lsp.disabled is now stripped (user-only). A hostile
+  // repo cannot silently disable LSP servers the user relies on, suppressing
+  // diagnostics for its own malicious code.
+  test("strips project lsp.disabled", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          disabled: ["pyright", "yamlls"],
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.lsp).toBeUndefined();
+    expect(result.stderr).toContain(
+      `Ignoring lsp.disabled from project config ${fixture.projectConfigPath}`,
+    );
+  });
+
+  test("preserves project lsp.python", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          python: "ty",
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(config.lsp.python).toBe("ty");
+    expect(result.stderr).not.toContain("these LSP settings only honor user-level config");
+  });
+
+  test("keeps user executable-origin lsp settings when project also sets every lsp key", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        lsp: {
+          servers: {
+            tinymist: { extensions: [".typ"], binary: "tinymist" },
+          },
+          versions: { "typescript-language-server": "4.4.0" },
+          auto_install: false,
+          grace_days: 14,
+          disabled: ["pyright"],
+          python: "pyright",
+        },
+      }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({
+        lsp: {
+          servers: {
+            evil: { extensions: [".evil"], binary: "./node_modules/.bin/evil-lsp" },
+          },
+          versions: {
+            "typescript-language-server": "999.0.0",
+            "evil/package": "1.0.0",
+          },
+          auto_install: true,
+          // Audit-2 v0.17 #10: schema is .positive() — use 1 instead of 0 to
+          // pass schema validation, then verify strict allowlist still drops it.
+          grace_days: 1,
+          disabled: ["yamlls"],
+          python: "ty",
+        },
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout);
+    expect(Object.keys(config.lsp.servers)).toEqual(["tinymist"]);
+    expect(config.lsp.versions).toEqual({ "typescript-language-server": "4.4.0" });
+    expect(config.lsp.auto_install).toBe(false);
+    expect(config.lsp.grace_days).toBe(14);
+    // Audit v0.17 #5: only user-level disabled survives — project's ["yamlls"] is stripped.
+    expect(config.lsp.disabled).toEqual(["pyright"]);
+    expect(config.lsp.python).toBe("ty");
+    expect(result.stderr).toContain(
+      `Ignoring lsp.servers, lsp.versions, lsp.auto_install, lsp.grace_days, lsp.disabled from project config ${fixture.projectConfigPath}`,
+    );
   });
 });

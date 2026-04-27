@@ -123,11 +123,36 @@ fn test_ty_hidden_when_flag_off_but_visible_when_on() {
 
 #[test]
 fn test_custom_server_registers_correctly() {
+    // Use an extension no built-in claims so the custom server is the only match.
     let config = Config {
         lsp_servers: vec![UserServerDef {
-            id: "tinymist".to_string(),
+            id: "my-custom".to_string(),
+            extensions: vec!["xyzcustom".to_string()],
+            binary: "my-custom-bin".to_string(),
+            args: Vec::new(),
+            root_markers: vec!["custom.toml".to_string()],
+            env: HashMap::new(),
+            initialization_options: None,
+            disabled: false,
+        }],
+        ..Config::default()
+    };
+
+    let servers = servers_for_file(std::path::Path::new("/tmp/main.xyzcustom"), &config);
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0].kind, ServerKind::Custom(Arc::from("my-custom")));
+    assert_eq!(servers[0].binary, "my-custom-bin");
+}
+
+#[test]
+fn test_custom_server_coexists_with_builtin_for_same_extension() {
+    // After v0.17.0, AFT registers `tinymist` as a built-in. A user-defined
+    // server with the same extension should coexist (not replace) the built-in.
+    let config = Config {
+        lsp_servers: vec![UserServerDef {
+            id: "tinymist-fork".to_string(),
             extensions: vec!["typ".to_string()],
-            binary: "tinymist".to_string(),
+            binary: "tinymist-fork".to_string(),
             args: Vec::new(),
             root_markers: vec!["typst.toml".to_string()],
             env: HashMap::new(),
@@ -137,10 +162,12 @@ fn test_custom_server_registers_correctly() {
         ..Config::default()
     };
 
-    let servers = servers_for_file(std::path::Path::new("/tmp/main.typ"), &config);
-    assert_eq!(servers.len(), 1);
-    assert_eq!(servers[0].kind, ServerKind::Custom(Arc::from("tinymist")));
-    assert_eq!(servers[0].binary, "tinymist");
+    let kinds: Vec<ServerKind> = servers_for_file(std::path::Path::new("/tmp/main.typ"), &config)
+        .into_iter()
+        .map(|s| s.kind)
+        .collect();
+    assert!(kinds.contains(&ServerKind::Tinymist));
+    assert!(kinds.contains(&ServerKind::Custom(Arc::from("tinymist-fork"))));
 }
 
 #[test]

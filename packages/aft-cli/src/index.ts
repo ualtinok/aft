@@ -18,7 +18,7 @@ function printHelp(): void {
   console.log("  Commands:");
   console.log("    setup            Interactive setup wizard");
   console.log("    doctor           Check and fix configuration issues");
-  console.log("    doctor --force   Force clear plugin cache (fixes stale versions)");
+  console.log("    doctor --clear   Select caches to clear with an interactive prompt");
   console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
   console.log("");
   console.log("  Harness selection:");
@@ -29,6 +29,7 @@ function printHelp(): void {
   console.log("  Usage:");
   console.log("    bunx --bun @cortexkit/aft setup");
   console.log("    bunx --bun @cortexkit/aft doctor");
+  console.log("    bunx --bun @cortexkit/aft doctor --clear");
   console.log("    bunx --bun @cortexkit/aft doctor --issue");
   console.log("");
 }
@@ -41,8 +42,9 @@ async function main(): Promise<number> {
   if (command === "doctor") {
     const { runDoctor } = await import("./commands/doctor.js");
     const force = args.includes("--force");
+    const clear = args.includes("--clear");
     const issue = args.includes("--issue");
-    return runDoctor({ force, issue, argv: args });
+    return runDoctor({ clear, force, issue, argv: args });
   }
   printHelp();
   return command ? 1 : 0;

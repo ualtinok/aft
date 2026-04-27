@@ -1091,6 +1091,55 @@ notification per warning via OpenCode's ignored-message channel. Dismissed warni
 re-fire on plugin updates — dedupe is per-warning-content, persisted in
 `<storage_dir>/warned_tools.json`.
 
+### LSP auto-install
+
+AFT auto-installs language servers your project actually needs. npm-distributed servers go
+through `bun add` into AFT's cache; standalone binaries (clangd, lua-ls, zls, tinymist, texlab)
+download from GitHub releases. The cache lives at `~/.cache/aft/lsp-packages/` and
+`~/.cache/aft/lsp-binaries/` (Windows: `%LOCALAPPDATA%/aft/...`).
+
+Configure via `lsp.*`:
+
+```jsonc
+"lsp": {
+  // Auto-install relevant language servers on plugin startup. Default: true.
+  // Set false to require manual install (servers still work if on PATH).
+  "auto_install": true,
+
+  // Supply-chain grace window in days. AFT only installs versions that have
+  // been on the registry / GitHub releases for at least this many days,
+  // defending against newly-published malicious versions that get yanked
+  // within hours of detection. Default: 7. User pins via `lsp.versions`
+  // bypass this.
+  "grace_days": 7,
+
+  // Per-package version pin map. Pins bypass the grace filter.
+  // Keys: npm package name OR `owner/repo` for GitHub-hosted servers.
+  "versions": {
+    "typescript-language-server": "5.0.0",
+    "clangd/clangd": "21.1.0"
+  }
+}
+```
+
+**Trust boundary:** `lsp.auto_install`, `lsp.grace_days`, `lsp.versions`, `lsp.servers`, and
+`lsp.disabled` are **user-only** — values from project `.opencode/aft.jsonc` are stripped on
+load. A hostile repository cannot weaken your supply-chain defenses, redirect AFT to download
+a different binary, or silently disable LSPs you rely on. The plugin logs a warning when it
+strips a project-level setting.
+
+**Trust-On-First-Use (TOFU) verification:** AFT records the SHA-256 of every downloaded
+GitHub release archive in `.aft-installed`. If the same tag is ever re-installed with a
+different hash, AFT refuses the install and points to `aft doctor --clear` for manual
+recovery. The hash is also logged to the plugin log on every install for forensic comparison
+against published checksums.
+
+**What we do not do (yet):** AFT does **not** ship a vetted checksum allowlist. The TOFU
+defense above only protects against post-cache-warmup tampering; the very first install of
+any tag is accepted as-is once it passes the grace window and TLS verification. Supply-chain
+attacks faster than the grace window are a residual risk. A fully-vetted allowlist is on the
+v0.18 roadmap.
+
 ### Working with large repositories
 
 If you point AFT at a very large directory (monorepo root, `~/Work`, `/home`, etc.), certain

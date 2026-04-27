@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::lsp::client::{LspClient, LspEvent, ServerState};
 use crate::lsp::diagnostics::{from_lsp_diagnostics, DiagnosticsStore, StoredDiagnostic};
 use crate::lsp::document::DocumentStore;
-use crate::lsp::registry::{servers_for_file, ServerDef, ServerKind};
+use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerDef, ServerKind};
 use crate::lsp::roots::{find_workspace_root, ServerKey};
 use crate::lsp::LspError;
 
@@ -205,7 +205,7 @@ impl LspManager {
             };
 
             if !self.clients.contains_key(&key) {
-                match self.spawn_server(&def, &key.root) {
+                match self.spawn_server(&def, &key.root, config) {
                     Ok(client) => {
                         self.clients.insert(key.clone(), client);
                         self.documents.entry(key.clone()).or_default();
@@ -914,8 +914,13 @@ impl LspManager {
         None
     }
 
-    fn spawn_server(&self, def: &ServerDef, root: &Path) -> Result<LspClient, LspError> {
-        let binary = self.resolve_binary(def)?;
+    fn spawn_server(
+        &self,
+        def: &ServerDef,
+        root: &Path,
+        config: &Config,
+    ) -> Result<LspClient, LspError> {
+        let binary = self.resolve_binary(def, config)?;
 
         // Merge the server-defined env with our test-injected env.
         // `extra_env` is empty in production; tests use it to drive fake
@@ -937,7 +942,7 @@ impl LspManager {
         Ok(client)
     }
 
-    fn resolve_binary(&self, def: &ServerDef) -> Result<PathBuf, LspError> {
+    fn resolve_binary(&self, def: &ServerDef, config: &Config) -> Result<PathBuf, LspError> {
         if let Some(path) = self.binary_overrides.get(&def.kind) {
             if path.exists() {
                 return Ok(path.clone());
@@ -960,9 +965,18 @@ impl LspManager {
             )));
         }
 
-        which::which(&def.binary).map_err(|_| {
+        // Layered resolution:
+        //   1. <project_root>/node_modules/.bin/<binary>
+        //   2. config.lsp_paths_extra (plugin auto-install cache, etc.)
+        //   3. PATH via `which`
+        resolve_lsp_binary(
+            &def.binary,
+            config.project_root.as_deref(),
+            &config.lsp_paths_extra,
+        )
+        .ok_or_else(|| {
             LspError::NotFound(format!(
-                "language server binary '{}' not found on PATH",
+                "language server binary '{}' not found in node_modules/.bin, lsp_paths_extra, or PATH",
                 def.binary
             ))
         })

@@ -3,6 +3,7 @@ import type { HarnessAdapter } from "../adapters/types.js";
 import { type BinaryCacheInfo, getBinaryCacheInfo } from "./binary-cache.js";
 import { probeBinaryVersion } from "./binary-probe.js";
 import { readJsoncFile } from "./jsonc.js";
+import { getLspCacheReport, type LspCacheReport } from "./lsp-cache.js";
 import {
   detectOrtVersion,
   findCachedOnnxRuntime,
@@ -24,6 +25,8 @@ export interface DiagnosticReport {
   binaryVersion: string | null;
   harnesses: HarnessDiagnostic[];
   binaryCache: BinaryCacheInfo;
+  /** LSP package and binary caches populated by plugin auto-install. */
+  lspCache: LspCacheReport;
 }
 
 export interface HarnessDiagnostic {
@@ -81,6 +84,7 @@ export async function collectDiagnostics(adapters: HarnessAdapter[]): Promise<Di
     binaryVersion,
     harnesses,
     binaryCache: getBinaryCacheInfo(cliVersion),
+    lspCache: getLspCacheReport(),
   };
 }
 
@@ -196,6 +200,12 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
   lines.push("### Binary cache");
   lines.push("```json");
   lines.push(JSON.stringify(report.binaryCache, null, 2));
+  lines.push("```");
+
+  lines.push("");
+  lines.push("### LSP cache");
+  lines.push("```json");
+  lines.push(JSON.stringify(report.lspCache, null, 2));
   lines.push("```");
   return lines.join("\n");
 }

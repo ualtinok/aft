@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::callgraph::CallGraph;
 use crate::config::{SemanticBackend, SemanticBackendConfig, UserServerDef};
 use crate::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
-use crate::lsp::registry::{servers_for_file, ServerKind};
+use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerKind};
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
     build_path_filters, current_git_head, resolve_cache_dir, walk_project_files, SearchIndex,
@@ -51,6 +51,11 @@ fn validate_storage_dir(raw: &str) -> Result<PathBuf, String> {
     }
 
     Ok(normalized)
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn parse_semantic_config(
@@ -243,6 +248,71 @@ fn optional_string_array(
     Ok(values)
 }
 
+/// Parse the `lsp_paths_extra` config param: an array of absolute directory
+/// paths the plugin wants AFT to search when resolving LSP binaries (used
+/// for the auto-install cache, e.g.
+/// `~/.cache/aft/lsp-packages/<pkg>/node_modules/.bin/`).
+///
+/// Rejects non-array values, non-string entries, empty strings, relative paths,
+/// parent traversal, and existing paths that do not resolve to directories.
+/// Non-existent paths are accepted silently — the resolver tolerates them and
+/// falls through to the next candidate.
+fn parse_lsp_paths_extra(value: &Value) -> Result<Vec<PathBuf>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| "configure: lsp_paths_extra must be an array of strings".to_string())?;
+
+    let mut paths = Vec::with_capacity(array.len());
+    for (index, entry) in array.iter().enumerate() {
+        let raw = entry
+            .as_str()
+            .ok_or_else(|| format!("configure: lsp_paths_extra[{index}] must be a string"))?;
+        if raw.is_empty() {
+            return Err(format!(
+                "configure: lsp_paths_extra[{index}] must not be empty"
+            ));
+        }
+        let path = PathBuf::from(raw);
+        if !path.is_absolute() {
+            return Err(format!(
+                "configure: lsp_paths_extra[{index}] must be an absolute path: {raw}"
+            ));
+        }
+        if has_parent_component(&path) {
+            return Err(format!(
+                "configure: lsp_paths_extra[{index}] must not contain '..' traversal: {raw}"
+            ));
+        }
+
+        match std::fs::canonicalize(&path) {
+            Ok(canonical) => {
+                if has_parent_component(&canonical) {
+                    return Err(format!(
+                        "configure: lsp_paths_extra[{index}] resolved path must not contain '..' traversal: {}",
+                        canonical.display()
+                    ));
+                }
+                if !canonical.is_dir() {
+                    return Err(format!(
+                        "configure: lsp_paths_extra[{index}] must resolve to a directory: {}",
+                        canonical.display()
+                    ));
+                }
+                paths.push(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                paths.push(path);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "configure: lsp_paths_extra[{index}] could not be resolved: {error}"
+                ));
+            }
+        }
+    }
+    Ok(paths)
+}
+
 fn parse_disabled_lsp(value: &Value) -> Result<std::collections::HashSet<String>, String> {
     let Some(entries) = value.as_array() else {
         return Err("configure: disabled_lsp must be an array of strings".to_string());
@@ -272,9 +342,14 @@ fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config)
     let mut warnings = Vec::new();
     let mut seen = HashSet::new();
 
+    let project_root = config.project_root.as_deref();
+    let extra_paths = &config.lsp_paths_extra;
+
     for file in crate::callgraph::walk_project_files(root_path) {
         for server in servers_for_file(&file, config) {
-            if is_custom_server(&server.kind) || which::which(&server.binary).is_ok() {
+            if is_custom_server(&server.kind)
+                || resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some()
+            {
                 continue;
             }
 
@@ -291,7 +366,9 @@ fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config)
     }
 
     for server in &config.lsp_servers {
-        if server.disabled || which::which(&server.binary).is_ok() {
+        if server.disabled
+            || resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some()
+        {
             continue;
         }
 
@@ -428,6 +505,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().disabled_lsp = disabled_lsp;
+    }
+    if let Some(v) = req.params.get("lsp_paths_extra") {
+        let paths = match parse_lsp_paths_extra(v) {
+            Ok(paths) => paths,
+            Err(error) => return Response::error(&req.id, "invalid_request", error),
+        };
+        ctx.config_mut().lsp_paths_extra = paths;
     }
     if let Some(v) = req
         .params
@@ -778,8 +862,30 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_storage_dir;
+    use serde_json::json;
     use std::path::PathBuf;
+
+    use super::{parse_lsp_paths_extra, validate_storage_dir};
+
+    #[cfg(unix)]
+    fn create_dir_symlink(src: &std::path::Path, dst: &std::path::Path) {
+        std::os::unix::fs::symlink(src, dst).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(src: &std::path::Path, dst: &std::path::Path) {
+        std::os::windows::fs::symlink_dir(src, dst).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(src: &std::path::Path, dst: &std::path::Path) {
+        std::os::unix::fs::symlink(src, dst).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(src: &std::path::Path, dst: &std::path::Path) {
+        std::os::windows::fs::symlink_file(src, dst).unwrap();
+    }
 
     #[test]
     fn validate_storage_dir_requires_absolute_paths() {
@@ -810,5 +916,75 @@ mod tests {
         path.push("..");
         path.push("cache");
         assert!(validate_storage_dir(path.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_accepts_existing_directory_after_canonicalize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cache").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let paths = parse_lsp_paths_extra(&json!([dir])).unwrap();
+
+        assert_eq!(paths, vec![std::fs::canonicalize(&dir).unwrap()]);
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_accepts_nonexistent_directory_for_later_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("pending").join("node_modules").join(".bin");
+
+        let paths = parse_lsp_paths_extra(&json!([missing])).unwrap();
+
+        assert_eq!(paths, vec![missing]);
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_rejects_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, "not a directory").unwrap();
+
+        let error = parse_lsp_paths_extra(&json!([file])).unwrap_err();
+
+        assert!(error.contains("must resolve to a directory"));
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_rejects_parent_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let traversing = tmp.path().join("project").join("..").join("outside");
+
+        let error = parse_lsp_paths_extra(&json!([traversing])).unwrap_err();
+
+        assert!(error.contains("must not contain '..' traversal"));
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_accepts_symlink_to_directory_as_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target-dir");
+        let link = tmp.path().join("linked-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        create_dir_symlink(&target, &link);
+
+        let paths = parse_lsp_paths_extra(&json!([link])).unwrap();
+
+        assert_eq!(paths, vec![std::fs::canonicalize(&target).unwrap()]);
+    }
+
+    #[test]
+    fn parse_lsp_paths_extra_rejects_symlink_to_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target-file");
+        let link = tmp.path().join("linked-file");
+        std::fs::write(&target, "not a directory").unwrap();
+        create_file_symlink(&target, &link);
+
+        let error = parse_lsp_paths_extra(&json!([link])).unwrap_err();
+
+        assert!(error.contains("must resolve to a directory"));
     }
 }

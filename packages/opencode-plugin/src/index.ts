@@ -7,6 +7,12 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
 import { ensureBinary } from "./downloader.js";
 import { error, log, warn } from "./logger.js";
+import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
+import {
+  abortInFlightGithubInstalls,
+  discoverRelevantGithubServers,
+  runGithubAutoInstall,
+} from "./lsp-github-install.js";
 import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import {
@@ -203,6 +209,104 @@ const plugin: Plugin = async (input) => {
     }
   }
 
+  // ─────────────────────────── LSP auto-install ───────────────────────────
+  //
+  // Discover which LSPs the project actually needs, then surface every
+  // already-cached binary directory to Rust as `lsp_paths_extra`. The Rust
+  // resolver checks this list (after project-local node_modules and before
+  // PATH), so any LSP we previously installed is found without users having
+  // to put it on PATH.
+  //
+  // For LSPs that aren't yet cached, we kick off a background install (npm
+  // for typescript-language-server / pyright / yaml-ls / bash-ls / dockerfile-ls
+  // / @vue/language-server / @astrojs/language-server / svelte-language-server
+  // / intelephense / @biomejs/biome; GitHub releases for clangd / lua-ls / zls
+  // / tinymist / texlab). The 7-day grace window in `lsp.grace_days` defends
+  // against newly-published malicious versions. Newly-installed binaries
+  // appear in the cache for the user's NEXT plugin session — matching the
+  // OpenCode "may need restart" UX and avoiding mid-session bridge restarts.
+  //
+  // The whole step is best-effort: if both probes fail, `cachedBinDirs` is
+  // still populated from `isInstalled()` checks, so previously-installed
+  // binaries continue to work.
+  try {
+    const lspAutoInstall = aftConfig.lsp?.auto_install ?? true;
+    const lspGraceDays = aftConfig.lsp?.grace_days ?? 7;
+    const lspVersions = aftConfig.lsp?.versions ?? {};
+    const lspDisabled = new Set(aftConfig.lsp?.disabled ?? []);
+
+    const npmResult = runAutoInstall(input.directory, {
+      autoInstall: lspAutoInstall,
+      graceDays: lspGraceDays,
+      versions: lspVersions,
+      disabled: lspDisabled,
+    });
+
+    // GitHub-distributed servers gate on relevance separately because the
+    // binaries are heavier (10-100 MB).
+    const relevantGithub = discoverRelevantGithubServers(input.directory);
+    const ghResult = runGithubAutoInstall(relevantGithub, {
+      autoInstall: lspAutoInstall,
+      graceDays: lspGraceDays,
+      versions: lspVersions,
+      disabled: lspDisabled,
+    });
+
+    const mergedBinDirs = [...npmResult.cachedBinDirs, ...ghResult.cachedBinDirs];
+    if (mergedBinDirs.length > 0) {
+      configOverrides.lsp_paths_extra = mergedBinDirs;
+    }
+    if (npmResult.installsStarted > 0 || ghResult.installsStarted > 0) {
+      log(
+        `[lsp] auto-install: ${npmResult.installsStarted} npm + ${ghResult.installsStarted} github install(s) running in background`,
+      );
+    }
+
+    // ─── Surface install outcomes once installs settle (audit #6) ───
+    //
+    // Both `runAutoInstall` and `runGithubAutoInstall` return synchronously
+    // with the obvious skips (disabled, irrelevant, auto_install: false). The
+    // backgrounded installs append additional reasons (grace blocked, registry
+    // probe failed, install crashed) into `skipped` as their promises settle.
+    //
+    // We deliver ONE consolidated ignored message per session listing only
+    // actionable reasons — the user can act on "grace blocked" (set a pin) or
+    // "install failed" (check `/aft-status` and the plugin log), but not on
+    // "not relevant to project" or "already installed" which are routine.
+    //
+    // Fire-and-forget; never block plugin startup.
+    Promise.all([npmResult.installsComplete, ghResult.installsComplete])
+      .then(() => {
+        const actionable = [...npmResult.skipped, ...ghResult.skipped].filter((s) => {
+          const r = s.reason.toLowerCase();
+          // Routine skips — don't notify.
+          if (r === "auto_install: false") return false;
+          if (r === "disabled by config") return false;
+          if (r === "not relevant to project") return false;
+          if (r === "already installed") return false;
+          if (r === "another install in progress") return false;
+          return true;
+        });
+        if (actionable.length === 0) return;
+
+        const lines = actionable.map((s) => `  • ${s.id}: ${s.reason}`).join("\n");
+        const message =
+          `AFT skipped or failed to install ${actionable.length} LSP server(s):\n${lines}\n\n` +
+          "See `/aft-status` for details, or check the plugin log. " +
+          'Pin a working version with `lsp.versions: { "<package>": "<version>" }` if grace is blocking, ' +
+          "or set `lsp.auto_install: false` to suppress this entirely.";
+        sendWarning({ client: input.client, directory: input.directory }, message).catch((err) => {
+          warn(`[lsp] failed to deliver install summary: ${err}`);
+        });
+      })
+      .catch((err) => {
+        warn(`[lsp] install-summary aggregation failed: ${err}`);
+      });
+  } catch (err) {
+    // Auto-install failures must never block plugin startup.
+    warn(`[lsp] auto-install setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Track which binary version we already attempted to upgrade from.
   // Prevents the loop: mismatch → fire-and-forget download → replaceBinary kills bridge →
   // respawn with same binary → mismatch fires again → kills again → 3-attempt limit.
@@ -286,6 +390,7 @@ const plugin: Plugin = async (input) => {
   // control, not implicit process-group death. The returned unregister is called
   // from dispose so plugin reloads don't leak stale cleanup callbacks.
   const unregisterShutdown = registerShutdownCleanup(async () => {
+    await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
     try {
       rpcServer.stop();
     } catch {
@@ -533,11 +638,12 @@ const plugin: Plugin = async (input) => {
         },
       };
     },
-    dispose: () => {
+    dispose: async () => {
       unregisterShutdown();
+      await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
       rpcServer.stop();
       clearSharedBridgePool();
-      return pool.shutdown();
+      await pool.shutdown();
     },
   };
 };

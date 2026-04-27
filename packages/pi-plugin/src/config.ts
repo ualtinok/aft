@@ -55,6 +55,9 @@ export interface LspConfig {
   servers?: Record<string, Omit<LspServerConfig, "id">>;
   disabled?: string[];
   python?: "pyright" | "ty" | "auto";
+  auto_install?: boolean;
+  grace_days?: number;
+  versions?: Record<string, string>;
 }
 
 export interface ConfigureLspOverrides {
@@ -149,6 +152,25 @@ const LspConfigSchema = z.object({
   servers: z.record(z.string().trim().min(1), LspServerEntrySchema).optional(),
   disabled: z.array(z.string().trim().min(1)).optional(),
   python: z.enum(["pyright", "ty", "auto"]).optional(),
+  /**
+   * Auto-install npm-distributed and GitHub-release language servers when
+   * the project needs them. Default: true.
+   */
+  auto_install: z.boolean().optional(),
+  /**
+   * Supply-chain grace window. AFT only installs versions that have been on
+   * the registry / GitHub releases for at least this many days. Default: 7.
+   * User pins via `lsp.versions` bypass this.
+   */
+  // Audit-2 v0.17 #10: grace_days must be >= 1 because grace_days: 0 disables
+  // the supply-chain grace window entirely with no warning. Users debugging
+  // can still bypass the grace per-package via `lsp.versions` pins.
+  grace_days: z.number().int().positive().optional(),
+  /**
+   * Per-package version pin map (npm package or GitHub repo).
+   * Pins bypass the grace filter and any weekly version recheck.
+   */
+  versions: z.record(z.string().trim().min(1), z.string().trim().min(1)).optional(),
 });
 
 export const AftConfigSchema = z.object({
@@ -369,29 +391,111 @@ function mergeSemanticConfig(
   ) as SemanticConfig;
 }
 
+function mergeLspConfig(base?: LspConfig, override?: LspConfig): LspConfig | undefined {
+  // STRICT ALLOWLIST: only safe fields from project override are honored.
+  //
+  // EXECUTABLE-ORIGIN fields (servers, versions, auto_install, grace_days)
+  // must come from user config — a hostile repo could otherwise specify
+  // which binary AFT installs and runs (audit v0.17 #1).
+  //
+  // ATTACK-DEFENSE fields (disabled) cannot be set from project config
+  // either — a hostile repo could silently disable LSP servers the user
+  // relies on, suppressing diagnostics for its own malicious code
+  // (audit v0.17 #5).
+  const projectSafe: LspConfig = {};
+  if (override?.python !== undefined) projectSafe.python = override.python;
+
+  // disabled comes from user config ONLY.
+  const userDisabled = base?.disabled ?? [];
+  const lsp: LspConfig = {
+    ...base,
+    ...projectSafe,
+    ...(userDisabled.length > 0 ? { disabled: [...userDisabled] } : {}),
+  };
+
+  if (Object.values(lsp).every((v) => v === undefined)) return undefined;
+
+  return Object.fromEntries(Object.entries(lsp).filter(([, v]) => v !== undefined)) as LspConfig;
+}
+
+function getProjectLspStrippedKeys(lsp?: LspConfig): string[] {
+  if (!lsp) return [];
+
+  const strippedKeys: string[] = [];
+  if (lsp.servers !== undefined) strippedKeys.push("lsp.servers");
+  if (lsp.versions !== undefined) strippedKeys.push("lsp.versions");
+  if (lsp.auto_install !== undefined) strippedKeys.push("lsp.auto_install");
+  if (lsp.grace_days !== undefined) strippedKeys.push("lsp.grace_days");
+  if (lsp.disabled !== undefined) strippedKeys.push("lsp.disabled");
+  return strippedKeys;
+}
+
+/**
+ * Top-level fields that are SAFE to inherit from project config.
+ *
+ * Anything NOT in this list flows from user config only. This is the
+ * strict-allowlist trust boundary — adding a new field requires explicit
+ * security review of whether a hostile repo could weaponize it.
+ *
+ * Audit v0.17 #17: previously `restrict_to_project_root`, `url_fetch_allow_private`,
+ * and `max_callgraph_files` flowed through the implicit `...safeOverride` spread,
+ * allowing project config to weaken security boundaries.
+ *
+ * (Note: `storage_dir` is not a config-schema field — the plugin always sets
+ * it at configure time. It cannot be set from any aft.jsonc file.)
+ */
+const PROJECT_SAFE_TOP_LEVEL_FIELDS = new Set<keyof AftConfig>([
+  "tool_surface",
+  // (Pi schema does not currently expose `hoist_builtin_tools`; if added, mark safe.)
+  "format_on_edit",
+  "validate_on_edit",
+  "experimental_search_index",
+  "experimental_semantic_search",
+  "experimental_lsp_ty",
+  // "disabled_tools" handled separately — unioned via array merge.
+  // "formatter"/"checker" handled separately — deep-merged.
+  // "semantic"/"lsp" handled separately — strict field-level merge.
+  // "restrict_to_project_root" — USER ONLY (security boundary).
+  // "url_fetch_allow_private" — USER ONLY (SSRF surface).
+  // "max_callgraph_files" — USER ONLY (resource budget).
+]);
+
+function pickProjectSafeFields(override: AftConfig): Partial<AftConfig> {
+  const safe: Partial<AftConfig> = {};
+  for (const key of PROJECT_SAFE_TOP_LEVEL_FIELDS) {
+    if (override[key] !== undefined) {
+      // biome-ignore lint/suspicious/noExplicitAny: field-by-field copy with key set guarantee
+      (safe as any)[key] = override[key];
+    }
+  }
+  return safe;
+}
+
+function getStrippedTopLevelKeys(override: AftConfig): string[] {
+  const stripped: string[] = [];
+  if (override.restrict_to_project_root !== undefined) stripped.push("restrict_to_project_root");
+  if (override.url_fetch_allow_private !== undefined) stripped.push("url_fetch_allow_private");
+  if (override.max_callgraph_files !== undefined) stripped.push("max_callgraph_files");
+  return stripped;
+}
+
 function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   const disabledTools = [...(base.disabled_tools ?? []), ...(override.disabled_tools ?? [])];
   const formatter = { ...base.formatter, ...override.formatter };
   const checker = { ...base.checker, ...override.checker };
   const semantic = mergeSemanticConfig(base.semantic, override.semantic);
-  const lspServers = { ...base.lsp?.servers, ...override.lsp?.servers };
-  const disabledLsp = [...(base.lsp?.disabled ?? []), ...(override.lsp?.disabled ?? [])];
-  const lsp = {
-    ...base.lsp,
-    ...override.lsp,
-    ...(Object.keys(lspServers).length > 0 ? { servers: lspServers } : {}),
-    ...(disabledLsp.length > 0 ? { disabled: [...new Set(disabledLsp)] } : {}),
-  };
+  const lsp = mergeLspConfig(base.lsp, override.lsp);
 
-  // SECURITY: Strip sensitive semantic fields from override before spreading.
-  const { semantic: _stripSemantic, ...safeOverride } = override;
+  // STRICT ALLOWLIST: only project-safe top-level fields are inherited.
+  // See PROJECT_SAFE_TOP_LEVEL_FIELDS above for the full security rationale.
+  const safeOverride = pickProjectSafeFields(override);
 
   return {
     ...base,
     ...safeOverride,
     ...(Object.keys(formatter).length > 0 ? { formatter } : {}),
     ...(Object.keys(checker).length > 0 ? { checker } : {}),
-    ...(Object.values(lsp).some((value) => value !== undefined) ? { lsp } : {}),
+    ...(lsp ? { lsp } : {}),
     semantic,
     ...(disabledTools.length > 0 ? { disabled_tools: [...new Set(disabledTools)] } : {}),
   };
@@ -438,6 +542,18 @@ export function loadAftConfig(projectDirectory: string): AftConfig {
     ) {
       warn(
         "Ignoring semantic.backend/base_url/api_key_env from project config (security: use user config for external backends)",
+      );
+    }
+    const strippedLspKeys = getProjectLspStrippedKeys(projectConfig.lsp);
+    if (strippedLspKeys.length > 0) {
+      warn(
+        `Ignoring ${strippedLspKeys.join(", ")} from project config ${projectConfigPath} (security: these LSP settings only honor user-level config)`,
+      );
+    }
+    const strippedTopLevelKeys = getStrippedTopLevelKeys(projectConfig);
+    if (strippedTopLevelKeys.length > 0) {
+      warn(
+        `Ignoring ${strippedTopLevelKeys.join(", ")} from project config ${projectConfigPath} (security: these settings only honor user-level config — a project should not weaken security boundaries for the user)`,
       );
     }
     config = mergeConfigs(config, projectConfig);

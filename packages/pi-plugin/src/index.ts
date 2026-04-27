@@ -37,6 +37,12 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerStatusCommand } from "./commands/aft-status.js";
 import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
 import { log, warn } from "./logger.js";
+import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
+import {
+  abortInFlightGithubInstalls,
+  discoverRelevantGithubServers,
+  runGithubAutoInstall,
+} from "./lsp-github-install.js";
 import { type ConfigureWarning, deliverConfigureWarnings } from "./notifications.js";
 import { ensureOnnxRuntime, getManualInstallHint } from "./onnx-runtime.js";
 import { BridgePool } from "./pool.js";
@@ -230,21 +236,110 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   // Build configure-time overrides forwarded to every bridge on spawn.
-  // Default to restrict_to_project_root: true for plugin-hosted agents.
-  // The Rust CLI default is false (documented — for direct/scripted use), but
-  // when agents call `aft_outline`, `aft_read`, etc. through the plugin there
-  // is no interactive permission prompt for reads, so we must enforce the
-  // project-root boundary by default. Users can opt out by explicitly setting
-  // `restrict_to_project_root: false` in their aft.jsonc.
-  const configOverrides: Record<string, unknown> = {
-    ...config,
-    ...resolveLspConfigForConfigure(config),
-    restrict_to_project_root: config.restrict_to_project_root ?? true,
-    storage_dir: storageDir,
-  };
-  delete configOverrides.lsp;
+  //
+  // STRICT ALLOWLIST (audit v0.17 #18): we explicitly pick fields from
+  // `config` instead of spreading. The previous `...config` spread leaked
+  // every top-level field — including `restrict_to_project_root` and
+  // `url_fetch_allow_private` — through the project-config trust boundary,
+  // because at this point `config` is the merged user+project view and
+  // mergeConfigs alone is not enough.
+  //
+  // Default `restrict_to_project_root: true` for plugin-hosted agents.
+  // The Rust CLI default is false (documented — for direct/scripted use),
+  // but when agents call `aft_outline`, `aft_read`, etc. through the plugin
+  // there is no interactive permission prompt for reads, so we must enforce
+  // the project-root boundary by default. Users opt out via user config
+  // ONLY (project config cannot weaken this; see config.ts trust boundary).
+  const configOverrides: Record<string, unknown> = {};
+  if (config.format_on_edit !== undefined) configOverrides.format_on_edit = config.format_on_edit;
+  if (config.validate_on_edit !== undefined)
+    configOverrides.validate_on_edit = config.validate_on_edit;
+  if (config.formatter !== undefined) configOverrides.formatter = config.formatter;
+  if (config.checker !== undefined) configOverrides.checker = config.checker;
+  configOverrides.restrict_to_project_root = config.restrict_to_project_root ?? true;
+  if (config.experimental_search_index !== undefined)
+    configOverrides.experimental_search_index = config.experimental_search_index;
+  if (config.experimental_semantic_search !== undefined)
+    configOverrides.experimental_semantic_search = config.experimental_semantic_search;
+  Object.assign(configOverrides, resolveLspConfigForConfigure(config));
+  if (config.semantic !== undefined) configOverrides.semantic = config.semantic;
+  if (config.max_callgraph_files !== undefined)
+    configOverrides.max_callgraph_files = config.max_callgraph_files;
+  // url_fetch_allow_private: USER ONLY. Forwarded only when set (Rust default false).
+  if (config.url_fetch_allow_private !== undefined)
+    configOverrides.url_fetch_allow_private = config.url_fetch_allow_private;
+  configOverrides.storage_dir = storageDir;
   if (ortDylibDir) {
-    (configOverrides as Record<string, unknown>)._ort_dylib_dir = ortDylibDir;
+    configOverrides._ort_dylib_dir = ortDylibDir;
+  }
+
+  // ─────────────────────────── LSP auto-install ───────────────────────────
+  // Mirrors the OpenCode plugin: discover relevant LSPs, surface cached bin
+  // dirs to Rust as `lsp_paths_extra`, kick off background installs for
+  // anything missing. The 7-day grace defends against newly-published
+  // malicious versions. Best-effort — failures never block plugin startup.
+  try {
+    const lspAutoInstall = config.lsp?.auto_install ?? true;
+    const lspGraceDays = config.lsp?.grace_days ?? 7;
+    const lspVersions = config.lsp?.versions ?? {};
+    const lspDisabled = new Set(config.lsp?.disabled ?? []);
+    const projectRoot = process.cwd();
+
+    const npmResult = runAutoInstall(projectRoot, {
+      autoInstall: lspAutoInstall,
+      graceDays: lspGraceDays,
+      versions: lspVersions,
+      disabled: lspDisabled,
+    });
+    const relevantGithub = discoverRelevantGithubServers(projectRoot);
+    const ghResult = runGithubAutoInstall(relevantGithub, {
+      autoInstall: lspAutoInstall,
+      graceDays: lspGraceDays,
+      versions: lspVersions,
+      disabled: lspDisabled,
+    });
+    const mergedBinDirs = [...npmResult.cachedBinDirs, ...ghResult.cachedBinDirs];
+    if (mergedBinDirs.length > 0) {
+      configOverrides.lsp_paths_extra = mergedBinDirs;
+    }
+    if (npmResult.installsStarted > 0 || ghResult.installsStarted > 0) {
+      log(
+        `[lsp] auto-install: ${npmResult.installsStarted} npm + ${ghResult.installsStarted} github install(s) running in background`,
+      );
+    }
+
+    // ─── Surface install outcomes once installs settle (audit #6) ───
+    //
+    // Pi loads this extension once at startup, before any session exists, so
+    // we can't send an ignored session message the way the OpenCode plugin
+    // does. Instead we promote actionable skips from `log()` (verbose) to
+    // `warn()` (visible at WARN level) so users running with default logging
+    // see them. Routine skips (already-installed, not-relevant, disabled)
+    // stay out of the warning summary.
+    Promise.all([npmResult.installsComplete, ghResult.installsComplete])
+      .then(() => {
+        const actionable = [...npmResult.skipped, ...ghResult.skipped].filter((s) => {
+          const r = s.reason.toLowerCase();
+          if (r === "auto_install: false") return false;
+          if (r === "disabled by config") return false;
+          if (r === "not relevant to project") return false;
+          if (r === "already installed") return false;
+          if (r === "another install in progress") return false;
+          return true;
+        });
+        if (actionable.length === 0) return;
+        const lines = actionable.map((s) => `  • ${s.id}: ${s.reason}`).join("\n");
+        warn(
+          `[lsp] skipped or failed to install ${actionable.length} server(s):\n${lines}\n` +
+            'Pin a working version with `lsp.versions: { "<package>": "<version>" }` if grace is blocking, ' +
+            "or set `lsp.auto_install: false` to suppress.",
+        );
+      })
+      .catch((err) => {
+        warn(`[lsp] install-summary aggregation failed: ${err}`);
+      });
+  } catch (err) {
+    warn(`[lsp] auto-install setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const pool = new BridgePool(
@@ -317,6 +412,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // Clean up bridges on session shutdown.
   pi.on("session_shutdown", async () => {
     try {
+      await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
       await pool.shutdown();
       log("Bridge pool shut down");
     } catch (err) {
@@ -329,6 +425,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // Ctrl+C, OS shutdown) rather than through the session_shutdown lifecycle.
   registerShutdownCleanup(async () => {
     try {
+      await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
       await pool.shutdown();
     } catch (err) {
       warn(`Error during process shutdown: ${err instanceof Error ? err.message : String(err)}`);

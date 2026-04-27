@@ -1,17 +1,54 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+
 import type { HarnessAdapter } from "../adapters/types.js";
 import { collectDiagnostics, renderDiagnosticsMarkdown, tailLogFile } from "../lib/diagnostics.js";
-import { formatBytes } from "../lib/fs-util.js";
+import { dirSize, formatBytes } from "../lib/fs-util.js";
 import { createGitHubIssue, isGhInstalled, openBrowser } from "../lib/github.js";
 import { resolveAdaptersForCommand } from "../lib/harness-select.js";
-import { intro, log, note, outro, text } from "../lib/prompts.js";
+import { type ClearResult, clearLspCaches } from "../lib/lsp-cache.js";
+import { intro, log, note, outro, selectMany, text } from "../lib/prompts.js";
 import { sanitizeContent } from "../lib/sanitize.js";
 
+export type DoctorClearTarget = "plugin-cache" | "lsp-cache";
+
+export const DOCTOR_CLEAR_TARGET_OPTIONS: { label: string; value: DoctorClearTarget }[] = [
+  {
+    label: "Plugin npm cache (~/.cache/opencode/packages/@cortexkit/aft-opencode@latest, etc.)",
+    value: "plugin-cache",
+  },
+  {
+    label: "LSP install cache (~/.cache/aft/lsp-packages/, ~/.cache/aft/lsp-binaries/)",
+    value: "lsp-cache",
+  },
+];
+
+export const DOCTOR_FORCE_CLEAR_TARGETS: DoctorClearTarget[] = ["plugin-cache"];
+
 export interface DoctorOptions {
+  clear: boolean;
   force: boolean;
   issue: boolean;
   argv: string[];
+}
+
+export interface CacheClearSummary {
+  hadErrors: boolean;
+  pluginCache?: {
+    cleared: number;
+    totalBytes: number;
+    errors: number;
+  };
+  lspCache?: {
+    cleared: number;
+    totalBytes: number;
+    errors: number;
+  };
+}
+
+export interface CacheClearOptions {
+  clearLspCaches?: () => ClearResult;
+  includePluginBytes?: boolean;
 }
 
 export async function runDoctor(options: DoctorOptions): Promise<number> {
@@ -19,6 +56,10 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
     return runIssueFlow(options.argv);
   }
   intro("AFT doctor");
+
+  if (options.clear) {
+    return runClearFlow(options.argv);
+  }
 
   const adapters = await resolveAdaptersForCommand(options.argv, {
     allowMulti: true,
@@ -31,6 +72,14 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
   log.info(
     `Binary cache: ${report.binaryCache.versions.length} version(s), ${formatBytes(report.binaryCache.totalSize)} at ${report.binaryCache.path}`,
   );
+
+  const npmCount = report.lspCache.npm.entries.length;
+  const ghCount = report.lspCache.github.entries.length;
+  if (npmCount + ghCount > 0) {
+    log.info(
+      `LSP cache: ${npmCount} npm + ${ghCount} github install(s), ${formatBytes(report.lspCache.totalSize)} total`,
+    );
+  }
 
   let hadProblems = false;
   for (const h of report.harnesses) {
@@ -80,8 +129,12 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
   }
 
   // Apply automatic fixes where useful.
+  if (options.force) {
+    await clearDoctorCaches(adapters, DOCTOR_FORCE_CLEAR_TARGETS, { includePluginBytes: false });
+  }
+
   for (const adapter of adapters) {
-    await maybeFixPlugin(adapter, options.force);
+    await maybeFixPlugin(adapter);
   }
 
   if (hadProblems) {
@@ -96,20 +149,117 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
   return 0;
 }
 
-async function maybeFixPlugin(adapter: HarnessAdapter, force: boolean): Promise<void> {
-  if (force) {
-    const result = await adapter.clearPluginCache(true);
-    if (result.action === "cleared") {
-      log.success(`${adapter.displayName}: cleared plugin cache at ${result.path}`);
-    } else if (result.action === "not_applicable") {
-      log.info(`${adapter.displayName}: no user-managed plugin cache to clear`);
-    } else if (result.action === "not_found") {
-      log.info(`${adapter.displayName}: no plugin cache found at ${result.path}`);
-    } else if (result.action === "error") {
-      log.error(`${adapter.displayName}: cache clear failed: ${result.error ?? "unknown"}`);
-    }
+async function runClearFlow(argv: string[]): Promise<number> {
+  const targets = await selectMany<DoctorClearTarget>(
+    "What do you want to clear?",
+    DOCTOR_CLEAR_TARGET_OPTIONS,
+    undefined,
+    false,
+  );
+
+  if (targets.length === 0) {
+    log.info("No cache categories selected; nothing to clear.");
+    outro("Done.");
+    return 0;
   }
 
+  const adapters = targets.includes("plugin-cache")
+    ? await resolveAdaptersForCommand(argv, {
+        allowMulti: true,
+        verb: "clear plugin cache for",
+      })
+    : [];
+
+  const summary = await clearDoctorCaches(adapters, targets);
+  outro(summary.hadErrors ? "Done — some cache entries could not be cleared." : "Done.");
+  return summary.hadErrors ? 1 : 0;
+}
+
+export async function clearDoctorCaches(
+  adapters: HarnessAdapter[],
+  targets: readonly DoctorClearTarget[],
+  options: CacheClearOptions = {},
+): Promise<CacheClearSummary> {
+  const summary: CacheClearSummary = { hadErrors: false };
+
+  if (targets.includes("plugin-cache")) {
+    let cleared = 0;
+    let totalBytes = 0;
+    let errors = 0;
+
+    for (const adapter of adapters) {
+      const result = await clearPluginCache(adapter, options.includePluginBytes ?? true);
+      if (result.action === "cleared") {
+        cleared += 1;
+        totalBytes += result.bytes;
+      } else if (result.action === "error") {
+        errors += 1;
+        summary.hadErrors = true;
+      }
+    }
+
+    summary.pluginCache = { cleared, totalBytes, errors };
+  }
+
+  if (targets.includes("lsp-cache")) {
+    const cleanup = (options.clearLspCaches ?? clearLspCaches)();
+    reportLspCacheClear(cleanup);
+    if (cleanup.errors.length > 0) {
+      summary.hadErrors = true;
+    }
+    summary.lspCache = {
+      cleared: cleanup.cleared.length,
+      totalBytes: cleanup.totalBytes,
+      errors: cleanup.errors.length,
+    };
+  }
+
+  return summary;
+}
+
+async function clearPluginCache(
+  adapter: HarnessAdapter,
+  includeBytes: boolean,
+): Promise<{ action: "cleared" | "not_applicable" | "not_found" | "error"; bytes: number }> {
+  const info = adapter.getPluginCacheInfo();
+  const bytes = info.exists ? dirSize(info.path) : 0;
+  const result = await adapter.clearPluginCache(true);
+
+  if (result.action === "cleared") {
+    const suffix = includeBytes ? `, reclaimed ${formatBytes(bytes)}` : "";
+    log.success(`${adapter.displayName}: cleared plugin cache at ${result.path}${suffix}`);
+    return { action: "cleared", bytes };
+  }
+  if (result.action === "not_applicable") {
+    log.info(`${adapter.displayName}: no user-managed plugin cache to clear`);
+    return { action: "not_applicable", bytes: 0 };
+  }
+  if (result.action === "not_found") {
+    log.info(`${adapter.displayName}: no plugin cache found at ${result.path}`);
+    return { action: "not_found", bytes: 0 };
+  }
+  if (result.action === "error") {
+    log.error(`${adapter.displayName}: cache clear failed: ${result.error ?? "unknown"}`);
+    return { action: "error", bytes: 0 };
+  }
+
+  return { action: "not_found", bytes: 0 };
+}
+
+function reportLspCacheClear(cleanup: ClearResult): void {
+  if (cleanup.cleared.length === 0) {
+    log.info("LSP install cache: nothing to clear, reclaimed 0 B");
+  } else {
+    log.success(
+      `LSP install cache: cleared ${cleanup.cleared.length} install(s), reclaimed ${formatBytes(cleanup.totalBytes)}`,
+    );
+  }
+  for (const err of cleanup.errors) {
+    log.error(`LSP install cache: failed to remove ${err.path}: ${err.error}`);
+  }
+}
+
+async function maybeFixPlugin(adapter: HarnessAdapter): Promise<void> {
   if (!adapter.hasPluginEntry() && adapter.isInstalled()) {
     log.info(`${adapter.displayName}: attempting to register plugin…`);
     const r = await adapter.ensurePluginEntry();

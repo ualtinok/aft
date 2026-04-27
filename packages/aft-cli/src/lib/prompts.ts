@@ -61,6 +61,7 @@ export async function selectMany<T extends string>(
   message: string,
   options: PromptOption<T>[],
   initialValues?: T[],
+  required = true,
 ): Promise<T[]> {
   const clackOptions = options.map((option) =>
     option.hint === undefined
@@ -71,7 +72,7 @@ export async function selectMany<T extends string>(
     message,
     options: clackOptions,
     ...(initialValues ? { initialValues: initialValues as string[] } : {}),
-    required: true,
+    required,
   });
   handleCancel(result);
   return result as T[];

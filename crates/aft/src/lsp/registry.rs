@@ -1,19 +1,114 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{Config, UserServerDef};
 
+/// Resolve an LSP binary name to a full path.
+///
+/// Resolution order (mirrors `format::resolve_tool` for formatters/checkers):
+/// 1. `<project_root>/node_modules/.bin/<binary>` — project devDependency
+/// 2. Each path in `extra_paths` joined with `<binary>` — plugin-supplied
+///    auto-install cache locations such as
+///    `~/.cache/aft/lsp-packages/<pkg>/node_modules/.bin/`
+/// 3. PATH via [`which::which`]
+///
+/// On Windows, candidate directories are also probed with `.cmd`, `.exe`,
+/// and `.bat` extensions because npm-installed shims often use `.cmd`.
+/// `which::which` handles PATHEXT natively for the PATH fallback.
+pub fn resolve_lsp_binary(
+    binary: &str,
+    project_root: Option<&Path>,
+    extra_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    // 1. Project-local node_modules/.bin
+    if let Some(root) = project_root {
+        let local_bin = root.join("node_modules").join(".bin");
+        if let Some(found) = probe_dir(&local_bin, binary) {
+            return Some(found);
+        }
+    }
+
+    // 2. Plugin-supplied extra paths (auto-install cache, etc.)
+    for dir in extra_paths {
+        if let Some(found) = probe_dir(dir, binary) {
+            return Some(found);
+        }
+    }
+
+    // 3. PATH fallback
+    which::which(binary).ok()
+}
+
+/// Check `dir/<binary>` and (on Windows) `dir/<binary>.cmd|.exe|.bat`.
+fn probe_dir(dir: &Path, binary: &str) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+
+    let direct = dir.join(binary);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    if cfg!(windows) {
+        for ext in ["cmd", "exe", "bat"] {
+            let candidate = dir.join(format!("{binary}.{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 /// Unique identifier for a language server kind.
+///
+/// IDs match OpenCode's `lsp/server.ts` registry where possible so users can
+/// refer to the same names in `lsp.disabled` config across both projects.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerKind {
+    // --- Built-in (existing, pre-v0.17.0) ---
     TypeScript,
-    Python,
+    Python, // pyright
     Rust,
     Go,
     Bash,
     Yaml,
-    Ty,
+    Ty, // experimental Astral Python LSP
+    // --- v0.17.0: PATH-only servers (Pattern A) ---
+    Clojure,
+    Dart,
+    ElixirLs,
+    FSharp,
+    Gleam,
+    Haskell,
+    Jdtls, // Java
+    Julia,
+    Nixd,
+    OcamlLsp,
+    PhpIntelephense,
+    RubyLsp,
+    SourceKit, // Swift
+    CSharp,
+    Razor,
+    // --- v0.17.0: Pattern C (PATH-first, GitHub-release auto-download in plugin) ---
+    Clangd,
+    LuaLs,
+    Zls,
+    Tinymist,
+    KotlinLs,
+    Texlab,
+    Oxlint,
+    TerraformLs,
+    // --- v0.17.0: Pattern B/D (npm auto-installable in plugin) ---
+    Vue,
+    Astro,
+    Prisma, // resolves the project's `prisma` CLI from node_modules; not auto-installed by AFT
+    Biome,
+    Svelte,
+    Dockerfile,
     Custom(Arc<str>),
 }
 
@@ -27,6 +122,38 @@ impl ServerKind {
             Self::Bash => "bash",
             Self::Yaml => "yaml",
             Self::Ty => "ty",
+            // Pattern A
+            Self::Clojure => "clojure-lsp",
+            Self::Dart => "dart",
+            Self::ElixirLs => "elixir-ls",
+            Self::FSharp => "fsharp",
+            Self::Gleam => "gleam",
+            Self::Haskell => "haskell-language-server",
+            Self::Jdtls => "jdtls",
+            Self::Julia => "julials",
+            Self::Nixd => "nixd",
+            Self::OcamlLsp => "ocaml-lsp",
+            Self::PhpIntelephense => "php-intelephense",
+            Self::RubyLsp => "ruby-lsp",
+            Self::SourceKit => "sourcekit-lsp",
+            Self::CSharp => "csharp",
+            Self::Razor => "razor",
+            // Pattern C
+            Self::Clangd => "clangd",
+            Self::LuaLs => "lua-ls",
+            Self::Zls => "zls",
+            Self::Tinymist => "tinymist",
+            Self::KotlinLs => "kotlin-ls",
+            Self::Texlab => "texlab",
+            Self::Oxlint => "oxlint",
+            Self::TerraformLs => "terraform",
+            // Pattern B/D
+            Self::Vue => "vue",
+            Self::Astro => "astro",
+            Self::Prisma => "prisma",
+            Self::Biome => "biome",
+            Self::Svelte => "svelte",
+            Self::Dockerfile => "dockerfile",
             Self::Custom(id) => id.as_ref(),
         }
     }
@@ -144,6 +271,302 @@ pub fn builtin_servers() -> Vec<ServerDef> {
                 "pyrightconfig.json",
             ],
         ),
+        // ===== Pattern A: PATH-only servers =====
+        // These servers are not auto-installed by AFT (the toolchain itself
+        // ships the LSP, e.g. `dart`, `gleam`; or installation is highly
+        // platform-specific, e.g. `jdtls`). Users install via system package
+        // manager / language toolchain. AFT registers the def so users with
+        // the binary on PATH get LSP coverage.
+        builtin_server(
+            ServerKind::Clojure,
+            "clojure-lsp",
+            &["clj", "cljs", "cljc", "edn"],
+            "clojure-lsp",
+            &[],
+            &[
+                "deps.edn",
+                "project.clj",
+                "shadow-cljs.edn",
+                "bb.edn",
+                "build.boot",
+            ],
+        ),
+        builtin_server(
+            ServerKind::Dart,
+            "Dart Language Server",
+            &["dart"],
+            "dart",
+            &["language-server", "--lsp"],
+            &["pubspec.yaml", "analysis_options.yaml"],
+        ),
+        builtin_server(
+            ServerKind::ElixirLs,
+            "elixir-ls",
+            &["ex", "exs"],
+            "elixir-ls",
+            &[],
+            &["mix.exs", "mix.lock"],
+        ),
+        builtin_server(
+            ServerKind::FSharp,
+            "FSAutoComplete",
+            &["fs", "fsi", "fsx", "fsscript"],
+            "fsautocomplete",
+            &[],
+            &[".slnx", ".sln", ".fsproj", "global.json"],
+        ),
+        builtin_server(
+            ServerKind::Gleam,
+            "Gleam Language Server",
+            &["gleam"],
+            "gleam",
+            &["lsp"],
+            &["gleam.toml"],
+        ),
+        builtin_server(
+            ServerKind::Haskell,
+            "haskell-language-server",
+            &["hs", "lhs"],
+            "haskell-language-server-wrapper",
+            &["--lsp"],
+            &["stack.yaml", "cabal.project", "hie.yaml"],
+        ),
+        builtin_server(
+            ServerKind::Jdtls,
+            "Eclipse JDT Language Server",
+            &["java"],
+            "jdtls",
+            &[],
+            &["pom.xml", "build.gradle", "build.gradle.kts", ".project"],
+        ),
+        builtin_server(
+            ServerKind::Julia,
+            "Julia Language Server",
+            &["jl"],
+            "julia",
+            &[
+                "--startup-file=no",
+                "--history-file=no",
+                "-e",
+                "using LanguageServer; runserver()",
+            ],
+            &["Project.toml", "Manifest.toml"],
+        ),
+        builtin_server(
+            ServerKind::Nixd,
+            "nixd",
+            &["nix"],
+            "nixd",
+            &[],
+            &["flake.nix", "default.nix", "shell.nix"],
+        ),
+        builtin_server(
+            ServerKind::OcamlLsp,
+            "ocaml-lsp",
+            &["ml", "mli"],
+            "ocamllsp",
+            &[],
+            &["dune-project", "dune-workspace", ".merlin", "opam"],
+        ),
+        builtin_server(
+            ServerKind::PhpIntelephense,
+            "Intelephense",
+            &["php"],
+            "intelephense",
+            &["--stdio"],
+            &["composer.json", "composer.lock", ".php-version"],
+        ),
+        builtin_server(
+            ServerKind::RubyLsp,
+            "ruby-lsp",
+            &["rb", "rake", "gemspec", "ru"],
+            "ruby-lsp",
+            &[],
+            &["Gemfile"],
+        ),
+        builtin_server(
+            ServerKind::SourceKit,
+            "SourceKit-LSP",
+            &["swift"],
+            "sourcekit-lsp",
+            &[],
+            &["Package.swift"],
+        ),
+        builtin_server(
+            ServerKind::CSharp,
+            "Roslyn Language Server",
+            &["cs", "csx"],
+            "roslyn-language-server",
+            &[],
+            &[".slnx", ".sln", ".csproj", "global.json"],
+        ),
+        builtin_server(
+            ServerKind::Razor,
+            "rzls",
+            &["razor", "cshtml"],
+            "rzls",
+            &[],
+            &[".slnx", ".sln", ".csproj", "global.json"],
+        ),
+        // ===== Pattern C: PATH-first; plugin auto-downloads from GitHub releases =====
+        builtin_server(
+            ServerKind::Clangd,
+            "clangd",
+            &[
+                "c", "cpp", "cc", "cxx", "c++", "h", "hpp", "hh", "hxx", "h++",
+            ],
+            "clangd",
+            &[],
+            &["compile_commands.json", "compile_flags.txt", ".clangd"],
+        ),
+        builtin_server(
+            ServerKind::LuaLs,
+            "lua-language-server",
+            &["lua"],
+            "lua-language-server",
+            &[],
+            &[".luarc.json", ".luarc.jsonc", ".stylua.toml", "stylua.toml"],
+        ),
+        builtin_server(
+            ServerKind::Zls,
+            "zls",
+            &["zig", "zon"],
+            "zls",
+            &[],
+            &["build.zig"],
+        ),
+        builtin_server(
+            ServerKind::Tinymist,
+            "tinymist",
+            &["typ", "typc"],
+            "tinymist",
+            &[],
+            &["typst.toml"],
+        ),
+        builtin_server(
+            ServerKind::KotlinLs,
+            "kotlin-language-server",
+            &["kt", "kts"],
+            "kotlin-language-server",
+            &[],
+            &["settings.gradle", "settings.gradle.kts", "build.gradle"],
+        ),
+        builtin_server(
+            ServerKind::Texlab,
+            "texlab",
+            &["tex", "bib"],
+            "texlab",
+            &[],
+            &[".latexmkrc", "latexmkrc", ".texlabroot", "texlabroot"],
+        ),
+        builtin_server(
+            ServerKind::Oxlint,
+            "oxc-language-server",
+            // Same JS/TS family as TypeScript LS; coexists rather than replaces.
+            &[
+                "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "astro", "svelte",
+            ],
+            "oxc-language-server",
+            &[],
+            &["package.json", ".oxlintrc.json", ".oxlintrc"],
+        ),
+        builtin_server(
+            ServerKind::TerraformLs,
+            "terraform-ls",
+            &["tf", "tfvars"],
+            "terraform-ls",
+            &["serve"],
+            &[".terraform.lock.hcl", "terraform.tfstate"],
+        ),
+        // ===== Pattern B/D: PATH-first; plugin auto-installs from npm =====
+        // Order matters slightly: vue/svelte/astro use TypeScript-family
+        // extensions when paired with their primary file extension. Each
+        // server only runs against its own primary extension here; agents
+        // run TypeScript LS for the rest.
+        builtin_server(
+            ServerKind::Vue,
+            "Vue Language Server",
+            &["vue"],
+            "vue-language-server",
+            &["--stdio"],
+            &[
+                "package-lock.json",
+                "bun.lockb",
+                "bun.lock",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+            ],
+        ),
+        builtin_server(
+            ServerKind::Astro,
+            "Astro Language Server",
+            &["astro"],
+            "astro-ls",
+            &["--stdio"],
+            &[
+                "package-lock.json",
+                "bun.lockb",
+                "bun.lock",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+            ],
+        ),
+        // Prisma's LSP runs via `prisma language-server` from the project's
+        // own `prisma` CLI (resolved through node_modules/.bin). AFT does NOT
+        // auto-install the prisma package — users get LSP coverage when their
+        // project has prisma as a devDependency.
+        builtin_server(
+            ServerKind::Prisma,
+            "Prisma Language Server",
+            &["prisma"],
+            "prisma",
+            &["language-server"],
+            &["schema.prisma", "package.json"],
+        ),
+        // Biome: lint+format LSP for the JS/TS family. Coexists with the
+        // TypeScript Language Server (different responsibilities). Disable
+        // via `lsp.disabled: ["biome"]` when not desired.
+        builtin_server(
+            ServerKind::Biome,
+            "Biome",
+            &[
+                "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "json", "jsonc",
+            ],
+            "biome",
+            &["lsp-proxy"],
+            &["biome.json", "biome.jsonc"],
+        ),
+        builtin_server(
+            ServerKind::Svelte,
+            "Svelte Language Server",
+            &["svelte"],
+            "svelteserver",
+            &["--stdio"],
+            &[
+                "package-lock.json",
+                "bun.lockb",
+                "bun.lock",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+            ],
+        ),
+        builtin_server(
+            ServerKind::Dockerfile,
+            "Dockerfile Language Server",
+            // OpenCode special-cases the literal "Dockerfile" name; AFT's
+            // extension-only matcher cannot. Users can `aft_outline`/edit
+            // Dockerfiles by extension `.dockerfile`. Plain `Dockerfile`
+            // files won't auto-trigger LSP — acknowledged limitation; can
+            // be revisited if users complain.
+            &["dockerfile"],
+            "docker-langserver",
+            &["--stdio"],
+            &["Dockerfile", "dockerfile", ".dockerignore"],
+        ),
+        // NOTE: ESLint LSP intentionally not registered — OpenCode resolves it
+        // through `Module.resolve("eslint", root)` and runs custom server-side
+        // logic. AFT does not implement that flow yet; users with ESLint can
+        // run `eslint --fix` via bash.
     ]
 }
 
@@ -229,12 +652,12 @@ fn strings(values: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use crate::config::{Config, UserServerDef};
 
-    use super::{servers_for_file, ServerKind};
+    use super::{resolve_lsp_binary, servers_for_file, ServerKind};
 
     fn matching_kinds(path: &str, config: &Config) -> Vec<ServerKind> {
         servers_for_file(Path::new(path), config)
@@ -245,8 +668,37 @@ mod tests {
 
     #[test]
     fn test_servers_for_typescript_file() {
+        // TS files match TypeScript (primary) plus Biome / Oxlint / Eslint
+        // co-servers. The full set is asserted in `test_typescript_co_servers`.
+        let kinds = matching_kinds("/tmp/file.ts", &Config::default());
+        assert!(
+            kinds.contains(&ServerKind::TypeScript),
+            "expected TypeScript in {kinds:?}",
+        );
+    }
+
+    #[test]
+    fn test_typescript_co_servers() {
+        let kinds = matching_kinds("/tmp/file.ts", &Config::default());
+        assert!(kinds.contains(&ServerKind::TypeScript));
+        assert!(kinds.contains(&ServerKind::Biome));
+        assert!(kinds.contains(&ServerKind::Oxlint));
+    }
+
+    #[test]
+    fn test_typescript_co_servers_can_be_disabled() {
+        // `lsp.disabled` lets users opt out of co-servers individually.
+        let mut disabled = std::collections::HashSet::new();
+        disabled.insert("biome".to_string());
+        disabled.insert("oxlint".to_string());
+
+        let config = Config {
+            disabled_lsp: disabled,
+            ..Config::default()
+        };
+
         assert_eq!(
-            matching_kinds("/tmp/file.ts", &Config::default()),
+            matching_kinds("/tmp/file.ts", &config),
             vec![ServerKind::TypeScript]
         );
     }
@@ -282,17 +734,19 @@ mod tests {
 
     #[test]
     fn test_tsx_matches_typescript() {
-        assert_eq!(
-            matching_kinds("/tmp/file.tsx", &Config::default()),
-            vec![ServerKind::TypeScript]
+        let kinds = matching_kinds("/tmp/file.tsx", &Config::default());
+        assert!(
+            kinds.contains(&ServerKind::TypeScript),
+            "expected TypeScript in {kinds:?}",
         );
     }
 
     #[test]
     fn test_case_insensitive_extension() {
-        assert_eq!(
-            matching_kinds("/tmp/file.TS", &Config::default()),
-            vec![ServerKind::TypeScript]
+        let kinds = matching_kinds("/tmp/file.TS", &Config::default());
+        assert!(
+            kinds.contains(&ServerKind::TypeScript),
+            "expected TypeScript in {kinds:?}",
         );
     }
 
@@ -327,20 +781,333 @@ mod tests {
 
     #[test]
     fn test_custom_server_matches_extension() {
+        // Use an extension that no built-in server claims so the custom
+        // server is the sole match.
         let config = Config {
             lsp_servers: vec![UserServerDef {
-                id: "tinymist".to_string(),
-                extensions: vec!["typ".to_string()],
-                binary: "tinymist".to_string(),
-                root_markers: vec!["typst.toml".to_string()],
+                id: "my-custom-lsp".to_string(),
+                extensions: vec!["xyzcustom".to_string()],
+                binary: "my-custom-lsp".to_string(),
+                root_markers: vec!["custom.toml".to_string()],
                 ..UserServerDef::default()
             }],
             ..Config::default()
         };
 
         assert_eq!(
-            matching_kinds("/tmp/file.typ", &config),
-            vec![ServerKind::Custom(Arc::from("tinymist"))]
+            matching_kinds("/tmp/file.xyzcustom", &config),
+            vec![ServerKind::Custom(Arc::from("my-custom-lsp"))]
         );
     }
+
+    #[test]
+    fn test_custom_server_coexists_with_builtin_for_same_extension() {
+        // Both built-in tinymist and the user's custom override match
+        // the same extension. Custom appears after built-ins in the chain.
+        let config = Config {
+            lsp_servers: vec![UserServerDef {
+                id: "tinymist-fork".to_string(),
+                extensions: vec!["typ".to_string()],
+                binary: "tinymist-fork".to_string(),
+                root_markers: vec!["typst.toml".to_string()],
+                ..UserServerDef::default()
+            }],
+            ..Config::default()
+        };
+
+        let kinds = matching_kinds("/tmp/file.typ", &config);
+        assert!(kinds.contains(&ServerKind::Tinymist));
+        assert!(kinds.contains(&ServerKind::Custom(Arc::from("tinymist-fork"))));
+    }
+
+    #[test]
+    fn test_pattern_a_servers_register_for_their_extensions() {
+        let cases: &[(&str, ServerKind)] = &[
+            ("/tmp/a.clj", ServerKind::Clojure),
+            ("/tmp/a.dart", ServerKind::Dart),
+            ("/tmp/a.ex", ServerKind::ElixirLs),
+            ("/tmp/a.fs", ServerKind::FSharp),
+            ("/tmp/a.gleam", ServerKind::Gleam),
+            ("/tmp/a.hs", ServerKind::Haskell),
+            ("/tmp/A.java", ServerKind::Jdtls),
+            ("/tmp/a.jl", ServerKind::Julia),
+            ("/tmp/a.nix", ServerKind::Nixd),
+            ("/tmp/a.ml", ServerKind::OcamlLsp),
+            ("/tmp/a.php", ServerKind::PhpIntelephense),
+            ("/tmp/a.rb", ServerKind::RubyLsp),
+            ("/tmp/a.swift", ServerKind::SourceKit),
+            ("/tmp/a.cs", ServerKind::CSharp),
+            ("/tmp/a.razor", ServerKind::Razor),
+        ];
+
+        for (path, expected) in cases {
+            let kinds = matching_kinds(path, &Config::default());
+            assert!(
+                kinds.contains(expected),
+                "expected {expected:?} for {path}; got {kinds:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_pattern_c_servers_register_for_their_extensions() {
+        let cases: &[(&str, ServerKind)] = &[
+            ("/tmp/a.c", ServerKind::Clangd),
+            ("/tmp/a.cpp", ServerKind::Clangd),
+            ("/tmp/a.h", ServerKind::Clangd),
+            ("/tmp/a.lua", ServerKind::LuaLs),
+            ("/tmp/a.zig", ServerKind::Zls),
+            ("/tmp/a.typ", ServerKind::Tinymist),
+            ("/tmp/a.kt", ServerKind::KotlinLs),
+            ("/tmp/a.tex", ServerKind::Texlab),
+            ("/tmp/a.tf", ServerKind::TerraformLs),
+        ];
+
+        for (path, expected) in cases {
+            let kinds = matching_kinds(path, &Config::default());
+            assert!(
+                kinds.contains(expected),
+                "expected {expected:?} for {path}; got {kinds:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_pattern_b_d_servers_register_for_their_extensions() {
+        let cases: &[(&str, ServerKind)] = &[
+            ("/tmp/a.vue", ServerKind::Vue),
+            ("/tmp/a.astro", ServerKind::Astro),
+            ("/tmp/a.prisma", ServerKind::Prisma),
+            ("/tmp/a.svelte", ServerKind::Svelte),
+            ("/tmp/a.dockerfile", ServerKind::Dockerfile),
+        ];
+
+        for (path, expected) in cases {
+            let kinds = matching_kinds(path, &Config::default());
+            assert!(
+                kinds.contains(expected),
+                "expected {expected:?} for {path}; got {kinds:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_lsp_disabled_filters_out_servers_by_id() {
+        let mut disabled = std::collections::HashSet::new();
+        disabled.insert("clangd".to_string());
+        disabled.insert("dart".to_string());
+        disabled.insert("rust".to_string());
+
+        let config = Config {
+            disabled_lsp: disabled,
+            ..Config::default()
+        };
+
+        // Disabled servers don't appear; non-disabled servers still match.
+        let c_kinds = matching_kinds("/tmp/a.c", &config);
+        assert!(!c_kinds.contains(&ServerKind::Clangd));
+
+        let dart_kinds = matching_kinds("/tmp/a.dart", &config);
+        assert!(!dart_kinds.contains(&ServerKind::Dart));
+
+        let rust_kinds = matching_kinds("/tmp/a.rs", &config);
+        assert!(!rust_kinds.contains(&ServerKind::Rust));
+
+        // Unrelated server still works.
+        let ts_kinds = matching_kinds("/tmp/a.ts", &config);
+        assert!(ts_kinds.contains(&ServerKind::TypeScript));
+    }
+
+    #[test]
+    fn test_server_kind_ids_are_unique() {
+        // Two server defs with the same `id_str()` would collide in
+        // `lsp.disabled` and `lsp.versions` config — protect against that.
+        use std::collections::HashSet;
+        let servers = super::builtin_servers();
+        let ids: Vec<String> = servers
+            .iter()
+            .map(|s| s.kind.id_str().to_string())
+            .collect();
+        let unique: HashSet<&String> = ids.iter().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "duplicate server IDs in registry: {ids:?}",
+        );
+    }
+
+    /// Helper: write an executable file containing `#!/bin/sh\n` so it
+    /// passes both `is_file()` checks and is executable on Unix.
+    fn touch_exe(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_lsp_binary_prefers_project_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let local_bin = project.join("node_modules").join(".bin");
+        touch_exe(&local_bin.join("typescript-language-server"));
+
+        let resolved = resolve_lsp_binary("typescript-language-server", Some(project), &[]);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(local_bin.join("typescript-language-server").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_lsp_binary_falls_back_to_extra_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let extra_a = tmp.path().join("extra_a");
+        let extra_b = tmp.path().join("extra_b");
+        std::fs::create_dir_all(&extra_a).unwrap();
+        std::fs::create_dir_all(&extra_b).unwrap();
+        touch_exe(&extra_b.join("yaml-language-server"));
+
+        let resolved = resolve_lsp_binary(
+            "yaml-language-server",
+            Some(&project),
+            &[extra_a.clone(), extra_b.clone()],
+        );
+        assert_eq!(
+            resolved.as_deref(),
+            Some(extra_b.join("yaml-language-server").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_lsp_binary_extra_paths_search_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extra_a = tmp.path().join("extra_a");
+        let extra_b = tmp.path().join("extra_b");
+        std::fs::create_dir_all(&extra_a).unwrap();
+        std::fs::create_dir_all(&extra_b).unwrap();
+        // Same binary in both — earlier path wins.
+        touch_exe(&extra_a.join("bash-language-server"));
+        touch_exe(&extra_b.join("bash-language-server"));
+
+        let resolved = resolve_lsp_binary(
+            "bash-language-server",
+            None,
+            &[extra_a.clone(), extra_b.clone()],
+        );
+        assert_eq!(
+            resolved.as_deref(),
+            Some(extra_a.join("bash-language-server").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_lsp_binary_project_root_wins_over_extra_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let local_bin = project.join("node_modules").join(".bin");
+        touch_exe(&local_bin.join("pyright-langserver"));
+
+        let extra = tmp.path().join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        touch_exe(&extra.join("pyright-langserver"));
+
+        let resolved = resolve_lsp_binary("pyright-langserver", Some(&project), &[extra.clone()]);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(local_bin.join("pyright-langserver").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_lsp_binary_returns_none_for_missing_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Use a binary name that's almost certainly not on PATH.
+        let resolved =
+            resolve_lsp_binary("aft-test-nonexistent-binary-xyz123", Some(&project), &[]);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_lsp_binary_handles_missing_node_modules_gracefully() {
+        // project_root is set but node_modules/.bin doesn't exist.
+        // Should fall through to extra_paths and PATH without error.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let extra = tmp.path().join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        touch_exe(&extra.join("gopls"));
+
+        let resolved = resolve_lsp_binary("gopls", Some(&project), &[extra.clone()]);
+        assert_eq!(resolved.as_deref(), Some(extra.join("gopls").as_path()));
+    }
+
+    #[test]
+    fn resolve_lsp_binary_skips_nonexistent_extra_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let valid = tmp.path().join("valid");
+        std::fs::create_dir_all(&valid).unwrap();
+        touch_exe(&valid.join("clangd"));
+
+        let resolved = resolve_lsp_binary("clangd", None, &[missing, valid.clone()]);
+
+        assert_eq!(resolved.as_deref(), Some(valid.join("clangd").as_path()));
+    }
+
+    #[test]
+    fn resolve_lsp_binary_skips_file_extra_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        let valid = tmp.path().join("valid");
+        std::fs::write(&file, "not a directory").unwrap();
+        std::fs::create_dir_all(&valid).unwrap();
+        touch_exe(&valid.join("lua-language-server"));
+
+        let resolved = resolve_lsp_binary("lua-language-server", None, &[file, valid.clone()]);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(valid.join("lua-language-server").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_lsp_binary_skips_deleted_extra_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deleted = tmp.path().join("deleted");
+        let valid = tmp.path().join("valid");
+        std::fs::create_dir_all(&deleted).unwrap();
+        std::fs::remove_dir(&deleted).unwrap();
+        std::fs::create_dir_all(&valid).unwrap();
+        touch_exe(&valid.join("svelte-language-server"));
+
+        let resolved =
+            resolve_lsp_binary("svelte-language-server", None, &[deleted, valid.clone()]);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(valid.join("svelte-language-server").as_path())
+        );
+    }
+
+    // Avoid unused-import warning on platforms where probe_dir's Windows
+    // branch is dead code.
+    #[allow(dead_code)]
+    fn _path_buf_used(_p: PathBuf) {}
 }
