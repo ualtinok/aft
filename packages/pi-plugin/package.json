@@ -1,6 +1,6 @@
 {
   "name": "@cortexkit/aft-pi",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "type": "module",
   "description": "Pi coding agent extension for Agent File Tools (AFT) — tree-sitter and LSP-powered code analysis",
   "main": "dist/index.js",
@@ -26,11 +26,11 @@
     "zod": "^4.1.8"
   },
   "optionalDependencies": {
-    "@cortexkit/aft-darwin-arm64": "0.16.1",
-    "@cortexkit/aft-darwin-x64": "0.16.1",
-    "@cortexkit/aft-linux-arm64": "0.16.1",
-    "@cortexkit/aft-linux-x64": "0.16.1",
-    "@cortexkit/aft-win32-x64": "0.16.1"
+    "@cortexkit/aft-darwin-arm64": "0.17.0",
+    "@cortexkit/aft-darwin-x64": "0.17.0",
+    "@cortexkit/aft-linux-arm64": "0.17.0",
+    "@cortexkit/aft-linux-x64": "0.17.0",
+    "@cortexkit/aft-win32-x64": "0.17.0"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",
