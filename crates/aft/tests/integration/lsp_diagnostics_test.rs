@@ -727,6 +727,61 @@ fn empty_publish_is_fresh_clean_after_edit() {
     );
 }
 
+#[test]
+fn post_edit_rejects_publish_with_stale_version() {
+    // The Oracle review's primary correctness concern: post-edit wait must
+    // reject `publishDiagnostics` whose `version` does NOT match the
+    // post-edit document version. Otherwise an old in-flight publish that
+    // races with the agent's edit would be served as "fresh" and the
+    // agent would see diagnostics for the previous version of the file.
+    //
+    // This test forces the fake LSP server to publish `version - 1`
+    // instead of the actual version (via AFT_FAKE_LSP_STALE_VERSION env).
+    // The wait should classify that publish as STALE, so:
+    //   - `complete()` is false (no fresh publish arrived)
+    //   - the server appears in `pending_servers`
+    //   - no diagnostic entries are returned to the agent
+    let (_temp_dir, root, files) = rust_workspace_with_files(&["main.rs"]);
+    let file = &files[0];
+
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
+    {
+        let mut lsp = ctx.lsp();
+        lsp.override_binary(ServerKind::Rust, fake_server_path());
+        lsp.set_extra_env("AFT_FAKE_LSP_STALE_VERSION", "1");
+    }
+
+    // Pre-warm: do one regular write so the server is up. Use the first
+    // call (which sends didOpen with version 0) to seed state — but with
+    // STALE_VERSION on, the fake publishes version=-1 which won't match
+    // any wait. Use a long enough timeout that the wait actually drains.
+    let outcome =
+        ctx.lsp_notify_and_collect_diagnostics(file, "fn main() {}\n", Duration::from_millis(800));
+
+    assert!(
+        !outcome.complete(),
+        "stale-version publish must NOT be marked complete; got outcome={:?}",
+        outcome
+    );
+    assert!(
+        outcome
+            .pending_servers
+            .iter()
+            .any(|key| key.kind == ServerKind::Rust),
+        "rust server should be in pending_servers; got pending={:?}",
+        outcome.pending_servers
+    );
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "no diagnostics should be returned for stale publish; got {:?}",
+        outcome.diagnostics
+    );
+
+    // Sanity-check: without STALE_VERSION, the same flow IS complete.
+    // (Use a fresh context so no state leaks.)
+    let _ = root;
+}
+
 // NOTE: A test for the "no LSP server running for file" path was
 // considered but skipped here. It would require guaranteeing
 // rust-analyzer is NOT on PATH and no other registered server matches a

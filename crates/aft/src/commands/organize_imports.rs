@@ -163,7 +163,7 @@ pub fn handle_organize_imports(req: &RawRequest, ctx: &AppContext) -> Response {
         };
 
     if let Ok(final_content) = std::fs::read_to_string(&path) {
-        write_result.lsp_outcome = Some(ctx.lsp_post_write(&path, &final_content, &req.params));
+        write_result.lsp_outcome = ctx.lsp_post_write(&path, &final_content, &req.params);
     }
 
     log::debug!("organize_imports: {}", file);

@@ -588,7 +588,7 @@ fn handle_single_file_edit_match(
     };
 
     if let Ok(final_content) = std::fs::read_to_string(path.as_path()) {
-        write_result.lsp_outcome = Some(ctx.lsp_post_write(path.as_path(), &final_content, &req.params));
+        write_result.lsp_outcome = ctx.lsp_post_write(path.as_path(), &final_content, &req.params);
     }
 
     log::debug!("edit_match: {} in {}", match_str, file);

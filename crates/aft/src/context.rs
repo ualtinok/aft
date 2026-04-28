@@ -279,10 +279,15 @@ impl AppContext {
     /// Post-write LSP hook: notify server and optionally collect diagnostics.
     ///
     /// This is the single call site for all command handlers after `write_format_validate`.
-    /// When `diagnostics` is true, it notifies the server, waits until matching
-    /// diagnostics arrive or the timeout expires, and returns the verified-fresh
-    /// diagnostics plus per-server status. When false, it just notifies
-    /// (fire-and-forget).
+    /// Behavior:
+    /// - When `diagnostics: true` is in `params`, notifies the server, waits
+    ///   until matching diagnostics arrive or the timeout expires, and returns
+    ///   `Some(outcome)` with the verified-fresh diagnostics + per-server
+    ///   status.
+    /// - When `diagnostics: false` (or absent), just notifies (fire-and-forget)
+    ///   and returns `None`. Callers must NOT wrap this in `Some(...)`; the
+    ///   `None` is what tells the response builder to omit the LSP fields
+    ///   entirely (preserves the no-diagnostics-requested response shape).
     ///
     /// v0.17.3: default `wait_ms` raised from 1500 to 3000 because real-world
     /// tsserver re-analysis on monorepo files routinely takes 2-5s. Still
@@ -292,7 +297,7 @@ impl AppContext {
         file_path: &Path,
         content: &str,
         params: &serde_json::Value,
-    ) -> crate::lsp::manager::PostEditWaitOutcome {
+    ) -> Option<crate::lsp::manager::PostEditWaitOutcome> {
         let wants_diagnostics = params
             .get("diagnostics")
             .and_then(|v| v.as_bool())
@@ -300,7 +305,7 @@ impl AppContext {
 
         if !wants_diagnostics {
             self.lsp_notify_file_changed(file_path, content);
-            return crate::lsp::manager::PostEditWaitOutcome::default();
+            return None;
         }
 
         let wait_ms = params
@@ -309,11 +314,11 @@ impl AppContext {
             .unwrap_or(3000)
             .min(10_000); // Cap at 10 seconds to prevent hangs from adversarial input
 
-        self.lsp_notify_and_collect_diagnostics(
+        Some(self.lsp_notify_and_collect_diagnostics(
             file_path,
             content,
             std::time::Duration::from_millis(wait_ms),
-        )
+        ))
     }
 
     /// Validate that a file path falls within the configured project root.

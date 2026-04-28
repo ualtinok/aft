@@ -117,15 +117,41 @@ fn write_publish_diagnostics(
     uri: Value,
     diagnostics: Value,
 ) -> io::Result<()> {
+    write_publish_diagnostics_versioned(writer, uri, diagnostics, Value::Null)
+}
+
+/// Same as `write_publish_diagnostics` but includes the LSP `version` field
+/// so the v0.17.3 version-match freshness path can be tested.
+///
+/// When the env var `AFT_FAKE_LSP_STALE_VERSION` is set, the fake server
+/// publishes `version - 1` instead of the actual version, simulating an
+/// out-of-order publish that should be rejected as stale by the post-edit
+/// freshness check.
+fn write_publish_diagnostics_versioned(
+    writer: &mut impl Write,
+    uri: Value,
+    diagnostics: Value,
+    version: Value,
+) -> io::Result<()> {
+    let effective_version = if std::env::var("AFT_FAKE_LSP_STALE_VERSION").is_ok() {
+        match &version {
+            Value::Number(n) if n.is_i64() => Value::Number((n.as_i64().unwrap() - 1).into()),
+            _ => version.clone(),
+        }
+    } else {
+        version
+    };
+
+    let mut params = json!({
+        "uri": uri,
+        "diagnostics": diagnostics,
+    });
+    if !effective_version.is_null() {
+        params["version"] = effective_version;
+    }
     write_notification(
         writer,
-        &Notification::new(
-            "textDocument/publishDiagnostics",
-            Some(json!({
-                "uri": uri,
-                "diagnostics": diagnostics,
-            })),
-        ),
+        &Notification::new("textDocument/publishDiagnostics", Some(params)),
     )
 }
 
@@ -481,9 +507,14 @@ fn main() -> io::Result<()> {
                         &mut writer,
                         "custom/documentOpened",
                         uri.clone(),
+                        version.clone(),
+                    )?;
+                    write_publish_diagnostics_versioned(
+                        &mut writer,
+                        uri,
+                        opened_diagnostics(),
                         version,
                     )?;
-                    write_publish_diagnostics(&mut writer, uri, opened_diagnostics())?;
                 }
                 "textDocument/didChange" => {
                     let uri = document_uri(&params);
@@ -492,9 +523,14 @@ fn main() -> io::Result<()> {
                         &mut writer,
                         "custom/documentChanged",
                         uri.clone(),
+                        version.clone(),
+                    )?;
+                    write_publish_diagnostics_versioned(
+                        &mut writer,
+                        uri,
+                        changed_diagnostics(),
                         version,
                     )?;
-                    write_publish_diagnostics(&mut writer, uri, changed_diagnostics())?;
                 }
                 "textDocument/didClose" => {
                     let uri = document_uri(&params);
