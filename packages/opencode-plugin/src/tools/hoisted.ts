@@ -522,6 +522,19 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
         }
       }
 
+      // v0.17.3 honest reporting: when an LSP server didn't respond in time
+      // or its process exited mid-edit, surface that to the agent so they
+      // know diagnostics may be incomplete (rather than assuming silence
+      // means "clean").
+      const pendingServers = data.lsp_pending_servers as string[] | undefined;
+      const exitedServers = data.lsp_exited_servers as string[] | undefined;
+      if (pendingServers && pendingServers.length > 0) {
+        output += `\n\nNote: LSP server(s) did not respond in time: ${pendingServers.join(", ")}. Diagnostics may be incomplete; rerun lsp_diagnostics later for a fresh check.`;
+      }
+      if (exitedServers && exitedServers.length > 0) {
+        output += `\n\nNote: LSP server(s) exited during this edit: ${exitedServers.join(", ")}. Their diagnostics could not be collected.`;
+      }
+
       // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
       const diff = data.diff as
         | { before?: string; after?: string; additions?: number; deletions?: number }
@@ -807,6 +820,17 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
             const diagLines = errors.map((d) => `  Line ${d.line}: ${d.message}`).join("\n");
             result += `\n\nLSP errors detected, please fix:\n${diagLines}`;
           }
+        }
+        // v0.17.3 honest reporting: surface pending/exited servers so the
+        // agent doesn't mistake silence for "all clear" when an LSP server
+        // simply didn't respond before our wait_ms deadline.
+        const pendingServers = data.lsp_pending_servers as string[] | undefined;
+        const exitedServers = data.lsp_exited_servers as string[] | undefined;
+        if (pendingServers && pendingServers.length > 0) {
+          result += `\n\nNote: LSP server(s) did not respond in time: ${pendingServers.join(", ")}. Diagnostics may be incomplete; rerun lsp_diagnostics later for a fresh check.`;
+        }
+        if (exitedServers && exitedServers.length > 0) {
+          result += `\n\nNote: LSP server(s) exited during this edit: ${exitedServers.join(", ")}. Their diagnostics could not be collected.`;
         }
       }
 

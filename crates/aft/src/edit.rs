@@ -260,32 +260,69 @@ pub struct WriteResult {
     /// Why validation was skipped, if it was. Values: "unsupported_language",
     /// "no_checker_configured", "checker_not_installed", "timeout", "error".
     pub validate_skipped_reason: Option<String>,
-    /// LSP diagnostics for the edited file. Only populated when `diagnostics: true` is
-    /// passed in the edit request AND a language server is available.
-    pub lsp_diagnostics: Vec<crate::lsp::diagnostics::StoredDiagnostic>,
+    /// Per-edit LSP diagnostics outcome (v0.17.3). Carries the verified-fresh
+    /// diagnostics PLUS per-server status (pending/exited) so the response
+    /// can report `complete: bool` honestly.
+    ///
+    /// `None` means the caller didn't request diagnostics OR the request
+    /// was a fire-and-forget notify (no wait). `Some(outcome)` always
+    /// reports diagnostics from servers that proved freshness against the
+    /// post-edit document version.
+    pub lsp_outcome: Option<crate::lsp::manager::PostEditWaitOutcome>,
 }
 
 impl WriteResult {
-    /// Append LSP diagnostics to a response JSON object.
-    /// Only adds the field when diagnostics were requested and collected.
+    /// Append LSP diagnostics + per-server status to a response JSON
+    /// object.
+    ///
+    /// v0.17.3 honest-reporting contract: when diagnostics were requested
+    /// (`lsp_outcome.is_some()`), this ALWAYS emits `lsp_diagnostics: [...]`
+    /// (even if empty) plus `lsp_complete: bool`, `lsp_pending_servers`,
+    /// and `lsp_exited_servers`. Empty `lsp_diagnostics` no longer means
+    /// "the field disappeared" — it means "we waited and got an explicit
+    /// fresh-but-clean result, OR every expected server is in the pending/
+    /// exited list (check `lsp_complete`)."
+    ///
+    /// When diagnostics were NOT requested (`lsp_outcome.is_none()`),
+    /// nothing is added — keeps the no-LSP edit path's response shape
+    /// unchanged.
     pub fn append_lsp_diagnostics_to(&self, result: &mut serde_json::Value) {
-        if !self.lsp_diagnostics.is_empty() {
-            result["lsp_diagnostics"] = serde_json::json!(self
-                .lsp_diagnostics
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "file": d.file.display().to_string(),
-                        "line": d.line,
-                        "column": d.column,
-                        "end_line": d.end_line,
-                        "end_column": d.end_column,
-                        "severity": d.severity.as_str(),
-                        "message": d.message,
-                        "code": d.code,
-                        "source": d.source,
-                    })
+        let Some(outcome) = self.lsp_outcome.as_ref() else {
+            return;
+        };
+
+        result["lsp_diagnostics"] = serde_json::json!(outcome
+            .diagnostics
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "file": d.file.display().to_string(),
+                    "line": d.line,
+                    "column": d.column,
+                    "end_line": d.end_line,
+                    "end_column": d.end_column,
+                    "severity": d.severity.as_str(),
+                    "message": d.message,
+                    "code": d.code,
+                    "source": d.source,
                 })
+            })
+            .collect::<Vec<_>>());
+
+        result["lsp_complete"] = serde_json::Value::Bool(outcome.complete());
+
+        if !outcome.pending_servers.is_empty() {
+            result["lsp_pending_servers"] = serde_json::json!(outcome
+                .pending_servers
+                .iter()
+                .map(|key| key.kind.id_str().to_string())
+                .collect::<Vec<_>>());
+        }
+        if !outcome.exited_servers.is_empty() {
+            result["lsp_exited_servers"] = serde_json::json!(outcome
+                .exited_servers
+                .iter()
+                .map(|key| key.kind.id_str().to_string())
                 .collect::<Vec<_>>());
         }
     }
@@ -342,7 +379,7 @@ pub fn write_format_validate(
         validate_requested,
         validation_errors,
         validate_skipped_reason,
-        lsp_diagnostics: Vec::new(),
+        lsp_outcome: None,
     })
 }
 

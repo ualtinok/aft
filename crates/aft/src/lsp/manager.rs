@@ -67,6 +67,39 @@ impl EnsureServerOutcomes {
     }
 }
 
+/// Outcome of a post-edit diagnostics wait. Reports the per-server status
+/// alongside the fresh diagnostics, so the response layer can build an
+/// honest tri-state payload (`success: true` + `complete: bool` + named
+/// gap fields per `crates/aft/src/protocol.rs`).
+///
+/// `diagnostics` only contains entries from servers that proved freshness
+/// (version-match preferred, epoch-fallback for unversioned servers).
+/// Pre-edit cached entries are NEVER included — that's the whole point of
+/// this type.
+#[derive(Debug, Clone, Default)]
+pub struct PostEditWaitOutcome {
+    /// Diagnostics from servers whose response we verified is FOR the
+    /// post-edit document version (or whose epoch we saw advance after our
+    /// pre-edit snapshot, for unversioned servers).
+    pub diagnostics: Vec<StoredDiagnostic>,
+    /// Servers we expected to publish but didn't before the deadline.
+    /// Reported to the agent via `pending_lsp_servers` so they understand
+    /// the result is partial.
+    pub pending_servers: Vec<ServerKey>,
+    /// Servers whose process exited between notification and deadline.
+    /// Reported separately so the agent knows the gap is unrecoverable
+    /// without a server restart, not "wait longer."
+    pub exited_servers: Vec<ServerKey>,
+}
+
+impl PostEditWaitOutcome {
+    /// True if every expected server reported a fresh result. False means
+    /// the agent should treat the diagnostics as a partial picture.
+    pub fn complete(&self) -> bool {
+        self.pending_servers.is_empty() && self.exited_servers.is_empty()
+    }
+}
+
 /// Per-server outcome of a `textDocument/diagnostic` (per-file pull) request.
 #[derive(Debug, Clone)]
 pub enum PullFileOutcome {
@@ -352,10 +385,30 @@ impl LspManager {
         content: &str,
         config: &Config,
     ) -> Result<(), LspError> {
+        self.notify_file_changed_versioned(file_path, content, config)
+            .map(|_| ())
+    }
+
+    /// Like `notify_file_changed`, but returns the target document version
+    /// per server so the post-edit waiter can match `publishDiagnostics`
+    /// against the exact version that this notification carried.
+    ///
+    /// Returns: `Vec<(ServerKey, target_version)>`. `target_version` is the
+    /// `version` field on the `VersionedTextDocumentIdentifier` we just sent
+    /// (post-bump). For freshly-opened documents (`didOpen`) the version is
+    /// `0`. Servers that don't honor versioned text document sync will not
+    /// echo this back on `publishDiagnostics`; the caller is expected to
+    /// fall back to the epoch-delta path for those.
+    pub fn notify_file_changed_versioned(
+        &mut self,
+        file_path: &Path,
+        content: &str,
+        config: &Config,
+    ) -> Result<Vec<(ServerKey, i32)>, LspError> {
         let canonical_path = canonicalize_for_lsp(file_path)?;
         let server_keys = self.ensure_server_for_file(&canonical_path, config);
         if server_keys.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let uri = uri_for_path(&canonical_path)?;
@@ -366,6 +419,8 @@ impl LspManager {
                 .unwrap_or_default(),
         )
         .to_string();
+
+        let mut versions: Vec<(ServerKey, i32)> = Vec::with_capacity(server_keys.len());
 
         for key in server_keys {
             let current_version = self
@@ -393,6 +448,7 @@ impl LspManager {
                 if let Some(store) = self.documents.get_mut(&key) {
                     store.bump_version(&canonical_path);
                 }
+                versions.push((key, next_version));
                 continue;
             }
 
@@ -407,12 +463,15 @@ impl LspManager {
                 })?;
             }
             self.documents
-                .entry(key)
+                .entry(key.clone())
                 .or_default()
                 .open(canonical_path.clone());
+            // didOpen carries version 0 — that's the version the server
+            // will echo on its first publishDiagnostics for this document.
+            versions.push((key, 0));
         }
 
-        Ok(())
+        Ok(versions)
     }
 
     pub fn notify_file_changed_default(
@@ -509,6 +568,154 @@ impl LspManager {
         timeout: std::time::Duration,
     ) -> Vec<StoredDiagnostic> {
         self.wait_for_diagnostics(file_path, &Config::default(), timeout)
+    }
+
+    /// Test-only accessor for the diagnostics store. Used by integration
+    /// tests that need to inspect per-server entries (e.g., to verify that
+    /// `ServerKey::root` is populated correctly, not the empty path that
+    /// the legacy `publish_with_kind` path produced).
+    #[doc(hidden)]
+    pub fn diagnostics_store_for_test(&self) -> &DiagnosticsStore {
+        &self.diagnostics
+    }
+
+    /// Snapshot the current per-server epoch for every entry that exists
+    /// for `file_path`. Servers without an entry yet (never published)
+    /// are absent from the map; for those, `pre = 0` (any first publish
+    /// will be considered fresh under the epoch-fallback rule).
+    pub fn snapshot_diagnostic_epochs(&self, file_path: &Path) -> HashMap<ServerKey, u64> {
+        let lookup_path = normalize_lookup_path(file_path);
+        self.diagnostics
+            .entries_for_file(&lookup_path)
+            .into_iter()
+            .map(|(key, entry)| (key.clone(), entry.epoch))
+            .collect()
+    }
+
+    /// Wait for FRESH per-server diagnostics that match the just-sent
+    /// document version. This is the v0.17.3 post-edit path that fixes the
+    /// stale-diagnostics bug: instead of returning whatever is in the cache
+    /// when the deadline hits, we only return entries whose `version`
+    /// matches the post-edit target version (or, for servers that don't
+    /// participate in versioned sync, whose `epoch` was bumped after the
+    /// pre-edit snapshot).
+    ///
+    /// `expected_versions` should come from `notify_file_changed_versioned`
+    /// — one `(ServerKey, target_version)` per server we sent didChange/
+    /// didOpen to.
+    ///
+    /// `pre_snapshot` is the per-server epoch BEFORE the notification was
+    /// sent; it gates the epoch-fallback path so an old-version publish
+    /// arriving after `drain_events` and before `didChange` cannot be
+    /// mistaken for a fresh response.
+    ///
+    /// Returns a per-server tri-state: `Fresh` (publish matched target
+    /// version OR epoch advanced past snapshot for an unversioned server),
+    /// `Pending` (deadline hit before this server published anything we
+    /// could verify), or `Exited` (server died between notification and
+    /// deadline).
+    pub fn wait_for_post_edit_diagnostics(
+        &mut self,
+        file_path: &Path,
+        // `config` is intentionally accepted (matches sibling wait APIs and
+        // future-proofs us if freshness rules need it). Currently unused
+        // because expected_versions/pre_snapshot fully determine behavior.
+        _config: &Config,
+        expected_versions: &[(ServerKey, i32)],
+        pre_snapshot: &HashMap<ServerKey, u64>,
+        timeout: std::time::Duration,
+    ) -> PostEditWaitOutcome {
+        let lookup_path = normalize_lookup_path(file_path);
+        let deadline = std::time::Instant::now() + timeout;
+
+        // Drain any events that arrived while we were sending didChange.
+        // The publishDiagnostics handler stores the version, so even
+        // pre-snapshot publishes that landed late won't be mistaken for
+        // fresh — the version-match check will reject them.
+        let _ = self.drain_events_for_file(&lookup_path);
+
+        let mut fresh: HashMap<ServerKey, Vec<StoredDiagnostic>> = HashMap::new();
+        let mut exited: Vec<ServerKey> = Vec::new();
+
+        loop {
+            // Check freshness for every expected server. A server is fresh
+            // if its current entry for this file satisfies either:
+            //   1. version-match: entry.version == Some(target_version), OR
+            //   2. epoch-fallback: entry.version is None AND
+            //      entry.epoch > pre_snapshot.get(&key).copied().unwrap_or(0)
+            // Servers whose process has exited are reported separately.
+            for (key, target_version) in expected_versions {
+                if fresh.contains_key(key) || exited.contains(key) {
+                    continue;
+                }
+                if !self.clients.contains_key(key) {
+                    exited.push(key.clone());
+                    continue;
+                }
+                if let Some(entry) = self
+                    .diagnostics
+                    .entries_for_file(&lookup_path)
+                    .into_iter()
+                    .find_map(|(k, e)| if k == key { Some(e) } else { None })
+                {
+                    let is_fresh = match entry.version {
+                        Some(v) => v == *target_version,
+                        None => {
+                            let pre = pre_snapshot.get(key).copied().unwrap_or(0);
+                            entry.epoch > pre
+                        }
+                    };
+                    if is_fresh {
+                        fresh.insert(key.clone(), entry.diagnostics.clone());
+                    }
+                }
+            }
+
+            // All accounted for? Done.
+            if fresh.len() + exited.len() == expected_versions.len() {
+                break;
+            }
+
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+
+            let timeout = deadline.saturating_duration_since(now);
+            match self.event_rx.recv_timeout(timeout) {
+                Ok(event) => {
+                    self.handle_event(&event);
+                }
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        // Pending = expected but neither fresh nor exited.
+        let pending: Vec<ServerKey> = expected_versions
+            .iter()
+            .filter(|(k, _)| !fresh.contains_key(k) && !exited.contains(k))
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // Build deduplicated, sorted diagnostics from the fresh servers only.
+        // Stale or pending servers contribute zero diagnostics.
+        let mut diagnostics: Vec<StoredDiagnostic> = fresh
+            .into_iter()
+            .flat_map(|(_, diags)| diags.into_iter())
+            .collect();
+        diagnostics.sort_by(|a, b| {
+            a.file
+                .cmp(&b.file)
+                .then(a.line.cmp(&b.line))
+                .then(a.column.cmp(&b.column))
+                .then(a.message.cmp(&b.message))
+        });
+
+        PostEditWaitOutcome {
+            diagnostics,
+            pending_servers: pending,
+            exited_servers: exited,
+        }
     }
 
     /// Wait for diagnostics to arrive for a specific file until a deadline.
@@ -878,11 +1085,11 @@ impl LspManager {
         match event {
             LspEvent::Notification {
                 server_kind,
+                root,
                 method,
                 params: Some(params),
-                ..
             } if method == "textDocument/publishDiagnostics" => {
-                self.handle_publish_diagnostics(server_kind.clone(), params)
+                self.handle_publish_diagnostics(server_kind.clone(), root.clone(), params)
             }
             LspEvent::ServerExited { server_kind, root } => {
                 let key = ServerKey {
@@ -901,6 +1108,7 @@ impl LspManager {
     fn handle_publish_diagnostics(
         &mut self,
         server: ServerKind,
+        root: PathBuf,
         params: &serde_json::Value,
     ) -> Option<PathBuf> {
         if let Ok(publish_params) =
@@ -908,8 +1116,15 @@ impl LspManager {
         {
             let file = uri_to_path(&publish_params.uri)?;
             let stored = from_lsp_diagnostics(file.clone(), publish_params.diagnostics);
-            self.diagnostics.publish_with_kind(server, file, stored);
-            return uri_to_path(&publish_params.uri);
+            // v0.17.3: store with real ServerKey { kind, root } and capture
+            // the document `version` (when the server provided one) so the
+            // post-edit waiter can reject stale publishes deterministically
+            // via version-match (preferred) or epoch-delta (fallback). The
+            // earlier `publish_with_kind` path silently dropped both.
+            let key = ServerKey { kind: server, root };
+            self.diagnostics
+                .publish_full(key, file.clone(), stored, None, publish_params.version);
+            return Some(file);
         }
         None
     }

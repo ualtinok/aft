@@ -226,43 +226,73 @@ impl AppContext {
     /// Call this after `write_format_validate` when the request has `"diagnostics": true`.
     /// Sends didChange to the server, waits briefly for publishDiagnostics, and returns
     /// any diagnostics for the file. If no server is running, returns empty immediately.
+    ///
+    /// v0.17.3: this is the version-aware path. Pre-edit cached diagnostics
+    /// are NEVER returned — only entries whose `version` matches the
+    /// post-edit document version (or, for unversioned servers, whose
+    /// `epoch` advanced past the pre-edit snapshot).
     pub fn lsp_notify_and_collect_diagnostics(
         &self,
         file_path: &Path,
         content: &str,
         timeout: std::time::Duration,
-    ) -> Vec<crate::lsp::diagnostics::StoredDiagnostic> {
+    ) -> crate::lsp::manager::PostEditWaitOutcome {
         let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() else {
-            return Vec::new();
+            return crate::lsp::manager::PostEditWaitOutcome::default();
         };
 
         // Clear any queued notifications before this write so the wait loop only
         // observes diagnostics triggered by the current change.
         lsp.drain_events();
 
-        // Send didChange/didOpen
+        // Snapshot per-server epochs BEFORE sending didChange so the wait
+        // loop can detect freshness via epoch-delta for servers that don't
+        // echo `version` on publishDiagnostics.
+        let pre_snapshot = lsp.snapshot_diagnostic_epochs(file_path);
+
+        // Send didChange/didOpen and capture per-server target version.
         let config = self.config();
-        if let Err(e) = lsp.notify_file_changed(file_path, content, &config) {
-            log::warn!("sync error for {}: {}", file_path.display(), e);
-            return Vec::new();
+        let expected_versions = match lsp.notify_file_changed_versioned(file_path, content, &config)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("sync error for {}: {}", file_path.display(), e);
+                return crate::lsp::manager::PostEditWaitOutcome::default();
+            }
+        };
+
+        // No server matched this file — return an empty outcome that's
+        // honestly `complete: true` (nothing to wait for).
+        if expected_versions.is_empty() {
+            return crate::lsp::manager::PostEditWaitOutcome::default();
         }
 
-        // Wait for diagnostics to arrive
-        lsp.wait_for_diagnostics(file_path, &config, timeout)
+        lsp.wait_for_post_edit_diagnostics(
+            file_path,
+            &config,
+            &expected_versions,
+            &pre_snapshot,
+            timeout,
+        )
     }
 
     /// Post-write LSP hook: notify server and optionally collect diagnostics.
     ///
     /// This is the single call site for all command handlers after `write_format_validate`.
     /// When `diagnostics` is true, it notifies the server, waits until matching
-    /// diagnostics arrive or the timeout expires, and returns diagnostics for the file.
-    /// When false, it just notifies (fire-and-forget).
+    /// diagnostics arrive or the timeout expires, and returns the verified-fresh
+    /// diagnostics plus per-server status. When false, it just notifies
+    /// (fire-and-forget).
+    ///
+    /// v0.17.3: default `wait_ms` raised from 1500 to 3000 because real-world
+    /// tsserver re-analysis on monorepo files routinely takes 2-5s. Still
+    /// capped at 10000ms.
     pub fn lsp_post_write(
         &self,
         file_path: &Path,
         content: &str,
         params: &serde_json::Value,
-    ) -> Vec<crate::lsp::diagnostics::StoredDiagnostic> {
+    ) -> crate::lsp::manager::PostEditWaitOutcome {
         let wants_diagnostics = params
             .get("diagnostics")
             .and_then(|v| v.as_bool())
@@ -270,13 +300,13 @@ impl AppContext {
 
         if !wants_diagnostics {
             self.lsp_notify_file_changed(file_path, content);
-            return Vec::new();
+            return crate::lsp::manager::PostEditWaitOutcome::default();
         }
 
         let wait_ms = params
             .get("wait_ms")
             .and_then(|v| v.as_u64())
-            .unwrap_or(1500)
+            .unwrap_or(3000)
             .min(10_000); // Cap at 10 seconds to prevent hangs from adversarial input
 
         self.lsp_notify_and_collect_diagnostics(

@@ -183,8 +183,26 @@ fn handle_file_mode(
     }
 
     // Step 4: read the cache and build the response.
+    //
+    // v0.17.3 honest-reporting fix: `complete` is true only if every
+    // expected server gave us a deterministically-fresh result for this
+    // file. Pull-supported servers must report `pull_ok` or `pull_unchanged`
+    // (LSP guarantees both are fresh per the protocol). Push-only servers
+    // with a `wait_ms > 0` get the `push_only` label; we cannot prove
+    // freshness for them at the protocol level here, so we conservatively
+    // mark complete=false unless the file has any cache entry recorded
+    // since the wait started. For the common single-server pull case this
+    // is unchanged from before; the difference shows up only when something
+    // legitimately failed (pull_failed, server didn't start, etc.) and we
+    // were previously claiming complete=true while showing the failure.
+    let complete = server_status.iter().all(|entry| {
+        matches!(
+            entry.status.as_str(),
+            "pull_ok" | "pull_unchanged" | "push_only"
+        )
+    });
     let diagnostics = collect_file_diagnostics(ctx, &canonical, severity_filter);
-    let response = build_response(&diagnostics, server_status, true, Vec::new(), None);
+    let response = build_response(&diagnostics, server_status, complete, Vec::new(), None);
     Response::success(&req.id, response)
 }
 

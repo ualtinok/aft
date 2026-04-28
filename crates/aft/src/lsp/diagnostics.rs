@@ -50,6 +50,14 @@ pub struct DiagnosticEntry {
     /// Optional resultId from a pull response. Sent back as `previousResultId`
     /// on the next pull request to enable `kind: "unchanged"` short-circuiting.
     pub result_id: Option<String>,
+    /// Document version this publish/pull was tagged against, when the
+    /// server provided one. Servers that participate in versioned text
+    /// document sync echo `version` on `publishDiagnostics`; we store it
+    /// so post-edit waiters can reject stale publishes deterministically
+    /// (`version == target_version`) instead of relying on epoch ordering
+    /// alone, which has a race when an old-version publish arrives after
+    /// the pre-edit drain. `None` = server didn't tag the publish.
+    pub version: Option<i32>,
 }
 
 /// Stores diagnostics from all LSP servers, keyed per `(ServerKey, file)`.
@@ -143,12 +151,27 @@ impl DiagnosticsStore {
         diagnostics: Vec<StoredDiagnostic>,
         result_id: Option<String>,
     ) {
+        self.publish_full(server, file, diagnostics, result_id, None);
+    }
+
+    /// Replace diagnostics with full provenance (resultId + document version).
+    /// `version` should be the LSP `version` field from `publishDiagnostics`
+    /// when the server provided one, or `None` otherwise.
+    pub fn publish_full(
+        &mut self,
+        server: ServerKey,
+        file: PathBuf,
+        diagnostics: Vec<StoredDiagnostic>,
+        result_id: Option<String>,
+        version: Option<i32>,
+    ) {
         let key = (server, file);
         self.next_epoch = self.next_epoch.saturating_add(1);
         let entry = DiagnosticEntry {
             diagnostics,
             epoch: self.next_epoch,
             result_id,
+            version,
         };
 
         if self.entries.contains_key(&key) {
