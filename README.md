@@ -79,6 +79,7 @@ The unified `@cortexkit/aft` CLI works across every supported harness:
 |---|---|
 | `bunx --bun @cortexkit/aft setup` | Interactive first-time setup — auto-detects installed harnesses and registers AFT with each |
 | `bunx --bun @cortexkit/aft doctor` | Check configuration and auto-fix common issues across all detected harnesses |
+| `bunx --bun @cortexkit/aft doctor lsp <file>` | Show exactly which LSP servers AFT would spawn for a file, where each binary resolves, and why a server failed to start |
 | `bunx --bun @cortexkit/aft doctor --clear` | Interactive cache cleanup — pick which caches to clear (plugin packages, binary, LSP, semantic) |
 | `bunx --bun @cortexkit/aft doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
 
@@ -92,6 +93,25 @@ configure.
 registration, plugin cache version, binary cache, config parse errors, ONNX Runtime
 availability (for semantic search), storage directory sizes, log file status. Auto-fixes
 missing plugin entries and outdated caches.
+
+**`doctor lsp <file>`** — Per-file LSP triage. Shows which servers AFT registered for the
+file's extension, where each binary resolves (project `node_modules/.bin` → `lsp_paths_extra`
+→ `PATH` → not found), whether the workspace root marker resolves walking up from the file,
+the spawn outcome, and the diagnostics returned (if any). Use this when `lsp_diagnostics`
+returns `total: 0` and you can't tell whether the file is genuinely clean or no server ever
+spawned. Pass `--harness opencode` or `--harness pi` if you have both plugins installed and
+need to disambiguate. Example output:
+
+```
+$ bunx --bun @cortexkit/aft doctor lsp ./python/main.py
+
+Server attempts:
+  ✗ ty
+    Binary: ty (NOT FOUND on PATH or in lsp_paths_extra)
+    Workspace root: /repo/python (markers: requirements.txt)
+    Status: binary not installed
+    Action: Install with `uv tool install ty` or `pip install ty`.
+```
 
 **`doctor --clear`** — Walks you through interactive cache cleanup. Useful when you're on
 an old version and `@latest` doesn't seem to update (some harness installers cache npm
@@ -569,6 +589,11 @@ Response shape:
 install the relevant LSP server (see warnings on plugin startup). `total: 0` with `pull_ok` /
 `push_only` means the file is genuinely clean.
 
+When the response looks unhelpful and you can't tell which case applies, run
+`bunx --bun @cortexkit/aft doctor lsp <file>` for a per-file triage that names the binary
+resolution path, workspace root markers, and spawn outcome for every server registered for
+that extension. See [CLI Commands](#cli-commands).
+
 ---
 
 ### aft_outline
@@ -1018,6 +1043,16 @@ The schema is identical across harnesses. Only file location differs.
   // Default: false (most harnesses gate out-of-root access via permission prompts; AFT
   // defers to the harness's permission UX rather than imposing a hard rejection here)
   "restrict_to_project_root": false,
+
+  // OpenCode plugin only. When true, the auto-update hook installs newer
+  // @cortexkit/aft-opencode versions automatically when you have @latest in your
+  // OpenCode config.plugin entry. When false, the hook still notifies you that an
+  // update is available but does not install it. Local-dev (file://) and pinned
+  // (@x.y.z) installs always notify-only regardless of this setting.
+  // Default: true. USER-only — strict-allowlist trust boundary refuses to honor
+  // this field from project-level config to prevent hostile repos from silently
+  // suppressing security updates.
+  "auto_update": true,
 
   // Maximum source files allowed for call-graph operations (callers, trace_to,
   // trace_data, impact). Projects above this size return "project_too_large"
