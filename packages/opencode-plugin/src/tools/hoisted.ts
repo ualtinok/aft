@@ -557,11 +557,11 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
 // ---------------------------------------------------------------------------
 
 function getEditDescription(writeToolName: string): string {
-  return `Edit a file by finding and replacing text, or by targeting named symbols.
+  return `Edit a file by finding and replacing text, or by targeting named symbols. To write or overwrite a whole file, use the \`${writeToolName}\` tool — \`edit\` requires an explicit edit mode and will not silently overwrite a file from \`content\` alone.
 
 **Modes** (determined by which parameters you provide):
 
-Mode priority: operations > edits > symbol (without oldString) > oldString (find/replace) > content-only (${writeToolName})
+Mode priority: operations > edits > symbol (without oldString) > oldString (find/replace). If none match, the call is rejected — there is no implicit "write" fallback.
 
 1. **Multi-file transaction** — pass \`operations\` array
    Edits across multiple files with checkpoint-based rollback on failure.
@@ -652,6 +652,21 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .describe("Preview changes without applying (returns diff, default: false)"),
     },
     execute: async (args, context): Promise<string> => {
+      // Footgun guard: top-level startLine/endLine are not valid params on
+      // edit. They only exist nested inside `edits[]` for batch line-range
+      // mode. Without this guard, Zod silently strips the unknown keys and
+      // the call falls through mode resolution to the content-only-write
+      // branch, overwriting the entire file. Reject with a helpful pointer.
+      const argsRecord = args as Record<string, unknown>;
+      if (argsRecord.startLine !== undefined || argsRecord.endLine !== undefined) {
+        throw new Error(
+          "edit: 'startLine'/'endLine' are not top-level parameters. " +
+            "For line-range edits, nest them inside the `edits` array: " +
+            '`edits: [{ startLine: N, endLine: M, content: "..." }]`. ' +
+            "For find/replace, use `oldString`/`newString` instead.",
+        );
+      }
+
       // Transaction mode — multi-file
       if (Array.isArray(args.operations)) {
         const ops = args.operations as Array<Record<string, unknown>>;
@@ -730,15 +745,18 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         params.replacement = args.newString ?? "";
         if (args.replaceAll !== undefined) params.replace_all = args.replaceAll;
         if (args.occurrence !== undefined) params.occurrence = args.occurrence;
-      } else if (typeof args.content === "string") {
-        // Write mode
-        command = "write";
-        params.content = args.content;
-        params.create_dirs = true;
       } else {
-        throw new Error(
-          "Provide 'oldString' + 'newString', 'symbol' + 'content', 'edits' array, or 'content' for write",
-        );
+        // No mode-selecting parameter matched. We deliberately do NOT fall
+        // through to a content-only "write" mode here, even when `content` is
+        // present: that fallback was the disaster path (a typo or misnamed
+        // param like top-level startLine could silently overwrite the whole
+        // file). For full-file writes, use the dedicated `${writeToolName}`
+        // tool, which is unambiguous about its destructive intent.
+        const hint =
+          typeof args.content === "string"
+            ? ` To write the whole file, use the '${writeToolName}' tool. To edit existing content, provide 'oldString' (and optionally 'newString'), 'symbol' + 'content', or an 'edits' array.`
+            : " Provide 'oldString' (+ optional 'newString'), 'symbol' + 'content', 'edits' array, or 'operations' array.";
+        throw new Error(`edit: no edit mode resolved from arguments.${hint}`);
       }
 
       if (args.dryRun) params.dry_run = true;
@@ -1315,12 +1333,56 @@ export function aftPrefixedTools(ctx: PluginContext): Record<string, ToolDefinit
       ...aftEditTool,
       execute: async (args, context): Promise<string> => {
         const argRecord = args as Record<string, unknown>;
-        const normalizedArgs =
+        // Legacy back-compat: callers (mostly older tests/integrations) used
+        // `{ mode, file, ... }` instead of the current schema. Translate
+        // `file` -> `filePath` so the rest of the wrapper sees the modern
+        // shape. The current edit tool ignores the `mode` field; we keep it
+        // in the args object only so the explicit `mode: "write"` branch
+        // below can detect it.
+        const normalizedArgs: Record<string, unknown> =
           argRecord.mode !== undefined &&
           argRecord.filePath === undefined &&
           typeof argRecord.file === "string"
             ? { ...argRecord, filePath: argRecord.file }
-            : argRecord;
+            : { ...argRecord };
+
+        // Explicit legacy `mode: "write"` — route directly to the Rust
+        // `write` command. We do NOT fall through to the modern edit tool
+        // here, because the modern tool deliberately rejects content-only
+        // calls (the v0.17.2 footgun fix). Legacy `mode: "write"` is an
+        // *explicit* whole-file write request, which is fine; the danger is
+        // *implicit* whole-file writes where a typo in another mode-selecting
+        // param silently degrades into overwrite. Returns the same JSON
+        // envelope shape the legacy callers expect (success / file /
+        // syntax_valid / etc.), not the human-readable string the modern
+        // `write` tool returns.
+        if (
+          normalizedArgs.mode === "write" &&
+          typeof normalizedArgs.filePath === "string" &&
+          typeof normalizedArgs.content === "string"
+        ) {
+          const file = normalizedArgs.filePath as string;
+          const filePath = path.isAbsolute(file) ? file : path.resolve(context.directory, file);
+          const relPath = path.relative(context.worktree, filePath);
+          await context.ask({
+            permission: "edit",
+            patterns: [relPath],
+            always: ["*"],
+            metadata: { filepath: filePath },
+          });
+          const writeParams: Record<string, unknown> = {
+            file: filePath,
+            content: normalizedArgs.content as string,
+            create_dirs: normalizedArgs.create_dirs !== false,
+            diagnostics: true,
+          };
+          if (normalizedArgs.dryRun === true || normalizedArgs.dry_run === true) {
+            writeParams.dry_run = true;
+          }
+          const data = await callBridge(ctx, context, "write", writeParams);
+          return JSON.stringify(data);
+        }
+
         return aftEditTool.execute(normalizedArgs, context);
       },
     },

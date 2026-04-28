@@ -468,7 +468,13 @@ pub fn builtin_servers() -> Vec<ServerDef> {
             ],
             "oxc-language-server",
             &[],
-            &["package.json", ".oxlintrc.json", ".oxlintrc"],
+            // Only trigger on actual oxlint config files. We previously also
+            // matched `package.json`, but that fired oxc on every JS/TS project
+            // whether they used oxlint or not, producing a persistent warning
+            // for the (overwhelmingly common) case where the user never opted
+            // into oxlint. Users who run oxlint will have one of these config
+            // files; everyone else gets silence.
+            &[".oxlintrc.json", ".oxlintrc"],
         ),
         builtin_server(
             ServerKind::TerraformLs,
@@ -730,6 +736,32 @@ mod tests {
     #[test]
     fn test_servers_for_unknown_file() {
         assert!(matching_kinds("/tmp/file.txt", &Config::default()).is_empty());
+    }
+
+    #[test]
+    fn test_oxlint_root_markers_exclude_package_json() {
+        // Regression guard (v0.17.2): oxc-language-server previously listed
+        // `package.json` as a root marker, which fired oxc on every JS/TS
+        // project — including the overwhelming majority that don't use
+        // oxlint — producing a persistent "binary missing" warning whenever
+        // the binary wasn't installed. Root markers are now restricted to
+        // actual oxlint config files, mirroring user intent.
+        let oxlint = super::builtin_servers()
+            .into_iter()
+            .find(|s| s.kind == ServerKind::Oxlint)
+            .expect("Oxlint server must be registered");
+
+        assert!(
+            !oxlint.root_markers.iter().any(|m| m == "package.json"),
+            "package.json must not be a root marker for oxlint (got {:?})",
+            oxlint.root_markers,
+        );
+        assert!(
+            oxlint.root_markers.iter().any(|m| m == ".oxlintrc.json")
+                || oxlint.root_markers.iter().any(|m| m == ".oxlintrc"),
+            "expected an oxlint config file in root markers (got {:?})",
+            oxlint.root_markers,
+        );
     }
 
     #[test]

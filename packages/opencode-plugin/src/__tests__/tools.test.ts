@@ -321,6 +321,75 @@ describe("Tool round-trips", () => {
     const restoredContent = await readFile(existingFile, "utf-8");
     expect(restoredContent).toBe(originalContent);
   });
+
+  // ---------------------------------------------------------------------
+  // v0.17.2 footgun guards: edit must not silently overwrite a file when
+  // the caller passes nonsense params. The previous behavior was that
+  // `{ filePath, startLine, endLine, content }` (where startLine/endLine
+  // are not valid top-level params) would silently degrade to "content-only
+  // write" and overwrite the entire file. These tests lock in the new
+  // explicit-failure behavior.
+  // ---------------------------------------------------------------------
+  test("edit rejects top-level startLine/endLine with a helpful pointer to edits[]", async () => {
+    createBridge();
+    const tools = aftPrefixedTools(createPluginContext(pool));
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const filePath = resolve(tmpDir, "guarded.ts");
+    const original = "export const x = 1;\n";
+    await writeFile(filePath, original, "utf-8");
+
+    let err: Error | undefined;
+    try {
+      await tools.aft_edit.execute(
+        // No `mode` field, so this hits the modern (non-back-compat) path.
+        // startLine/endLine are not valid top-level params on edit.
+        { filePath, startLine: 1, endLine: 1, content: "export const x = 2;\n" },
+        sdkCtx,
+      );
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("startLine");
+    expect(err!.message).toContain("edits");
+
+    // File must be untouched — no silent overwrite.
+    const after = await readFile(filePath, "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("edit rejects content-only calls without an explicit edit mode", async () => {
+    createBridge();
+    const tools = aftPrefixedTools(createPluginContext(pool));
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-test-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const filePath = resolve(tmpDir, "no-fallback.ts");
+    const original = "export const y = 1;\n";
+    await writeFile(filePath, original, "utf-8");
+
+    let err: Error | undefined;
+    try {
+      await tools.aft_edit.execute(
+        // `content` alone (no oldString, no symbol, no edits, no operations,
+        // no legacy `mode: "write"`). Previously this silently overwrote the
+        // file. Now it must fail with a pointer to the write tool.
+        { filePath, content: "export const y = 2;\n" },
+        sdkCtx,
+      );
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toContain("no edit mode resolved");
+    expect(err!.message).toContain("aft_write");
+
+    // File must be untouched.
+    const after = await readFile(filePath, "utf-8");
+    expect(after).toBe(original);
+  });
 });
 
 describe("move_symbol round-trip", () => {
