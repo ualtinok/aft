@@ -145,6 +145,19 @@ export function assertSafeVersion(version: string): void {
 }
 
 /**
+ * Non-throwing version of {@link assertSafeVersion}. Returns true when
+ * `version` is a non-null, non-empty string that matches the allowlist.
+ *
+ * Audit-3 v0.17 #2: callers that read version strings from disk caches
+ * (where corruption is possible but not necessarily an attack) prefer
+ * this over throwing — they degrade to "treat as cache miss" instead of
+ * crashing the plugin.
+ */
+export function isSafeVersion(version: string | null | undefined): version is string {
+  return typeof version === "string" && version.length > 0 && SAFE_VERSION_RE.test(version);
+}
+
+/**
  * Strip a leading `v` from a release tag to get a clean version for asset
  * templates that don't include the `v` prefix.
  *

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -137,6 +145,29 @@ describe("install lock", () => {
     expect(acquireInstallLock("pkg-d")).toBe(true);
     releaseInstallLock("pkg-c");
     releaseInstallLock("pkg-d");
+  });
+
+  // Audit-3 v0.17 #3: TOCTOU defense — a process must not delete another
+  // process's lock during its own release. Simulates the scenario where
+  // process A's lock was reclaimed by B (because A exceeded STALE_LOCK_MS)
+  // and A then runs releaseInstallLock in its finally block.
+  test("releaseInstallLock leaves a lock owned by a different PID intact", () => {
+    // Acquire as ourselves.
+    acquireInstallLock("pkg-toctou");
+    const lockFile = join(lspPackageDir("pkg-toctou"), ".aft-installing");
+
+    // Simulate "another process owns this lock" by overwriting the PID.
+    const otherPid = process.pid + 99999;
+    writeFileSync(lockFile, `${otherPid}\n${new Date().toISOString()}\n`);
+
+    // We must NOT delete it.
+    releaseInstallLock("pkg-toctou");
+    expect(existsSync(lockFile)).toBe(true);
+    const raw = readFileSync(lockFile, "utf8");
+    expect(raw.startsWith(String(otherPid))).toBe(true);
+
+    // Cleanup.
+    unlinkSync(lockFile);
   });
 });
 

@@ -140,6 +140,11 @@ export function assertSafeVersion(version: string): void {
   }
 }
 
+/** Audit-3 v0.17 #2: non-throwing predicate for cache-miss-on-corruption flow. */
+export function isSafeVersion(version: string | null | undefined): version is string {
+  return typeof version === "string" && version.length > 0 && SAFE_VERSION_RE.test(version);
+}
+
 /**
  * Strip a leading `v` from a release tag to get a clean version for asset
  * templates that don't include the `v` prefix.

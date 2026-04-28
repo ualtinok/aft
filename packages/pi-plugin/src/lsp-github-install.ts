@@ -59,7 +59,12 @@ import {
   writeInstalledMetaIn,
   writeVersionCheck,
 } from "./lsp-cache.js";
-import { assertSafeVersion, probeGithubReleases, stripTagV } from "./lsp-github-probe.js";
+import {
+  assertSafeVersion,
+  isSafeVersion,
+  probeGithubReleases,
+  stripTagV,
+} from "./lsp-github-probe.js";
 import {
   type Arch,
   detectHostPlatform,
@@ -310,10 +315,13 @@ async function resolveTargetTag(
   // Fix: when cache is fresh, fetch assets for the cached tag directly.
   // If that lookup fails, fall through to live probe. If live probe also
   // fails, return tag:null so the caller skips cleanly.
+  // Audit-3 v0.17 #2: validate cached.latest_eligible before consuming.
   const cached = readVersionCheck(spec.githubRepo);
   const weeklyMs = config.graceDays * 24 * 60 * 60 * 1000;
-  if (!shouldRecheckVersion(cached, weeklyMs) && cached?.latest_eligible) {
-    const release = await fetchReleaseByTag(spec.githubRepo, cached.latest_eligible, fetchImpl);
+  const cachedTag = cached?.latest_eligible ?? null;
+  const cachedSafe = isSafeVersion(cachedTag);
+  if (cached && !shouldRecheckVersion(cached, weeklyMs) && cachedSafe) {
+    const release = await fetchReleaseByTag(spec.githubRepo, cachedTag as string, fetchImpl);
     if (release) {
       return {
         tag: release.tag,
@@ -377,6 +385,38 @@ function controlledTimeoutSignal(
  * `assetSize` is the size hint from GitHub's release JSON. When provided
  * we sanity-check it against the cap before even starting the download.
  */
+/**
+ * Audit-3 v0.17 #5: hostname allowlist. browser_download_url from the
+ * GitHub API is attacker-controllable; reject anything that is not on
+ * a github.com / githubusercontent.com host before any network I/O.
+ */
+const ALLOWED_DOWNLOAD_HOSTS = new Set([
+  "github.com",
+  "api.github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "raw.githubusercontent.com",
+  "codeload.github.com",
+]);
+
+function assertAllowedDownloadUrl(rawUrl: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`download url is not a valid URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`download url must be https (got ${parsed.protocol}): ${rawUrl}`);
+  }
+  if (!ALLOWED_DOWNLOAD_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error(
+      `download url host ${parsed.hostname} is not in the GitHub allowlist: ${rawUrl}`,
+    );
+  }
+  return parsed;
+}
+
 async function downloadFile(
   url: string,
   destPath: string,
@@ -384,6 +424,9 @@ async function downloadFile(
   assetSize?: number,
   signal?: AbortSignal,
 ): Promise<void> {
+  // Audit-3 v0.17 #5: enforce hostname allowlist before any network I/O.
+  assertAllowedDownloadUrl(url);
+
   if (assetSize !== undefined && assetSize > MAX_DOWNLOAD_BYTES) {
     throw new Error(
       `asset size ${assetSize} exceeds max ${MAX_DOWNLOAD_BYTES} (set lsp.versions to pin a smaller release if this is wrong)`,
@@ -1014,8 +1057,10 @@ export function discoverRelevantGithubServers(projectRoot: string): Set<string> 
 
 /* ─────────────────────────── re-exports ─────────────────────────── */
 
+/** Audit-3 v0.17 #5: test-only re-export. Production code uses it inline. */
 export {
   type Arch,
+  assertAllowedDownloadUrl as _assertAllowedDownloadUrlForTesting,
   detectHostPlatform,
   findGithubServerById,
   GITHUB_LSP_TABLE,

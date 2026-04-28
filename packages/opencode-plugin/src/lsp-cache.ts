@@ -17,7 +17,6 @@
 
 import {
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -293,12 +292,56 @@ function isProcessAlive(pid: number): boolean {
 
 export function releaseInstallLock(lockKey: string): void {
   const lock = lockPath(lockKey);
+  // Audit-3 v0.17 #3: TOCTOU defense.
+  //
+  // The previous implementation did `existsSync(lock) && unlinkSync(lock)` with
+  // no ownership check. If process A's lock was reclaimed by process B (because
+  // A exceeded STALE_LOCK_MS), A's finally block would `unlinkSync` B's
+  // newly-created lock, breaking mutual exclusion: B believes it owns the lock
+  // while the file is gone, allowing process C to claim it. Both B and C then
+  // run concurrent installs into the same cache directory.
+  //
+  // Fix: read the PID from the lock file and only unlink if it matches our own.
+  // Any other state (lock missing, lock owned by a different PID, lock corrupt)
+  // is a no-op — exactly the safe behavior. We catch ENOENT explicitly so the
+  // common "lock vanished between read and unlink" race is silent.
   try {
-    if (existsSync(lock)) {
+    let owningPid: number | null = null;
+    try {
+      const raw = readFileSync(lock, "utf8");
+      const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? "";
+      const parsed = Number.parseInt(firstLine, 10);
+      if (Number.isFinite(parsed) && parsed > 0) owningPid = parsed;
+    } catch (readErr) {
+      const code = (readErr as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return; // already gone, nothing to do
+      // Corrupt or unreadable lock — leave it alone; stale-lock recovery in
+      // acquireInstallLock will eventually reclaim it.
+      warn(`[lsp] could not read install lock for ${lockKey} during release: ${readErr}`);
+      return;
+    }
+
+    if (owningPid !== process.pid) {
+      // Either we already released it and another process re-claimed (unusual
+      // but possible if our task somehow ran twice), or our lock was stolen
+      // because we exceeded STALE_LOCK_MS. In both cases, leave the file
+      // alone — the current owner's release will handle it.
+      log(
+        `[lsp] not releasing install lock for ${lockKey}: owned by pid ${owningPid ?? "unknown"} (we are ${process.pid})`,
+      );
+      return;
+    }
+
+    try {
       unlinkSync(lock);
+    } catch (unlinkErr) {
+      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        warn(`[lsp] failed to release install lock for ${lockKey}: ${unlinkErr}`);
+      }
     }
   } catch (err) {
-    warn(`[lsp] failed to release install lock for ${lockKey}: ${err}`);
+    warn(`[lsp] unexpected error releasing install lock for ${lockKey}: ${err}`);
   }
 }
 

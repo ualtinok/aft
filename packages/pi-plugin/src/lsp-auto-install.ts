@@ -43,7 +43,7 @@ import {
   writeInstalledMeta,
   writeVersionCheck,
 } from "./lsp-cache.js";
-import { assertSafeVersion } from "./lsp-github-probe.js";
+import { assertSafeVersion, isSafeVersion } from "./lsp-github-probe.js";
 import { NPM_LSP_TABLE, type NpmServerSpec } from "./lsp-npm-table.js";
 import { hasRootMarker, relevantExtensionsInProject } from "./lsp-project-relevance.js";
 import { probeRegistry, type VersionPickResult } from "./lsp-registry-probe.js";
@@ -173,18 +173,23 @@ async function resolveTargetVersion(
   }
 
   // 2. Cached check still fresh.
+  //
+  // Audit-3 v0.17 #2: validate cached.latest_eligible before consuming.
+  // Disk corruption or future bug could put unsafe value here. Treat
+  // unsafe cache as miss so the next branch forces a fresh probe.
   const cached = readVersionCheck(spec.npm);
   const weeklyMs = config.graceDays * 24 * 60 * 60 * 1000;
-  if (!shouldRecheckVersion(cached, weeklyMs) && cached?.latest_eligible) {
-    return { version: cached.latest_eligible, pinned: false, probe: null };
+  const cachedSafe = isSafeVersion(cached?.latest_eligible ?? null);
+  if (cached && !shouldRecheckVersion(cached, weeklyMs) && cachedSafe) {
+    return { version: cached.latest_eligible as string, pinned: false, probe: null };
   }
 
   // 3. Probe the registry.
   const probe = await probeRegistry(spec.npm, config.graceDays, fetchImpl);
   if (!probe) {
-    // Probe failed entirely — fall back to cached if any.
+    // Probe failed entirely — fall back to cached if any (and only if safe).
     return {
-      version: cached?.latest_eligible ?? null,
+      version: cachedSafe ? (cached?.latest_eligible ?? null) : null,
       pinned: false,
       probe: null,
     };

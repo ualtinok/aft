@@ -59,7 +59,12 @@ import {
   writeInstalledMetaIn,
   writeVersionCheck,
 } from "./lsp-cache.js";
-import { assertSafeVersion, probeGithubReleases, stripTagV } from "./lsp-github-probe.js";
+import {
+  assertSafeVersion,
+  isSafeVersion,
+  probeGithubReleases,
+  stripTagV,
+} from "./lsp-github-probe.js";
 import {
   type Arch,
   detectHostPlatform,
@@ -332,12 +337,18 @@ async function resolveTargetTag(
   // We have to fetch the assets at install time anyway via the live probe
   // below — so the only thing the verification probe was buying was a
   // staleness check, which the grace timer already provides.
+  // Audit-3 v0.17 #2: validate cached.latest_eligible before consuming.
+  // Disk corruption (or a future bug) could insert an unsafe value here
+  // that flows into archive paths and external commands. Treat unsafe
+  // cache as miss so the live probe below is forced.
   const cached = readVersionCheck(spec.githubRepo);
   const weeklyMs = config.graceDays * 24 * 60 * 60 * 1000;
-  if (!shouldRecheckVersion(cached, weeklyMs) && cached?.latest_eligible) {
+  const cachedTag = cached?.latest_eligible ?? null;
+  const cachedSafe = isSafeVersion(cachedTag);
+  if (cached && !shouldRecheckVersion(cached, weeklyMs) && cachedSafe) {
     // We still need assets for the install, so fetch the specific tag.
     // If THAT lookup fails, return tag:null honestly so the caller skips.
-    const release = await fetchReleaseByTag(spec.githubRepo, cached.latest_eligible, fetchImpl);
+    const release = await fetchReleaseByTag(spec.githubRepo, cachedTag as string, fetchImpl);
     if (release) {
       return {
         tag: release.tag,
@@ -405,6 +416,54 @@ function controlledTimeoutSignal(
  * `assetSize` is the size hint from GitHub's release JSON. When provided
  * we sanity-check it against the cap before even starting the download.
  */
+/**
+ * Hosts we will download GitHub release artifacts from. The GitHub API
+ * returns `browser_download_url` values that almost always live on
+ * `github.com` (the canonical URL), but the actual blob is served from
+ * `objects.githubusercontent.com` after redirect. We allow both.
+ *
+ * Audit-3 v0.17 #5: without this allowlist, a compromised or malicious
+ * GitHub API response could swap `browser_download_url` to an attacker-
+ * controlled host (e.g. `evil.example/payload.zip`) and we would happily
+ * follow the redirect chain. The download size cap and SHA-256 TOFU help
+ * but cannot stop the very first install on a tag we have never seen.
+ *
+ * `redirect: "follow"` means we cannot just gate the initial URL — fetch
+ * follows redirects internally and we never see the intermediate hops.
+ * We accept that limitation: the initial host is the one the GitHub API
+ * told us, and any redirect to a non-allowed host is a cross-host trust
+ * boundary the user did not sign up for. (We considered `redirect:
+ * "manual"` and walking the chain, but that breaks GitHub's actual
+ * release-asset redirect to `objects.githubusercontent.com`, which is
+ * served from a different host than the URL we receive.)
+ */
+const ALLOWED_DOWNLOAD_HOSTS = new Set([
+  "github.com",
+  "api.github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "raw.githubusercontent.com",
+  "codeload.github.com",
+]);
+
+function assertAllowedDownloadUrl(rawUrl: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`download url is not a valid URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`download url must be https (got ${parsed.protocol}): ${rawUrl}`);
+  }
+  if (!ALLOWED_DOWNLOAD_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error(
+      `download url host ${parsed.hostname} is not in the GitHub allowlist: ${rawUrl}`,
+    );
+  }
+  return parsed;
+}
+
 async function downloadFile(
   url: string,
   destPath: string,
@@ -412,6 +471,12 @@ async function downloadFile(
   assetSize?: number,
   signal?: AbortSignal,
 ): Promise<void> {
+  // Audit-3 v0.17 #5: enforce hostname allowlist before any network I/O.
+  // browser_download_url comes from the GitHub API and is therefore
+  // attacker-controllable in a supply-chain attack. We reject anything
+  // that is not on a github.com / githubusercontent.com host.
+  assertAllowedDownloadUrl(url);
+
   if (assetSize !== undefined && assetSize > MAX_DOWNLOAD_BYTES) {
     throw new Error(
       `asset size ${assetSize} exceeds max ${MAX_DOWNLOAD_BYTES} (set lsp.versions to pin a smaller release if this is wrong)`,
@@ -1062,8 +1127,17 @@ export function discoverRelevantGithubServers(projectRoot: string): Set<string> 
 
 /* ─────────────────────────── re-exports ─────────────────────────── */
 
+/**
+ * Test-only re-export of the GitHub download URL allowlist guard.
+ *
+ * Audit-3 v0.17 #5: prefix marks this as test-internal. Production code
+ * inside this module already calls `assertAllowedDownloadUrl` at the top
+ * of `downloadFile`. We expose it here so the test suite can verify the
+ * allowlist independently of full network mocking.
+ */
 export {
   type Arch,
+  assertAllowedDownloadUrl as _assertAllowedDownloadUrlForTesting,
   detectHostPlatform,
   findGithubServerById,
   GITHUB_LSP_TABLE,

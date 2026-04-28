@@ -17,7 +17,6 @@
 
 import {
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -265,12 +264,40 @@ function isProcessAlive(pid: number): boolean {
 
 export function releaseInstallLock(lockKey: string): void {
   const lock = lockPath(lockKey);
+  // Audit-3 v0.17 #3: TOCTOU defense — only unlink if we still own the lock.
+  // The previous `existsSync && unlinkSync` would delete another process's
+  // lock if A's lock had been reclaimed by B due to STALE_LOCK_MS.
   try {
-    if (existsSync(lock)) {
+    let owningPid: number | null = null;
+    try {
+      const raw = readFileSync(lock, "utf8");
+      const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? "";
+      const parsed = Number.parseInt(firstLine, 10);
+      if (Number.isFinite(parsed) && parsed > 0) owningPid = parsed;
+    } catch (readErr) {
+      const code = (readErr as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return;
+      warn(`[lsp] could not read install lock for ${lockKey} during release: ${readErr}`);
+      return;
+    }
+
+    if (owningPid !== process.pid) {
+      log(
+        `[lsp] not releasing install lock for ${lockKey}: owned by pid ${owningPid ?? "unknown"} (we are ${process.pid})`,
+      );
+      return;
+    }
+
+    try {
       unlinkSync(lock);
+    } catch (unlinkErr) {
+      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        warn(`[lsp] failed to release install lock for ${lockKey}: ${unlinkErr}`);
+      }
     }
   } catch (err) {
-    warn(`[lsp] failed to release install lock for ${lockKey}: ${err}`);
+    warn(`[lsp] unexpected error releasing install lock for ${lockKey}: ${err}`);
   }
 }
 
