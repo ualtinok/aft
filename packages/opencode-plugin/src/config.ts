@@ -158,6 +158,8 @@ export const AftConfigSchema = z.object({
    * glob, read, edit, or any other tool. Default: 20000.
    */
   max_callgraph_files: z.number().int().positive().optional(),
+  /** Auto-refresh OpenCode's cached @cortexkit/aft-opencode package when a newer channel version exists. */
+  auto_update: z.boolean().optional(),
 });
 
 export type AftConfig = z.infer<typeof AftConfigSchema>;
@@ -443,6 +445,7 @@ const PROJECT_SAFE_TOP_LEVEL_FIELDS = new Set<keyof AftConfig>([
   // "url_fetch_allow_private" — USER ONLY (SSRF surface).
   // "storage_dir" — USER ONLY (controls where AFT writes).
   // "max_callgraph_files" — USER ONLY (resource budget).
+  // "auto_update" — USER ONLY (silently suppressing security updates is a real risk).
 ]);
 
 function pickProjectSafeFields(override: AftConfig): Partial<AftConfig> {
@@ -461,6 +464,7 @@ function getStrippedTopLevelKeys(override: AftConfig): string[] {
   if (override.restrict_to_project_root !== undefined) stripped.push("restrict_to_project_root");
   if (override.url_fetch_allow_private !== undefined) stripped.push("url_fetch_allow_private");
   if (override.max_callgraph_files !== undefined) stripped.push("max_callgraph_files");
+  if (override.auto_update !== undefined) stripped.push("auto_update");
   return stripped;
 }
 

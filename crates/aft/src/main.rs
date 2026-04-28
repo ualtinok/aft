@@ -132,6 +132,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "ast_search" => aft::commands::ast_search::handle_ast_search(&req, ctx),
         "ast_replace" => aft::commands::ast_replace::handle_ast_replace(&req, ctx),
         "lsp_diagnostics" => aft::commands::lsp_diagnostics::handle_lsp_diagnostics(&req, ctx),
+        "lsp_inspect" => aft::commands::lsp_inspect::handle_lsp_inspect(&req, ctx),
         "lsp_hover" => aft::commands::lsp_hover::handle_lsp_hover(&req, ctx),
         "lsp_goto_definition" => {
             aft::commands::lsp_goto_definition::handle_lsp_goto_definition(&req, ctx)

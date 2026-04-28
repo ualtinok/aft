@@ -18,6 +18,7 @@ function printHelp(): void {
   console.log("  Commands:");
   console.log("    setup            Interactive setup wizard");
   console.log("    doctor           Check and fix configuration issues");
+  console.log("    doctor lsp <file> Inspect LSP setup for one file");
   console.log("    doctor --clear   Select caches to clear with an interactive prompt");
   console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
   console.log("");
@@ -29,6 +30,7 @@ function printHelp(): void {
   console.log("  Usage:");
   console.log("    bunx --bun @cortexkit/aft setup");
   console.log("    bunx --bun @cortexkit/aft doctor");
+  console.log("    bunx --bun @cortexkit/aft doctor lsp ./src/main.py");
   console.log("    bunx --bun @cortexkit/aft doctor --clear");
   console.log("    bunx --bun @cortexkit/aft doctor --issue");
   console.log("");
@@ -40,6 +42,10 @@ async function main(): Promise<number> {
     return runSetup(args);
   }
   if (command === "doctor") {
+    if (args[0] === "lsp") {
+      const { runLspDoctor } = await import("./commands/lsp.js");
+      return runLspDoctor({ argv: args.slice(1) });
+    }
     const { runDoctor } = await import("./commands/doctor.js");
     const force = args.includes("--force");
     const clear = args.includes("--clear");

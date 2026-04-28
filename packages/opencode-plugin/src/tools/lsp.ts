@@ -32,9 +32,12 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
       "\n" +
       "**Reading the response honestly:**\n" +
       "- `total: 0, complete: true, lsp_servers_used: [{status: 'pull_ok'}]` → file is genuinely clean.\n" +
-      "- `total: 0, lsp_servers_used: []` → no server registered for this extension; nothing was checked.\n" +
-      "- `lsp_servers_used: [{status: 'binary_not_installed: bash-language-server'}]` → install the server to get diagnostics.\n" +
-      "- `complete: false` (directory mode) → some files in the directory weren't checked; see `unchecked_files`.",
+      "- `total: 0, lsp_servers_used: []` → **nothing was checked** (no server registered for this extension). Tell the user, don't claim 'no errors'.\n" +
+      "- `lsp_servers_used: [{status: 'binary_not_installed: <name>'}]` → server matched the extension but its binary isn't on PATH. Tell the user to install it.\n" +
+      "- `lsp_servers_used: [{status: 'no_root_marker (...)'}]` → server is registered but couldn't find a workspace root marker walking up from this file. The user's project layout doesn't match what the server expects.\n" +
+      "- `complete: false` (directory mode) → some files in the directory weren't checked; see `unchecked_files`.\n" +
+      "\n" +
+      "**When this tool gives an unhelpful answer**, run `bunx --bun @cortexkit/aft doctor lsp <filePath>` from a terminal to get a full per-server breakdown (registered servers, binary resolution, root-marker resolution, spawn outcome).",
     args: {
       filePath: z
         .string()

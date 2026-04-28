@@ -21,6 +21,7 @@ mod lsp_commands_test;
 mod lsp_diagnostics_test;
 mod lsp_document_test;
 mod lsp_hints_test;
+mod lsp_inspect_test;
 mod lsp_manager_test;
 mod lsp_rename_test;
 mod markdown_test;

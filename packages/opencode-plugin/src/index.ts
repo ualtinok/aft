@@ -6,6 +6,7 @@ import type { Plugin } from "@opencode-ai/plugin";
 
 import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
 import { ensureBinary } from "./downloader.js";
+import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker/index.js";
 import { error, log, warn } from "./logger.js";
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
@@ -159,6 +160,7 @@ const plugin: Plugin = async (input) => {
 
   // Load config: ~/.config/opencode/aft.jsonc → <project>/.opencode/aft.jsonc
   const aftConfig = loadAftConfig(input.directory);
+  const autoUpdateAbort = new AbortController();
 
   // Build config overrides for the Rust binary (strip undefined values)
   const configOverrides: Record<string, unknown> = {};
@@ -577,6 +579,11 @@ const plugin: Plugin = async (input) => {
 
   return {
     tool: allTools,
+    event: createAutoUpdateCheckerHook(input, {
+      enabled: true,
+      autoUpdate: aftConfig.auto_update ?? true,
+      signal: autoUpdateAbort.signal,
+    }),
     "command.execute.before": async (
       commandInput: { command: string; sessionID: string },
       _output: unknown,
@@ -639,6 +646,7 @@ const plugin: Plugin = async (input) => {
       };
     },
     dispose: async () => {
+      autoUpdateAbort.abort();
       unregisterShutdown();
       await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
       rpcServer.stop();

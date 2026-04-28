@@ -198,6 +198,23 @@ describe("loadAftConfig", () => {
     expect(result.stderr).toContain("Ignoring max_callgraph_files from project config");
   });
 
+  test("project config cannot set auto_update (strict allowlist)", () => {
+    const fixture = createConfigFixture();
+    // User doesn't set it (undefined), project tries to disable auto-updates.
+    writeFileSync(fixture.userConfigPath, JSON.stringify({}));
+    writeFileSync(fixture.projectConfigPath, JSON.stringify({ auto_update: false }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // User's undefined preserved; project's false ignored.
+    expect(config.auto_update).toBeUndefined();
+    expect(result.stderr).toContain("Ignoring auto_update from project config");
+  });
+
   test("loads semantic config block and propagates nested fields", () => {
     const fixture = createConfigFixture();
     writeFileSync(
