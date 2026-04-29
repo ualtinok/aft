@@ -62,6 +62,25 @@ pub fn handle_ast_replace(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
+    // ast-grep treats `$$$` in the REWRITE template as a named-only meta-variable
+    // (`$$$BODY`, `$$$ARGS`, etc). Anonymous `$$$` returns `None` from
+    // `split_first_meta_var` and is emitted LITERALLY into the output —
+    // silently destroying captured content. Reject that shape up front
+    // with actionable guidance instead of producing literal `$$$` strings
+    // in the agent's source files.
+    if has_anonymous_variadic(&rewrite) {
+        return Response::error(
+            &req.id,
+            "invalid_rewrite",
+            "ast_replace: anonymous `$$$` in rewrite is not supported by ast-grep \
+             (it would be emitted as the literal string `$$$` instead of expanding \
+             the captured nodes). Use a NAMED variadic in BOTH pattern and rewrite, \
+             e.g. pattern: `test($NAME, () => { $$$BODY })`, rewrite: \
+             `test($NAME, async () => { $$$BODY })`. Single-node `$VAR` and named \
+             variadic `$$$VAR` work as expected.",
+        );
+    }
+
     let lang_str = match req.params.get("lang").and_then(|v| v.as_str()) {
         Some(l) => l,
         None => {
@@ -264,4 +283,116 @@ fn validate_matched_file_path(
     file_path: &Path,
 ) -> Result<PathBuf, Response> {
     ctx.validate_path(req_id, file_path)
+}
+
+/// Detect anonymous `$$$` (three meta-chars NOT followed by a name char) in a
+/// rewrite template.
+///
+/// ast-grep's `split_first_meta_var` parses a meta-var as `$$$NAME` (with NAME
+/// matching `is_valid_meta_var_char`). When `$$$` is followed by something that
+/// isn't a valid name char (whitespace, punctuation, EOF), the parser returns
+/// `None` and ast-grep emits the literal `$$$` string in the output.
+///
+/// This helper mirrors that scan: walk the template, find runs of three or
+/// more `$`, peek the char after the third `$`, and call it anonymous when
+/// that char isn't a valid meta-var name character.
+///
+/// Examples:
+///   has_anonymous_variadic("logger.info($MSG)")               → false (single)
+///   has_anonymous_variadic("test($N, async () => { $$$ })")   → true  (anonymous)
+///   has_anonymous_variadic("test($N, async () => { $$$BODY })") → false (named)
+///   has_anonymous_variadic("$$$$")                            → true  (4 $ then nothing)
+///   has_anonymous_variadic("price = $$$.99")                  → true  (`.` not name char)
+fn has_anonymous_variadic(rewrite: &str) -> bool {
+    // Inline ast-grep's `is_valid_meta_var_char` rule (private to that crate
+    // as of v0.41.1): a meta-var name char is uppercase A-Z, underscore, or
+    // an ASCII digit. Lowercase letters and non-ASCII chars are NOT valid
+    // name chars — `$$$body`, `$$$π`, etc. are also anonymous as far as
+    // ast-grep is concerned.
+    fn is_valid_meta_var_char(c: char) -> bool {
+        matches!(c, 'A'..='Z' | '_' | '0'..='9')
+    }
+
+    let bytes = rewrite.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'$' && bytes[i + 1] == b'$' && bytes[i + 2] == b'$' {
+            // Walk past the run of `$` characters so we land on the first
+            // non-`$` byte. Patterns like `$$$$` are still anonymous because
+            // there is no NAME after the meta-char run.
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j] == b'$' {
+                j += 1;
+            }
+            // Peek the first char after the meta-char run.
+            let after = rewrite[j..].chars().next();
+            let is_named = match after {
+                Some(c) => is_valid_meta_var_char(c),
+                None => false, // run of `$` at EOF — definitely anonymous
+            };
+            if !is_named {
+                return true;
+            }
+            // Skip past the matched named variadic to keep scanning.
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_anonymous_variadic;
+
+    #[test]
+    fn detects_anonymous_variadic_in_block() {
+        assert!(has_anonymous_variadic("test($N, async () => { $$$ })"));
+    }
+
+    #[test]
+    fn detects_anonymous_variadic_at_end() {
+        assert!(has_anonymous_variadic("trailing $$$"));
+        assert!(has_anonymous_variadic("trailing $$$ "));
+    }
+
+    #[test]
+    fn detects_anonymous_when_followed_by_punctuation() {
+        // ast-grep stops the name at any non-identifier char, so the `.`
+        // makes this anonymous and ast-grep emits literal `$$$` here.
+        assert!(has_anonymous_variadic("price = $$$.99"));
+    }
+
+    #[test]
+    fn detects_anonymous_when_run_extends_past_three_dollars() {
+        // Four `$` then no name → still anonymous.
+        assert!(has_anonymous_variadic("emit $$$$ here"));
+    }
+
+    #[test]
+    fn allows_named_variadic() {
+        assert!(!has_anonymous_variadic("test($N, async () => { $$$BODY })"));
+        assert!(!has_anonymous_variadic("$$$_args"));
+        assert!(!has_anonymous_variadic("import { $$$IMPORTS } from 'x'"));
+    }
+
+    #[test]
+    fn allows_single_dollar_meta_var() {
+        // `$VAR` is not a variadic at all and must not be flagged.
+        assert!(!has_anonymous_variadic("logger.info($MSG)"));
+        assert!(!has_anonymous_variadic("$NAME = $VALUE"));
+    }
+
+    #[test]
+    fn allows_double_dollar_literal() {
+        // `$$` is not a meta-var pattern that triggers this scan.
+        assert!(!has_anonymous_variadic("price = $$.99"));
+    }
+
+    #[test]
+    fn allows_empty_and_no_dollars() {
+        assert!(!has_anonymous_variadic(""));
+        assert!(!has_anonymous_variadic("plain text"));
+    }
 }

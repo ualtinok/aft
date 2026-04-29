@@ -968,3 +968,120 @@ fn ast_replace_member_access_pattern_completes_in_reasonable_time() {
     let status = aft.shutdown();
     assert!(status.success());
 }
+
+
+// ---------------------------------------------------------------------------
+// Anonymous-`$$$`-in-rewrite regression
+// ---------------------------------------------------------------------------
+//
+// ast-grep's rewrite template only recognizes NAMED variadics like `$$$BODY`.
+// Anonymous `$$$` is emitted as the literal string `$$$` in the output,
+// silently destroying captured content. Reported in user dogfooding session
+// when sync→async test conversion produced
+//   test('alpha', async () => { $$$ })
+// instead of preserving the test body.
+//
+// Fix: handle_ast_replace now rejects rewrites containing anonymous `$$$`
+// up front with `code: "invalid_rewrite"` and actionable guidance pointing
+// the agent at the named-variadic shape.
+
+#[test]
+fn ast_replace_rejects_anonymous_variadic_in_rewrite() {
+    let original =
+        "test('alpha', () => { const v = foo(); expect(v).toBe(1); });\n".to_string();
+    let project = setup_project(&[("sample.ts", &original)]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "anon-variadic",
+            "command": "ast_replace",
+            "pattern": "test($NAME, () => { $$$ })",
+            "rewrite": "test($NAME, async () => { $$$ })",
+            "lang": "typescript",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        resp["success"], false,
+        "anonymous $$$ in rewrite must be rejected: {resp:?}"
+    );
+    assert_eq!(resp["code"], "invalid_rewrite");
+
+    let message = resp["message"]
+        .as_str()
+        .expect("error message string");
+    // Guidance must point the agent at the named-variadic shape so they
+    // can fix the pattern without guessing.
+    assert!(
+        message.contains("$$$BODY"),
+        "error message should suggest a named variadic like $$$BODY: {message}"
+    );
+
+    // Critical safety check: the file must NOT have been written, and
+    // must not contain a literal `$$$` from a half-applied rewrite.
+    let on_disk = read_file(project.path(), "sample.ts");
+    assert_eq!(on_disk, original, "rejected rewrite must not modify files on disk");
+    assert!(
+        !on_disk.contains("$$$"),
+        "file must not carry a literal `$$$` from a rejected rewrite"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn ast_replace_accepts_named_variadic_in_rewrite() {
+    // Counterpart to the rejection test: the documented workaround MUST
+    // continue to work. If this regresses, the rejection guard is too
+    // aggressive and would break a working pattern.
+    let project = setup_project(&[(
+        "sample.ts",
+        "test('alpha', () => { foo(); bar(); });\n",
+    )]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "named-variadic",
+            "command": "ast_replace",
+            "pattern": "test($NAME, () => { $$$BODY })",
+            "rewrite": "test($NAME, async () => { $$$BODY })",
+            "lang": "typescript",
+            "dry_run": false,
+        }),
+    );
+
+    assert_eq!(
+        resp["success"], true,
+        "named variadic must work: {resp:?}"
+    );
+    assert_eq!(resp["total_replacements"], 1);
+
+    let on_disk = read_file(project.path(), "sample.ts");
+    assert!(
+        on_disk.contains("async () =>"),
+        "rewrite should add `async`: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("foo()"),
+        "captured body must be preserved (no literal $$$): {on_disk}"
+    );
+    assert!(
+        on_disk.contains("bar()"),
+        "captured body must be preserved (no literal $$$): {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("$$$"),
+        "no literal $$$ may leak into output: {on_disk}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}

@@ -159,7 +159,7 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       "IMPORTANT: Patterns must be complete AST nodes (valid code fragments).\n\n" +
       "Example: pattern='console.log($MSG)' rewrite='logger.info($MSG)' lang='typescript' — replaces all console.log calls with logger.info across TypeScript files.\n\n" +
       "**Warning: This tool modifies files directly.** Use dryRun=true to preview. Consider creating an aft_safety checkpoint before bulk replacements.\n\n" +
-      "Returns: Text summary — 'Replaced N match(es) across M file(s)' (or '[DRY RUN] Would replace...') followed by file:line blocks with before/after text.",
+      "Returns: Text summary — 'Replaced N match(es) across M file(s)' (or '[DRY RUN] Would replace...') followed by per-file output. In dry-run mode, each file is shown with its unified diff so you can verify the rewrite before applying (e.g. catch literal $$$ from anonymous-variadic typos). Diff preview is capped at 8KB total; remaining files are summarized.",
     args: {
       pattern: z
         .string()
@@ -214,7 +214,20 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
 
       const data = response as {
         ok?: boolean;
+        // Apply-mode shape (Rust commands/ast_replace.rs returns these in
+        // `matches[]` only on the `ast_search`-shaped path; `ast_replace`
+        // itself emits per-file results in `files[]`).
         matches?: Array<{ file?: string; line?: number; text?: string; replacement?: string }>;
+        // Per-file results carry a unified diff string in dry-run mode and
+        // a write outcome in apply mode. See crates/aft/src/commands/ast_replace.rs.
+        files?: Array<{
+          file?: string;
+          replacements?: number;
+          diff?: string; // present in dry-run only
+          backup_id?: string; // present in apply mode when snapshot succeeded
+          ok?: boolean; // false on per-file write failure
+          error?: string;
+        }>;
         total_matches?: number;
         total_replacements?: number;
         total_files?: number;
@@ -243,7 +256,39 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
         output = isDryRun
           ? `[DRY RUN] Would replace ${matchCount} match(es) in ${filesWithMatches} file(s) (${filesSearched} searched)\n\n`
           : `Replaced ${matchCount} match(es) in ${filesWithMatches} file(s) (${filesSearched} searched)\n\n`;
-        if (data.matches) {
+
+        // Dry-run: render per-file unified diff so the agent can SEE the
+        // proposed change (catches anonymous-`$$$` and other rewrite bugs
+        // BEFORE applying). The Rust handler caps each diff at a sane size,
+        // and we additionally cap total diff bytes here so a 1000-file
+        // rewrite doesn't dump a megabyte of diff into the agent's context.
+        if (isDryRun && data.files && data.files.length > 0) {
+          const MAX_DIFF_BYTES = 8 * 1024; // 8 KB total preview budget
+          let used = 0;
+          let filesShown = 0;
+          for (const f of data.files) {
+            const relFile = f.file ?? "unknown";
+            const reps = f.replacements ?? 0;
+            const diff = f.diff ?? "";
+            if (used + diff.length > MAX_DIFF_BYTES) {
+              const remaining = data.files.length - filesShown;
+              if (remaining > 0) {
+                output += `\n... (${remaining} more file(s) omitted from preview to stay under ${MAX_DIFF_BYTES / 1024}KB; total ${matchCount} replacements across ${filesWithMatches} files)\n`;
+              }
+              break;
+            }
+            output += `${relFile} (${reps} replacement${reps === 1 ? "" : "s"}):\n`;
+            output += diff;
+            if (!diff.endsWith("\n")) output += "\n";
+            output += "\n";
+            used += diff.length;
+            filesShown += 1;
+          }
+        } else if (data.matches) {
+          // Apply-mode legacy path: render per-match before/after (this
+          // path is reached when the response carries `matches[]` rather
+          // than `files[]` — currently the search shape, kept for
+          // forward-compat with handler refactors).
           for (const m of data.matches) {
             const relFile = m.file ?? "unknown";
             const line = m.line ?? 0;
@@ -253,6 +298,14 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
               output += `  + ${m.replacement.trim()}\n`;
             }
             output += "\n";
+          }
+        } else if (data.files && data.files.length > 0) {
+          // Apply-mode + files[] only: list files with replacement counts
+          // (no diff in apply mode — the file is already on disk).
+          for (const f of data.files) {
+            const relFile = f.file ?? "unknown";
+            const reps = f.replacements ?? 0;
+            output += `  ${relFile}: ${reps} replacement${reps === 1 ? "" : "s"}\n`;
           }
         }
       }
