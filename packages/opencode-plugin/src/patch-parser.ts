@@ -213,6 +213,21 @@ function normalizeUnicode(str: string): string {
     .replace(/\u00A0/g, " ");
 }
 
+/**
+ * Normalize leading-whitespace indentation: collapse any mix of tabs and
+ * spaces at the start of a line to a single canonical space sequence,
+ * with each tab counting as one space (the size doesn't matter — both
+ * sides are normalized identically). Catches the common drift where the
+ * model emits 2-space indents for a file that uses tabs (or 4-space).
+ *
+ * Trailing/middle whitespace is left alone — only leading runs are
+ * touched, and only on the lines that have leading whitespace (so empty
+ * lines compare unchanged).
+ */
+function normalizeIndent(str: string): string {
+  return str.replace(/^[\t ]+/, (m) => " ".repeat(m.length));
+}
+
 type Comparator = (a: string, b: string) => boolean;
 
 function tryMatch(
@@ -250,25 +265,134 @@ function tryMatch(
   return -1;
 }
 
-function seekSequence(lines: string[], pattern: string[], startIndex: number, eof = false): number {
-  if (pattern.length === 0) return -1;
+/**
+ * The fuzzy-match ladder for `apply_patch` chunk lines.
+ *
+ * Each step is more permissive than the last. We return at the first
+ * successful step so the most-specific match wins. The order matters:
+ * `exact` first means a clean patch never gets stretched to match
+ * something that just looks similar.
+ *
+ * Returned `tier` is exposed for diagnostics (BUG-6b): when none of these
+ * match, we tell the agent which strictness levels we tried so they
+ * understand the actual drift class.
+ *
+ * Tiers (least → most permissive):
+ *   "exact"   — byte-for-byte
+ *   "rstrip"  — trailing whitespace drift (CRLF, trailing tabs/spaces)
+ *   "trim"    — leading + trailing whitespace drift
+ *   "indent"  — tab vs space leading whitespace, sizes ignored
+ *               (BUG-6c: catches "model emitted 2-space indents for a
+ *                tab-indented file" or vice versa)
+ *   "unicode" — smart quotes, em dashes, ellipsis, NBSP normalization
+ */
+type MatchTier = "exact" | "rstrip" | "trim" | "indent" | "unicode";
+
+function seekSequenceTiered(
+  lines: string[],
+  pattern: string[],
+  startIndex: number,
+  eof = false,
+): { found: number; tier: MatchTier } | null {
+  if (pattern.length === 0) return null;
 
   const exact = tryMatch(lines, pattern, startIndex, (a, b) => a === b, eof);
-  if (exact !== -1) return exact;
+  if (exact !== -1) return { found: exact, tier: "exact" };
 
   const rstrip = tryMatch(lines, pattern, startIndex, (a, b) => a.trimEnd() === b.trimEnd(), eof);
-  if (rstrip !== -1) return rstrip;
+  if (rstrip !== -1) return { found: rstrip, tier: "rstrip" };
 
   const trim = tryMatch(lines, pattern, startIndex, (a, b) => a.trim() === b.trim(), eof);
-  if (trim !== -1) return trim;
+  if (trim !== -1) return { found: trim, tier: "trim" };
 
-  return tryMatch(
+  // Indent-normalized: collapse leading [\t ]+ to a uniform space run on
+  // BOTH sides, then re-trim trailing space (caught by rstrip already, but
+  // belt-and-suspenders for mixed tab+trail-space cases). Trailing
+  // whitespace and middle whitespace are otherwise preserved so that
+  // intra-line drift (e.g. extra spaces around an operator) is NOT
+  // silently merged — that's a real semantic difference.
+  const indent = tryMatch(
+    lines,
+    pattern,
+    startIndex,
+    (a, b) => normalizeIndent(a).trimEnd() === normalizeIndent(b).trimEnd(),
+    eof,
+  );
+  if (indent !== -1) return { found: indent, tier: "indent" };
+
+  const unicode = tryMatch(
     lines,
     pattern,
     startIndex,
     (a, b) => normalizeUnicode(a.trim()) === normalizeUnicode(b.trim()),
     eof,
   );
+  if (unicode !== -1) return { found: unicode, tier: "unicode" };
+
+  return null;
+}
+
+/**
+ * Backwards-compatible single-int return preserving the original API.
+ * New callers prefer seekSequenceTiered to get the matched tier.
+ */
+function seekSequence(lines: string[], pattern: string[], startIndex: number, eof = false): number {
+  const r = seekSequenceTiered(lines, pattern, startIndex, eof);
+  return r ? r.found : -1;
+}
+
+/**
+ * Find the file location whose first line is the closest match to the
+ * pattern's first line, scoring by how many CONSECUTIVE leading lines
+ * also match (under any tier in the ladder). Used purely for diagnostics
+ * (BUG-6b) — we never accept a partial match for the actual edit, only
+ * surface "looks like the closest candidate is here, where it diverges
+ * on line N". Returns null if pattern[0] doesn't appear anywhere under
+ * any tier.
+ *
+ * Scope is bounded — we scan the whole file but only score the top N
+ * candidates to avoid quadratic cost on big files with very common
+ * lines (e.g. blank `}` lines).
+ */
+function findClosestPartialMatch(
+  lines: string[],
+  pattern: string[],
+): { lineNumber: number; matchedLines: number; firstDivergence: number } | null {
+  if (pattern.length === 0 || lines.length === 0) return null;
+
+  // Find candidate starting lines whose first line matches pattern[0]
+  // under any tier. Cap to 16 candidates so we don't burn time on
+  // pathological cases (file full of `}`).
+  const compareAny = (a: string, b: string) =>
+    a === b ||
+    a.trimEnd() === b.trimEnd() ||
+    a.trim() === b.trim() ||
+    normalizeIndent(a).trimEnd() === normalizeIndent(b).trimEnd() ||
+    normalizeUnicode(a.trim()) === normalizeUnicode(b.trim());
+
+  const candidates: number[] = [];
+  for (let i = 0; i < lines.length && candidates.length < 16; i++) {
+    if (compareAny(lines[i], pattern[0])) candidates.push(i);
+  }
+  if (candidates.length === 0) return null;
+
+  // Score each candidate by how many consecutive leading lines match.
+  let best = { lineNumber: -1, matchedLines: 0, firstDivergence: -1 };
+  for (const start of candidates) {
+    let matched = 0;
+    for (let j = 0; j < pattern.length && start + j < lines.length; j++) {
+      if (!compareAny(lines[start + j], pattern[j])) break;
+      matched++;
+    }
+    if (matched > best.matchedLines) {
+      best = {
+        lineNumber: start + 1, // 1-based for the agent
+        matchedLines: matched,
+        firstDivergence: matched, // 0-based offset into pattern
+      };
+    }
+  }
+  return best.lineNumber === -1 ? null : best;
 }
 
 /**
@@ -332,13 +456,41 @@ export function applyUpdateChunks(
       const alreadyApplied =
         newSliceTrimmed.length > 0 &&
         seekSequence(originalLines, newSliceTrimmed, 0, chunk.is_end_of_file) !== -1;
-      const hint = alreadyApplied
+
+      // BUG-6b diagnostic: tell the agent WHERE in the file we got
+      // closest, and which line first diverged. Without this they have
+      // to bash `grep -n` to figure out where their hunk thought it was
+      // pointing.
+      const closest = findClosestPartialMatch(originalLines, pattern);
+      let closestHint = "";
+      if (closest && closest.matchedLines > 0) {
+        const fileLineNo = closest.lineNumber + closest.firstDivergence;
+        const expectedLine = pattern[closest.firstDivergence];
+        const actualLine =
+          fileLineNo - 1 < originalLines.length ? originalLines[fileLineNo - 1] : "<EOF>";
+        closestHint =
+          `\n\nClosest match starts at line ${closest.lineNumber} ` +
+          `(${closest.matchedLines} of ${pattern.length} lines matched).\n` +
+          `First divergence at line ${fileLineNo}:\n` +
+          `  expected: ${JSON.stringify(expectedLine)}\n` +
+          `  actual:   ${JSON.stringify(actualLine)}`;
+      }
+
+      // Tell the agent WHICH normalizations we already tried so they
+      // know what kinds of drift the matcher already tolerates and
+      // don't waste a turn re-emitting the patch with whitespace
+      // tweaks that wouldn't help.
+      const triedTiers = "exact, trimEnd, trim, indent (tab/space), unicode";
+
+      const alreadyAppliedHint = alreadyApplied
         ? "\n\nHint: the replacement content for this hunk already appears in the file. " +
           "The patch may have been partially applied in a prior turn — re-read the file " +
           "to confirm which hunks still need to apply."
         : "";
+
       throw new Error(
-        `Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}${hint}`,
+        `Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}\n\n` +
+          `Tried match tiers: ${triedTiers}.${closestHint}${alreadyAppliedHint}`,
       );
     }
   }
