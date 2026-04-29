@@ -1090,3 +1090,141 @@ fn main() {}
     fs::remove_file(&file).ok();
     aft.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Regression: TS/JS named-import aliases and per-name type modifiers must
+// survive `organize_imports` round-trips. Reported in dogfooding session
+// `ses_23180bd14ffeTODg3ZRGsHKA55`: organize silently rewrote
+// `import { stdin as input, stdout as output } from 'node:process'` to
+// `import { stdin, stdout }`, breaking every reference to `input`/`output`
+// in the file. Returned `success: true, syntax_valid: true` — silent
+// semantic corruption. Fixed by storing TS/JS specifiers verbatim
+// (alias and per-name `type` prefix included) so the regenerator can
+// emit them unchanged.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn organize_imports_ts_preserves_named_aliases() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("alias_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import { stdin as input, stdout as output } from 'node:process'\n\
+         \n\
+         const rl = createInterface({ input, output })\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "alias-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("stdin as input"),
+        "alias `stdin as input` must survive organize. got:\n{content}"
+    );
+    assert!(
+        content.contains("stdout as output"),
+        "alias `stdout as output` must survive organize. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_preserves_per_name_type_prefix() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("typeprefix_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import { type Foo, Bar, baz as qux } from './a'\n\
+         \n\
+         export type X = Foo\n\
+         export const y: typeof Bar = baz\n\
+         qux()\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "typeprefix-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    // Per-specifier `type` prefix is preserved (not promoted to `import type`
+    // and not silently dropped).
+    assert!(
+        content.contains("type Foo"),
+        "per-name `type Foo` modifier must survive. got:\n{content}"
+    );
+    assert!(
+        content.contains("Bar"),
+        "non-type `Bar` import must survive. got:\n{content}"
+    );
+    assert!(
+        content.contains("baz as qux"),
+        "alias `baz as qux` must survive alongside type modifiers. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_aliased_and_bare_are_not_duplicates() {
+    // `{ Foo }` and `{ Foo as Bar }` introduce different local bindings, so
+    // dedup must not collapse them into one. This guards against an aliased
+    // import being silently dropped during organize.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("alias_dedup_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import { Foo } from './a'\n\
+         import { Foo as Bar } from './a'\n\
+         \n\
+         export const x = Foo\n\
+         export const y = Bar\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "alias-dedup-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("Foo as Bar"),
+        "aliased import `Foo as Bar` must not be dedup'd away by bare `Foo`. got:\n{content}"
+    );
+    // Bare `Foo` must also still be reachable (could be merged into the
+    // same import statement or kept separate — both are correct).
+    assert!(
+        content.matches("Foo").count() >= 2,
+        "bare `Foo` and `Foo as Bar` must both survive. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}

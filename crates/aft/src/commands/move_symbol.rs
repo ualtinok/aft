@@ -777,7 +777,13 @@ fn rewrite_consumer_imports(
     let mut made_changes = false;
 
     for (_, imp) in &matching_imports {
-        let has_moved_symbol = imp.names.iter().any(|n| n == symbol_name)
+        // Match on the imported name (pre-`as`) so `import { foo as bar }`
+        // still matches when we're moving `foo`. The TS/JS specifier is
+        // stored verbatim (`"foo as bar"`); see `imports::specifier_matches`.
+        let has_moved_symbol = imp
+            .names
+            .iter()
+            .any(|n| imports::specifier_matches(n, symbol_name))
             || imp.default_import.as_deref() == Some(symbol_name);
 
         if !has_moved_symbol {
@@ -790,7 +796,7 @@ fn rewrite_consumer_imports(
         let remaining_names: Vec<String> = imp
             .names
             .iter()
-            .filter(|n| n.as_str() != symbol_name)
+            .filter(|n| !imports::specifier_matches(n, symbol_name))
             .cloned()
             .collect();
         let remaining_default = if imp.default_import.as_deref() == Some(symbol_name) {

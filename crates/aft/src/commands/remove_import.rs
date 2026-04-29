@@ -234,7 +234,14 @@ fn remove_name_from_imports(
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
 
     for (_, imp) in matching {
-        if imp.names.contains(&target_name.to_string()) {
+        // Match against either the imported name or the local binding so the
+        // caller can ask to remove `input` even when the specifier is stored
+        // verbatim as `stdin as input` (TS/JS).
+        let any_match = imp
+            .names
+            .iter()
+            .any(|n| imports::specifier_matches(n, target_name));
+        if any_match {
             if imp.names.len() == 1 {
                 // Only one named import — remove entire statement
                 let range = line_range(source, &imp.byte_range);
@@ -244,7 +251,7 @@ fn remove_name_from_imports(
                 let new_names: Vec<String> = imp
                     .names
                     .iter()
-                    .filter(|n| n.as_str() != target_name)
+                    .filter(|n| !imports::specifier_matches(n, target_name))
                     .cloned()
                     .collect();
                 let new_line = imports::generate_import_line(

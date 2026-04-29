@@ -108,6 +108,62 @@ fn import_byte_range(imports: &[ImportStatement]) -> Option<Range<usize>> {
 }
 
 // ---------------------------------------------------------------------------
+// Specifier helpers (TS/JS verbatim-string format)
+// ---------------------------------------------------------------------------
+
+/// Return the local binding name for a TS/JS named-import specifier stored in
+/// `ImportStatement::names`. Specifiers are stored verbatim — e.g.
+/// `"stdin as input"`, `"type Foo"`, `"type Foo as Bar"`, `"useState"` — so
+/// callers that want the name actually introduced into scope must strip the
+/// optional `type ` prefix and prefer the post-`as` identifier when present.
+///
+/// Examples:
+///   `"useState"`            → `"useState"`
+///   `"stdin as input"`      → `"input"`
+///   `"type Foo"`            → `"Foo"`
+///   `"type Foo as Bar"`     → `"Bar"`
+pub fn specifier_local_name(spec: &str) -> &str {
+    let trimmed = spec.trim();
+    let after_type = trimmed
+        .strip_prefix("type ")
+        .unwrap_or(trimmed)
+        .trim_start();
+    if let Some(idx) = after_type.find(" as ") {
+        after_type[idx + 4..].trim()
+    } else {
+        after_type
+    }
+}
+
+/// Return the imported (pre-`as`) name for a TS/JS named-import specifier.
+/// Used by dedup, remove, and any caller that needs the source-side name.
+///
+/// Examples:
+///   `"useState"`            → `"useState"`
+///   `"stdin as input"`      → `"stdin"`
+///   `"type Foo"`            → `"Foo"`
+///   `"type Foo as Bar"`     → `"Foo"`
+pub fn specifier_imported_name(spec: &str) -> &str {
+    let trimmed = spec.trim();
+    let after_type = trimmed
+        .strip_prefix("type ")
+        .unwrap_or(trimmed)
+        .trim_start();
+    after_type
+        .find(" as ")
+        .map(|idx| after_type[..idx].trim())
+        .unwrap_or(after_type)
+}
+
+/// Whether a stored specifier matches a target name. Matches against either
+/// the imported name or the local binding so callers can pass whichever name
+/// they observed in source. Useful for `remove_import` where the agent may
+/// reference an aliased import by either name.
+pub fn specifier_matches(spec: &str, target: &str) -> bool {
+    specifier_imported_name(spec) == target || specifier_local_name(spec) == target
+}
+
+// ---------------------------------------------------------------------------
 // Core API
 // ---------------------------------------------------------------------------
 
@@ -174,8 +230,16 @@ pub fn is_duplicate(
             }
         }
 
-        // Check named imports — if ALL requested names already exist
-        if !names.is_empty() && names.iter().all(|n| imp.names.contains(n)) {
+        // Check named imports — if ALL requested names already exist.
+        // Compare on the imported (pre-`as`) name so adding `Foo` is a
+        // no-op when `Foo as Bar` is already imported, but adding
+        // `Foo as Bar` is NOT a duplicate of bare `Foo` (different
+        // local bindings).
+        if !names.is_empty()
+            && names
+                .iter()
+                .all(|n| imp.names.iter().any(|stored| specifier_matches(stored, n)))
+        {
             return true;
         }
     }
@@ -556,6 +620,23 @@ fn extract_import_clause(
 }
 
 /// Extract individual names from a named_imports node (`{ a, b, c }`).
+///
+/// Each name is stored verbatim including any alias and per-name `type`
+/// modifier so the regenerator can round-trip them losslessly. Examples of
+/// captured forms:
+///
+/// - `useState`               (plain)
+/// - `stdin as input`         (renamed)
+/// - `type Foo`               (per-specifier type-only)
+/// - `type Foo as Bar`        (per-specifier type-only with rename)
+///
+/// **Why verbatim strings instead of a struct field per attribute:** dedup,
+/// sort, dropping a single import, and the regenerator are all driven by
+/// `Vec<String>` today. Encoding the alias inside the string preserves the
+/// shape so the rest of the pipeline (organize, remove_import, move_symbol)
+/// keeps working without a workspace-wide refactor. The cost is that callers
+/// who want the canonical name (e.g. dedup) must compare on the leading
+/// identifier only — see `extract_canonical_name` if you need that.
 fn extract_named_imports(source: &str, node: &Node, names: &mut Vec<String>) {
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
@@ -565,25 +646,15 @@ fn extract_named_imports(source: &str, node: &Node, names: &mut Vec<String>) {
     loop {
         let child = cursor.node();
         if child.kind() == "import_specifier" {
-            // import_specifier can have `name` (the imported name) and optional `alias`
-            if let Some(name_node) = child.child_by_field_name("name") {
+            // Capture the full text of the specifier so per-name `type` markers
+            // and `as alias` clauses are preserved across organize/regenerate
+            // round-trips. Falls back to the imported name if the specifier
+            // text is empty for any reason.
+            let raw = source[child.byte_range()].trim().to_string();
+            if !raw.is_empty() {
+                names.push(raw);
+            } else if let Some(name_node) = child.child_by_field_name("name") {
                 names.push(source[name_node.byte_range()].to_string());
-            } else {
-                // Fallback: first identifier child
-                let mut spec_cursor = child.walk();
-                if spec_cursor.goto_first_child() {
-                    loop {
-                        if spec_cursor.node().kind() == "identifier"
-                            || spec_cursor.node().kind() == "type_identifier"
-                        {
-                            names.push(source[spec_cursor.node().byte_range()].to_string());
-                            break;
-                        }
-                        if !spec_cursor.goto_next_sibling() {
-                            break;
-                        }
-                    }
-                }
             }
         }
         if !cursor.goto_next_sibling() {
