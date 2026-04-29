@@ -1196,7 +1196,34 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               });
 
               if (hunk.move_path) {
-                await callBridge(ctx, context, "delete_file", { file: filePath });
+                try {
+                  const deleteResult = await callBridge(ctx, context, "delete_file", {
+                    file: filePath,
+                  });
+                  if (deleteResult.success === false) {
+                    throw new Error(
+                      (deleteResult.message as string | undefined) ?? "delete failed",
+                    );
+                  }
+                } catch (deleteError) {
+                  try {
+                    const rollbackResult = await callBridge(ctx, context, "delete_file", {
+                      file: targetPath,
+                    });
+                    if (rollbackResult.success === false) {
+                      throw new Error(
+                        (rollbackResult.message as string | undefined) ?? "rollback delete failed",
+                      );
+                    }
+                  } catch (rollbackError) {
+                    throw new Error(
+                      `success: false; code: move_partial_failure; files: [${filePath}, ${targetPath}]; wrote destination ${targetPath}, but failed to delete source ${filePath} (${formatError(deleteError)}) and failed to roll back destination ${targetPath} (${formatError(rollbackError)}). Both copies may exist: ${filePath}, ${targetPath}`,
+                    );
+                  }
+                  throw new Error(
+                    `source delete failed after writing move destination; rolled back destination ${targetPath}: ${formatError(deleteError)}`,
+                  );
+                }
                 results.push(`Updated and moved ${hunk.path} → ${hunk.move_path}`);
               } else {
                 results.push(`Updated ${hunk.path}`);
@@ -1428,6 +1455,10 @@ export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition>
     aft_delete: createDeleteTool(ctx),
     aft_move: createMoveTool(ctx),
   };
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

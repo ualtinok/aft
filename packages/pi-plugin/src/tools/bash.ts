@@ -201,6 +201,10 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
         throw err;
       });
 
+      if (response.success === false) {
+        throw new Error((response.message as string | undefined) ?? "bash failed");
+      }
+
       const taskId = response.task_id as string | undefined;
       if (response.status === "running" && taskId) {
         trackBgTask(resolveSessionId(extCtx), taskId);

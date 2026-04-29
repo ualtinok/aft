@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -276,6 +277,32 @@ describe("BinaryBridge lifecycle", () => {
       expect(elapsed).toBeLessThan(2_000);
     } finally {
       await rm(fakeBin).catch(() => {});
+    }
+  });
+
+  test("send rejects params that contain reserved id key before writing", async () => {
+    const marker = join(tmpdir(), `aft-fake-id-collision-started-${Date.now()}`);
+    const fakeBin = join(tmpdir(), `aft-fake-id-collision-${Date.now()}.sh`);
+    await writeFile(
+      fakeBin,
+      ["#!/bin/sh", `touch ${JSON.stringify(marker)}`, "sleep 30", ""].join("\n"),
+      {
+        mode: 0o755,
+      },
+    );
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: TEST_TIMEOUT_MS,
+      });
+
+      await expect(bridge.send("foo", { id: "evil" })).rejects.toThrow(
+        "params cannot contain reserved key 'id'",
+      );
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await rm(fakeBin).catch(() => {});
+      await rm(marker).catch(() => {});
     }
   });
 

@@ -327,16 +327,11 @@ describe("Hoisted tool execute handlers", () => {
     );
   });
 
-  /// Per-file commit on a partial move: when the destination write succeeds
-  /// but the source delete fails, the destination stays (it IS the agent's
-  /// requested change), the source stays (we couldn't delete it), and the
-  /// hunk is marked failed in the result. The agent sees the failure and
-  /// can decide whether to retry or accept the duplicate. This is the
-  /// per-file-commit replacement for the older audit #8 atomic rollback.
-  test("apply_patch keeps the move destination when source delete fails (per-file commit)", async () => {
+  test("apply_patch rolls back move destination when source delete fails", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
+    const earlierFile = resolve(tmpDir, "src/earlier.ts");
     const sourceFile = resolve(tmpDir, "src/original.ts");
     const destFile = resolve(tmpDir, "src/renamed.ts");
     await writeFile(sourceFile, "export const x = 1;\n", { flag: "wx" }).catch(async () => {
@@ -347,6 +342,8 @@ describe("Hoisted tool execute handlers", () => {
 
     const patchText = [
       "*** Begin Patch",
+      "*** Add File: src/earlier.ts",
+      "+export const earlier = true;",
       "*** Update File: src/original.ts",
       "*** Move to: src/renamed.ts",
       "@@",
@@ -360,6 +357,10 @@ describe("Hoisted tool execute handlers", () => {
       if (command === "checkpoint") return { success: true };
       if (command === "write") {
         const file = params.file as string;
+        if (file === earlierFile) {
+          await writeFile(file, params.content as string);
+          return { success: true };
+        }
         if (file === destFile) {
           await writeFile(file, params.content as string);
           destWritten = true;
@@ -372,6 +373,10 @@ describe("Hoisted tool execute handlers", () => {
           // Simulate the source delete failing mid-patch.
           throw new Error("Simulated delete_file failure");
         }
+        if (file === destFile) {
+          await rm(destFile, { force: true });
+          return { success: true };
+        }
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -379,19 +384,57 @@ describe("Hoisted tool execute handlers", () => {
     const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
 
     expect(destWritten).toBe(true);
-    // Destination MUST stay — it IS the agent's intended new state.
-    expect(existsSync(destFile)).toBe(true);
-    // Failure surface: the result reports the failed hunk (the source delete).
+    expect(existsSync(earlierFile)).toBe(true);
+    expect(existsSync(destFile)).toBe(false);
     expect(result).toContain("Failed to update src/original.ts");
-    // No atomic-rollback wording.
-    expect(result).not.toContain("removed 1 newly-created file(s)");
-    expect(result).not.toContain("restored pre-existing files");
-    // No restore_checkpoint call (per-file commit means no rollback).
+    expect(result).toContain("rolled back destination");
+    expect(result).toContain("Patch partially applied");
     expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(false);
-    // No delete_file on destFile (we keep what succeeded).
-    expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(
-      false,
-    );
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(true);
+  });
+
+  test("apply_patch reports both copies when move rollback delete also fails", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const sourceFile = resolve(tmpDir, "src/original.ts");
+    const destFile = resolve(tmpDir, "src/renamed.ts");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(resolve(tmpDir, "src"), { recursive: true });
+    await writeFile(sourceFile, "export const x = 1;\n");
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: src/original.ts",
+      "*** Move to: src/renamed.ts",
+      "@@",
+      "-export const x = 1;",
+      "+export const x = 2;",
+      "*** End Patch",
+    ].join("\n");
+
+    const { tools } = createMockHoistedHarness(async (command, params) => {
+      if (command === "checkpoint") return { success: true };
+      if (command === "write") {
+        await writeFile(params.file as string, params.content as string);
+        return { success: true };
+      }
+      if (command === "delete_file") {
+        const file = params.file as string;
+        if (file === sourceFile) throw new Error("source locked");
+        if (file === destFile) throw new Error("rollback locked");
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+
+    expect(existsSync(sourceFile)).toBe(true);
+    expect(existsSync(destFile)).toBe(true);
+    expect(result).toContain("move_partial_failure");
+    expect(result).toContain(sourceFile);
+    expect(result).toContain(destFile);
+    expect(result).toContain("Both copies may exist");
   });
 
   /// BUG-6a dogfooding repro: the user's exact 3-file complaint. A multi-

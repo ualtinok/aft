@@ -220,6 +220,26 @@ describe("bash tool adapter", () => {
     ).rejects.toThrow("Hook failed: permission denied");
   });
 
+  test("execute throws Rust-side bash error responses", async () => {
+    const tools = new Map<string, MockToolDef>();
+    const api = makeMockApi(tools);
+    const mockBridge = makeMockBridge({
+      success: false,
+      code: "execution_failed",
+      message: "kaboom",
+    });
+    const ctx = makeMockContext(mockBridge);
+
+    registerBashTool(api, ctx);
+
+    const bashTool = tools.get("bash")!;
+    const extCtx: MockExtensionContext = { cwd: "/test", hasUI: false };
+
+    await expect(
+      bashTool.execute("test-call", { command: "boom" }, undefined, undefined, extCtx),
+    ).rejects.toThrow("kaboom");
+  });
+
   test("progress callback streams output", async () => {
     const tools = new Map<string, MockToolDef>();
     const api = makeMockApi(tools);

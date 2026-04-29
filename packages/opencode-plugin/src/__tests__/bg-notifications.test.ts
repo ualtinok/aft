@@ -6,7 +6,9 @@ import {
   appendInTurnBgCompletions,
   formatSystemReminder,
   handleIdleBgCompletions,
+  ingestBgCompletions,
   resetBgWake,
+  SESSION_BG_STATE_IDLE_TTL_MS,
   sessionBgStates,
   trackBgTask,
 } from "../bg-notifications.js";
@@ -226,6 +228,44 @@ describe("OpenCode background notifications", () => {
     await appendInTurnBgCompletions({ ctx, directory: "/tmp/project", sessionID: "s1" }, output);
 
     expect(output.output).toBe("normal");
+  });
+
+  test("evicts task-free sessions after idle TTL on next access", () => {
+    const originalDateNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+
+    try {
+      trackBgTask("stale", "task-1");
+      ingestBgCompletions("stale", [completion("task-1", "done")]);
+      expect(sessionBgStates.get("stale")?.outstandingTaskIds.size).toBe(0);
+
+      now += SESSION_BG_STATE_IDLE_TTL_MS + 1;
+      trackBgTask("active", "task-2");
+
+      expect(sessionBgStates.has("stale")).toBe(false);
+      expect(sessionBgStates.has("active")).toBe(true);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("does not evict sessions with outstanding tasks regardless of age", () => {
+    const originalDateNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+
+    try {
+      trackBgTask("old-active", "task-1");
+
+      now += SESSION_BG_STATE_IDLE_TTL_MS + 1;
+      trackBgTask("new-active", "task-2");
+
+      expect(sessionBgStates.get("old-active")?.outstandingTaskIds.has("task-1")).toBe(true);
+      expect(sessionBgStates.has("new-active")).toBe(true);
+    } finally {
+      Date.now = originalDateNow;
+    }
   });
 });
 
