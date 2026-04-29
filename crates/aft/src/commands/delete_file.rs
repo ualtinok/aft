@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use lsp_types::FileChangeType;
+
 use crate::context::AppContext;
 use crate::edit;
 use crate::protocol::{RawRequest, Response};
@@ -62,6 +64,8 @@ pub fn handle_delete_file(req: &RawRequest, ctx: &AppContext) -> Response {
             format!("delete_file: failed to delete: {}", e),
         );
     }
+
+    ctx.lsp_notify_watched_config_file(Path::new(file), FileChangeType::DELETED);
 
     log::debug!("delete_file: {}", file);
 

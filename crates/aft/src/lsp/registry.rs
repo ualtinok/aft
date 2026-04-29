@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::{Config, UserServerDef};
 
@@ -224,7 +224,7 @@ pub fn builtin_servers() -> Vec<ServerDef> {
             &["rs"],
             "rust-analyzer",
             &[],
-            &["Cargo.toml"],
+            &["Cargo.toml", "Cargo.lock"],
         ),
         // gopls requires opt-in for `textDocument/diagnostic` (LSP 3.17 pull)
         // via the `pullDiagnostics` initializationOption. Without this the
@@ -236,7 +236,7 @@ pub fn builtin_servers() -> Vec<ServerDef> {
             &["go"],
             "gopls",
             &["serve"],
-            &["go.mod"],
+            &["go.mod", "go.sum"],
             serde_json::json!({ "pullDiagnostics": true }),
         ),
         builtin_server(
@@ -600,16 +600,18 @@ pub fn is_config_file_path(path: &Path) -> bool {
         return false;
     };
 
-    matches!(
-        file_name,
-        "package.json"
-            | "tsconfig.json"
-            | "jsconfig.json"
-            | "pyproject.toml"
-            | "Cargo.toml"
-            | "go.mod"
-            | "go.sum"
-    ) || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
+    builtin_config_file_names().contains(file_name)
+        || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
+}
+
+fn builtin_config_file_names() -> &'static HashSet<String> {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        builtin_servers()
+            .into_iter()
+            .flat_map(|server| server.root_markers)
+            .collect()
+    })
 }
 
 fn builtin_server(
@@ -711,9 +713,13 @@ mod tests {
             "/repo/tsconfig.build.json",
             "/repo/jsconfig.json",
             "/repo/pyproject.toml",
+            "/repo/pyrightconfig.json",
             "/repo/Cargo.toml",
+            "/repo/Cargo.lock",
             "/repo/go.mod",
             "/repo/go.sum",
+            "/repo/biome.json",
+            "/repo/bun.lock",
         ] {
             assert!(
                 is_config_file_path(Path::new(path)),
@@ -722,7 +728,6 @@ mod tests {
         }
 
         for path in [
-            "/repo/package-lock.json",
             "/repo/tsconfig-json",
             "/repo/tsconfig.build.ts",
             "/repo/cargo.toml",

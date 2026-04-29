@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use lsp_types::FileChangeType;
+
 use crate::context::AppContext;
 use crate::edit;
 use crate::protocol::{RawRequest, Response};
@@ -119,6 +121,12 @@ pub fn handle_write(req: &RawRequest, ctx: &AppContext) -> Response {
         };
 
     if let Ok(final_content) = std::fs::read_to_string(path.as_path()) {
+        let config_change_type = if existed {
+            FileChangeType::CHANGED
+        } else {
+            FileChangeType::CREATED
+        };
+        ctx.lsp_notify_watched_config_file(path.as_path(), config_change_type);
         write_result.lsp_outcome = ctx.lsp_post_write(path.as_path(), &final_content, &req.params);
     }
 

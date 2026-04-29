@@ -304,24 +304,22 @@ impl AppContext {
         )
     }
 
-    fn notify_watched_config_files(&self, file_paths: &[PathBuf], change_type: FileChangeType) {
+    fn notify_watched_config_files(&self, file_paths: &[PathBuf]) {
         let config_paths: Vec<(PathBuf, FileChangeType)> = file_paths
             .iter()
             .filter(|path| is_config_file_path(path))
             .cloned()
-            .map(|path| (path, change_type))
+            .map(|path| {
+                let change_type = if path.exists() {
+                    FileChangeType::CHANGED
+                } else {
+                    FileChangeType::DELETED
+                };
+                (path, change_type)
+            })
             .collect();
 
-        if config_paths.is_empty() {
-            return;
-        }
-
-        if let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() {
-            let config = self.config();
-            if let Err(e) = lsp.notify_files_watched_changed(&config_paths, &config) {
-                log::warn!("watched-file sync error: {}", e);
-            }
-        }
+        self.notify_watched_config_events(&config_paths);
     }
 
     fn multi_file_write_paths(params: &serde_json::Value) -> Option<Vec<PathBuf>> {
@@ -336,6 +334,76 @@ impl AppContext {
         (!paths.is_empty()).then_some(paths)
     }
 
+    fn watched_file_events_from_params(
+        params: &serde_json::Value,
+    ) -> Option<Vec<(PathBuf, FileChangeType)>> {
+        let events = params
+            .get("multi_file_write_paths")
+            .and_then(|value| value.as_array())?
+            .iter()
+            .filter_map(|entry| {
+                let path = entry.as_str().map(PathBuf::from).or_else(|| {
+                    entry
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .map(PathBuf::from)
+                })?;
+
+                if !is_config_file_path(&path) {
+                    return None;
+                }
+
+                let change_type = entry
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .and_then(Self::parse_file_change_type)
+                    .unwrap_or_else(|| Self::change_type_from_current_state(&path));
+
+                Some((path, change_type))
+            })
+            .collect::<Vec<_>>();
+
+        (!events.is_empty()).then_some(events)
+    }
+
+    fn parse_file_change_type(value: &str) -> Option<FileChangeType> {
+        match value {
+            "created" | "CREATED" | "Created" => Some(FileChangeType::CREATED),
+            "changed" | "CHANGED" | "Changed" => Some(FileChangeType::CHANGED),
+            "deleted" | "DELETED" | "Deleted" => Some(FileChangeType::DELETED),
+            _ => None,
+        }
+    }
+
+    fn change_type_from_current_state(path: &Path) -> FileChangeType {
+        if path.exists() {
+            FileChangeType::CHANGED
+        } else {
+            FileChangeType::DELETED
+        }
+    }
+
+    fn notify_watched_config_events(&self, config_paths: &[(PathBuf, FileChangeType)]) {
+        if config_paths.is_empty() {
+            return;
+        }
+
+        if let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() {
+            let config = self.config();
+            if let Err(e) = lsp.notify_files_watched_changed(config_paths, &config) {
+                log::warn!("watched-file sync error: {}", e);
+            }
+        }
+    }
+
+    pub fn lsp_notify_watched_config_file(&self, file_path: &Path, change_type: FileChangeType) {
+        if !is_config_file_path(file_path) {
+            return;
+        }
+
+        self.notify_watched_config_events(&[(file_path.to_path_buf(), change_type)]);
+    }
+
     /// Post-write LSP hook for multi-file edits. When the patch includes
     /// config-file edits, notify active workspace servers via
     /// `workspace/didChangeWatchedFiles` before sending the per-document
@@ -347,7 +415,7 @@ impl AppContext {
         file_paths: &[PathBuf],
         params: &serde_json::Value,
     ) -> Option<crate::lsp::manager::PostEditWaitOutcome> {
-        self.notify_watched_config_files(file_paths, FileChangeType::CHANGED);
+        self.notify_watched_config_files(file_paths);
 
         let wants_diagnostics = params
             .get("diagnostics")
@@ -401,7 +469,9 @@ impl AppContext {
 
         if !wants_diagnostics {
             if let Some(file_paths) = Self::multi_file_write_paths(params) {
-                self.notify_watched_config_files(&file_paths, FileChangeType::CHANGED);
+                self.notify_watched_config_files(&file_paths);
+            } else if let Some(config_events) = Self::watched_file_events_from_params(params) {
+                self.notify_watched_config_events(&config_events);
             }
             self.lsp_notify_file_changed(file_path, content);
             return None;
@@ -415,6 +485,10 @@ impl AppContext {
 
         if let Some(file_paths) = Self::multi_file_write_paths(params) {
             return self.lsp_post_multi_file_write(file_path, content, &file_paths, params);
+        }
+
+        if let Some(config_events) = Self::watched_file_events_from_params(params) {
+            self.notify_watched_config_events(&config_events);
         }
 
         Some(self.lsp_notify_and_collect_diagnostics(

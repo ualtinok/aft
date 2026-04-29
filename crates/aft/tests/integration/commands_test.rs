@@ -303,6 +303,61 @@ fn test_zoom_success_with_annotations() {
 }
 
 #[test]
+fn test_read_range_after_binary_sample_rewind() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let file = temp_dir.path().join("sample.txt");
+    let mut content = "a".repeat(4096);
+    content.push_str("\nline-two\nline-three\n");
+    std::fs::write(&file, content).expect("write sample");
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(temp_dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {:?}", cfg);
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"read-range-rewind","command":"read","file":"{}","start_line":2,"end_line":3}}"#,
+        file.display()
+    ));
+
+    assert_eq!(resp["success"], true, "read should succeed: {resp:?}");
+    assert_eq!(resp["lines_read"], 2);
+    let content = resp["content"].as_str().expect("content string");
+    assert!(content.contains("2: line-two"), "content: {content}");
+    assert!(content.contains("3: line-three"), "content: {content}");
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn test_read_binary_detection_after_single_open_refactor() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let file = temp_dir.path().join("binary.bin");
+    std::fs::write(&file, [b'a', b'b', 0, b'c']).expect("write binary");
+
+    let mut aft = AftProcess::spawn();
+    let cfg = aft.configure(temp_dir.path());
+    assert_eq!(cfg["success"], true, "configure should succeed: {:?}", cfg);
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"read-binary-single-open","command":"read","file":"{}","start_line":1,"end_line":1}}"#,
+        file.display()
+    ));
+
+    assert_eq!(
+        resp["success"], true,
+        "binary read should succeed: {resp:?}"
+    );
+    assert_eq!(resp["binary"], true);
+    assert!(resp["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Binary file")));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn test_read_rejects_files_larger_than_50mb() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let file = temp_dir.path().join("large.txt");

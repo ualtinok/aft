@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aft::commands::delete_file::handle_delete_file;
 use aft::commands::lsp_diagnostics::handle_lsp_diagnostics;
+use aft::commands::write::handle_write;
 use aft::config::Config;
 use aft::context::AppContext;
 use aft::lsp::client::LspEvent;
@@ -126,6 +128,34 @@ fn collect_watched_file_events(manager: &mut LspManager) -> serde_json::Value {
     }
 }
 
+fn collect_watched_file_events_from_ctx(ctx: &AppContext) -> serde_json::Value {
+    let event = collect_event(&mut ctx.lsp(), |event| {
+        matches!(
+            event,
+            LspEvent::Notification { method, .. } if method == "custom/watchedFilesChanged"
+        )
+    })
+    .expect("timed out waiting for watched-file notification");
+
+    match event {
+        LspEvent::Notification { params, .. } => params.expect("watched event params"),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+fn config_change_type(params: &serde_json::Value, suffix: &str) -> i64 {
+    let changes = params["changes"].as_array().expect("changes array");
+    changes
+        .iter()
+        .find(|change| {
+            change["uri"]
+                .as_str()
+                .is_some_and(|uri| uri.ends_with(suffix))
+        })
+        .and_then(|change| change["type"].as_i64())
+        .unwrap_or_else(|| panic!("missing watched-file change for {suffix}: {params}"))
+}
+
 fn app_context_with_fake_lsp() -> AppContext {
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
     ctx.lsp()
@@ -186,6 +216,173 @@ fn watched_files_sent_for_config_edit_alongside_source_edit() {
         "unexpected uri: {params}"
     );
     assert_eq!(changes[0]["type"], 2);
+}
+
+#[test]
+fn watched_config_file_event_types_follow_current_file_state() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let existing = root.join("package.json");
+    let created = root.join("biome.json");
+    let deleted = root.join("pyrightconfig.json");
+    fs::write(&deleted, "{}\n").expect("write config before delete");
+    fs::write(&created, "{}\n").expect("write config before notify");
+    fs::remove_file(&deleted).expect("delete config before notify");
+
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    ctx.lsp_post_write(
+        source,
+        "export const value = 3;\n",
+        &serde_json::json!({
+            "multi_file_write_paths": [
+                existing.display().to_string(),
+                created.display().to_string(),
+                deleted.display().to_string()
+            ]
+        }),
+    );
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/package.json"), 2);
+    assert_eq!(config_change_type(&params, "/biome.json"), 2);
+    assert_eq!(config_change_type(&params, "/pyrightconfig.json"), 3);
+}
+
+#[test]
+fn watched_config_file_event_types_accept_explicit_created_changed_deleted() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let created = root.join("biome.json");
+    let changed = root.join("package.json");
+    let deleted = root.join("pyrightconfig.json");
+
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    ctx.lsp_post_write(
+        source,
+        "export const value = 3;\n",
+        &serde_json::json!({
+            "multi_file_write_paths": [
+                { "path": created.display().to_string(), "type": "created" },
+                { "path": changed.display().to_string(), "type": "changed" },
+                { "path": deleted.display().to_string(), "type": "deleted" }
+            ]
+        }),
+    );
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/biome.json"), 1);
+    assert_eq!(config_change_type(&params, "/package.json"), 2);
+    assert_eq!(config_change_type(&params, "/pyrightconfig.json"), 3);
+}
+
+#[test]
+fn write_command_reports_created_for_new_config_file() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let config_path = root.join("biome.json");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "write-created-config",
+        "command": "write",
+        "file": config_path.display().to_string(),
+        "content": "{}\n"
+    }))
+    .expect("request parses");
+    let response = handle_write(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true, "write failed: {json}");
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/biome.json"), 1);
+}
+
+#[test]
+fn write_command_reports_changed_for_existing_config_file() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let config_path = root.join("package.json");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "write-changed-config",
+        "command": "write",
+        "file": config_path.display().to_string(),
+        "content": "{\"devDependencies\":{}}\n"
+    }))
+    .expect("request parses");
+    let response = handle_write(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true, "write failed: {json}");
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/package.json"), 2);
+}
+
+#[test]
+fn delete_file_command_reports_deleted_for_config_file() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let config_path = root.join("pyrightconfig.json");
+    fs::write(&config_path, "{}\n").expect("write config before delete");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "delete-config",
+        "command": "delete_file",
+        "file": config_path.display().to_string()
+    }))
+    .expect("request parses");
+    let response = handle_delete_file(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true, "delete failed: {json}");
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/pyrightconfig.json"), 3);
 }
 
 #[test]
@@ -446,8 +643,10 @@ fn test_no_lsp_server_returns_honest_note() {
     let file = root.join("file.unknownext");
     fs::write(&file, "garbage\n").expect("write file");
 
-    let mut config = Config::default();
-    config.project_root = Some(root.clone());
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
 
@@ -621,8 +820,10 @@ fn test_pull_diagnostics_falls_back_when_unsupported() {
 
     let (_temp_dir, _root, files) = rust_workspace_with_files(&["main.rs"]);
     let file = &files[0];
-    let mut config = Config::default();
-    config.project_root = Some(_root.clone());
+    let config = Config {
+        project_root: Some(_root.clone()),
+        ..Config::default()
+    };
 
     // Spawn fake server WITHOUT pull capability (default).
     let mut manager = manager_with_fake_server();
@@ -657,8 +858,10 @@ fn test_pull_diagnostics_falls_back_when_unsupported() {
 fn test_ensure_file_open_detects_disk_drift() {
     let (_temp_dir, root, files) = rust_workspace_with_files(&["main.rs"]);
     let file = &files[0];
-    let mut config = Config::default();
-    config.project_root = Some(root.clone());
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
 
     let mut manager = manager_with_fake_server();
     // Open the file the first time.
