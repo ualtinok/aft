@@ -146,7 +146,19 @@ export function registerHoistedTools(
         if (Array.isArray(response.entries)) {
           return textResult((response.entries as string[]).join("\n"));
         }
-        const text = (response.content as string | undefined) ?? "";
+        let text = (response.content as string | undefined) ?? "";
+
+        // Two-case footer (kept aligned with the OpenCode plugin's
+        // formatReadFooter — see docs there for case A/B rationale).
+        // Pi previously discarded `truncated`/`total_lines` entirely, so
+        // an agent that read a 500-line file with no range got back
+        // default-clamped 100 lines with NO signal that 400 more lines
+        // existed. This restores Case A (hint when agent didn't choose)
+        // while avoiding the patronizing hint when the agent already
+        // chose a range (Case B → no footer).
+        const agentSpecifiedRange = params.offset !== undefined || params.limit !== undefined;
+        const footer = formatReadFooter(agentSpecifiedRange, response);
+        if (footer) text += footer;
         return textResult(text);
       },
     });
@@ -475,4 +487,32 @@ function splitIncludeGlobs(include: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * Build the navigation footer for a `read` response. Mirrors the OpenCode
+ * plugin's helper of the same name. See packages/opencode-plugin/src/tools/
+ * hoisted.ts::formatReadFooter for the case rationale; the two are kept in
+ * sync deliberately. (Not factored into a shared package because there is no
+ * cross-plugin shared module yet and ~40 lines doesn't justify creating one.)
+ */
+export function formatReadFooter(
+  agentSpecifiedRange: boolean,
+  data: Record<string, unknown>,
+): string {
+  // CASE B: agent picked the range. No footer at all. They have the math.
+  if (agentSpecifiedRange) return "";
+
+  if (!data.truncated) return "";
+
+  const startLine = data.start_line as number | undefined;
+  const endLine = data.end_line as number | undefined;
+  const totalLines = data.total_lines as number | undefined;
+  if (startLine === undefined || endLine === undefined || totalLines === undefined) {
+    return "";
+  }
+
+  // CASE A: agent did not pick a range, response was clamped — hint
+  // is useful, tell them how to read more.
+  return `\n(Showing lines ${startLine}-${endLine} of ${totalLines}. Use offset/limit to read other sections.)`;
 }

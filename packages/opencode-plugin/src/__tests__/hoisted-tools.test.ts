@@ -418,9 +418,119 @@ describe("Hoisted tool execute handlers", () => {
     const truncatedResult = await tools.read.execute({ filePath: "big.ts" }, sdkCtx);
 
     expect(directoryResult).toBe("a.ts\nsrc/");
+    // Case B: agent did NOT specify a range, response was clamped → hint footer
+    // is useful, tells the agent more exists and how to get it.
     expect(truncatedResult).toBe(
       "1: one\n2: two\n(Showing lines 1-2 of 10. Use startLine/endLine to read other sections.)",
     );
+  });
+
+  test("read does not append a footer when the file fits in default limit (case A)", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const { tools } = createMockHoistedHarness(async () => ({
+      success: true,
+      content: "1: one\n2: two\n3: three",
+      // truncated:false means the response IS the whole file — no footer needed.
+      truncated: false,
+      start_line: 1,
+      end_line: 3,
+      total_lines: 3,
+    }));
+
+    const result = await tools.read.execute({ filePath: "small.ts" }, sdkCtx);
+
+    expect(result).toBe("1: one\n2: two\n3: three");
+  });
+
+  test("read drops the navigation hint when the agent supplied startLine/endLine (case B)", async () => {
+    // Repro for the dogfooding bug: agent calls read({startLine: 130, endLine: 190})
+    // on a 191-line file and gets back lines 130-190 EXACTLY. Telling them
+    // "use startLine/endLine to read other sections" right after they used
+    // those exact params is patronizing. They have the math.
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const { tools } = createMockHoistedHarness(async () => ({
+      success: true,
+      content: "130: ...\n190: ...",
+      // Rust still reports truncated:true because the response is a slice
+      // of the file (end_line < total_lines). The plugin must NOT key the
+      // hint off this flag alone — it needs to know the agent picked the slice.
+      truncated: true,
+      start_line: 130,
+      end_line: 190,
+      total_lines: 191,
+    }));
+
+    const result = await tools.read.execute(
+      { filePath: "registry.ts", startLine: 130, endLine: 190 },
+      sdkCtx,
+    );
+
+    // The user's exact complaint: when end_line matches total_lines (or is
+    // close to it after a deliberate range), no footer should be emitted at
+    // all. Agent gets back only the content.
+    expect(result).toBe("130: ...\n190: ...");
+    expect(result).not.toContain("Use startLine/endLine");
+  });
+
+  test("read drops the footer entirely when the agent's range happens not to cover the full file (case B)", async () => {
+    // Subtle case: agent asked 100-150 of a 200-line file. They got back
+    // exactly what they asked for. The earlier "compact when clamped"
+    // branch would have spuriously emitted `(Lines 100-150 of 200)` here,
+    // which is the SAME shape of patronizing footer as the original bug —
+    // re-teaching an agent that they got less than the whole file when
+    // THEY chose to. Agent has the math: they sent the request and they
+    // can see the content length.
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const { tools } = createMockHoistedHarness(async () => ({
+      success: true,
+      content: "100: ...\n150: ...",
+      truncated: true,
+      start_line: 100,
+      end_line: 150,
+      total_lines: 200,
+    }));
+
+    const result = await tools.read.execute(
+      { filePath: "mid.ts", startLine: 100, endLine: 150 },
+      sdkCtx,
+    );
+
+    expect(result).toBe("100: ...\n150: ...");
+    expect(result).not.toContain("Use startLine/endLine");
+    expect(result).not.toContain("(Lines 100-150");
+  });
+
+  test("read drops the navigation hint when the agent supplied offset/limit (case B)", async () => {
+    // Same as the startLine/endLine case but for the OpenCode-built-in-
+    // compatible offset/limit param shape. Agent that picked the slice
+    // should not be re-taught how to pick a slice.
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const { tools } = createMockHoistedHarness(async () => ({
+      success: true,
+      content: "10: ...\n29: ...",
+      truncated: true,
+      start_line: 10,
+      end_line: 29,
+      total_lines: 30,
+    }));
+
+    const result = await tools.read.execute(
+      { filePath: "small.ts", offset: 10, limit: 20 },
+      sdkCtx,
+    );
+
+    // No footer at all — agent picked the range, has the math.
+    expect(result).toBe("10: ...\n29: ...");
+    expect(result).not.toContain("Use startLine/endLine");
+    expect(result).not.toContain("(Lines");
   });
 
   test("write distinguishes new files from updates", async () => {

@@ -30,6 +30,57 @@ function relativeToWorktree(fp: string, worktree: string): string {
   return path.relative(worktree, fp);
 }
 
+/**
+ * Build the navigation footer for a `read` response.
+ *
+ * Two cases (kept aligned with the Pi plugin's helper of the same name):
+ *
+ *   A. Agent did NOT specify a range
+ *      → if the response is clamped (Rust's default limit / byte cap
+ *        kicked in), emit a hint footer so they know more exists and
+ *        how to get it. Otherwise no footer (the response IS the file).
+ *
+ *   B. Agent EXPLICITLY supplied startLine/endLine OR offset/limit
+ *      → no footer. The agent picked the range, so:
+ *         - they already have the math
+ *         - if the range was clamped vs. what they asked for, they can
+ *           see that from `content` length vs. their requested range
+ *         - telling them "use startLine/endLine to read other sections"
+ *           right after they used those exact params is patronizing
+ *           and burns tokens (the user's exact dogfooding complaint
+ *           when this returned the hint for read({130, 190}) on a
+ *           191-line file).
+ *
+ * `data.truncated` from Rust means "response is a slice of the file" — TRUE
+ * even when the slice matches what the agent asked for. So we cannot key
+ * the hint off that flag alone; we also need to know whether the agent
+ * picked the range.
+ *
+ * Earlier drafts emitted a compact `(Lines X-Y of Z)` when the agent
+ * picked a range AND `endLine < totalLines`, on the theory that this
+ * meant their range was clamped. But that condition fires whenever the
+ * agent's chosen range happens not to extend to EOF (the user's exact
+ * complaint case: they asked 130-190 of 191 → end_line(190) < total(191)
+ * → spurious compact footer). Removed.
+ */
+function formatReadFooter(agentSpecifiedRange: boolean, data: Record<string, unknown>): string {
+  // CASE B: agent picked the range. No footer at all. They have the math.
+  if (agentSpecifiedRange) return "";
+
+  if (!data.truncated) return "";
+
+  const startLine = data.start_line as number | undefined;
+  const endLine = data.end_line as number | undefined;
+  const totalLines = data.total_lines as number | undefined;
+  if (startLine === undefined || endLine === undefined || totalLines === undefined) {
+    return "";
+  }
+
+  // CASE A: agent did not pick a range, response was clamped — hint is
+  // useful, tell them how to read more.
+  return `\n(Showing lines ${startLine}-${endLine} of ${totalLines}. Use startLine/endLine to read other sections.)`;
+}
+
 /** Test-only export. Production code uses buildUnifiedDiff directly. */
 export const _buildUnifiedDiffForTest = (fp: string, before: string, after: string): string =>
   buildUnifiedDiff(fp, before, after);
@@ -438,10 +489,14 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       }
       let output = data.content as string;
 
-      // Add navigation hint if truncated
-      if (data.truncated) {
-        output += `\n(Showing lines ${data.start_line}-${data.end_line} of ${data.total_lines}. Use startLine/endLine to read other sections.)`;
-      }
+      // Three-case footer: see formatReadFooter() doc.
+      const agentSpecifiedRange =
+        args.startLine !== undefined ||
+        args.endLine !== undefined ||
+        args.offset !== undefined ||
+        args.limit !== undefined;
+      const footer = formatReadFooter(agentSpecifiedRange, data);
+      if (footer) output += footer;
 
       return output;
     },
