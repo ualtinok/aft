@@ -183,13 +183,26 @@ pub fn parse_imports(source: &str, tree: &Tree, lang: LangId) -> ImportBlock {
 
 /// Check if an import with the given module + name combination already exists.
 ///
-/// For dedup: same module path AND (same named import OR same default import).
-/// Side-effect imports match on module path alone.
+/// For dedup: same module path and matching binding shape. Side-effect imports
+/// are only duplicates of side-effect imports; namespace imports are distinct
+/// from side-effect imports and from other namespace aliases.
 pub fn is_duplicate(
     block: &ImportBlock,
     module_path: &str,
     names: &[String],
     default_import: Option<&str>,
+    type_only: bool,
+) -> bool {
+    is_duplicate_with_namespace(block, module_path, names, default_import, None, type_only)
+}
+
+/// Check if an import with the given module + complete binding shape already exists.
+pub fn is_duplicate_with_namespace(
+    block: &ImportBlock,
+    module_path: &str,
+    names: &[String],
+    default_import: Option<&str>,
+    namespace_import: Option<&str>,
     type_only: bool,
 ) -> bool {
     let target_kind = if type_only {
@@ -203,18 +216,37 @@ pub fn is_duplicate(
             continue;
         }
 
-        // For side-effect imports or whole-module imports (no names, no default):
-        // module path match alone is sufficient.
+        // For side-effect imports (no names/default/namespace): module path
+        // match is sufficient only when the existing import is also a
+        // side-effect import. Namespace imports like `import * as fs from 'fs'`
+        // are distinct local bindings and must not be conflated with
+        // `import 'fs'`.
         if names.is_empty()
             && default_import.is_none()
+            && namespace_import.is_none()
             && imp.names.is_empty()
             && imp.default_import.is_none()
+            && imp.namespace_import.is_none()
         {
             return true;
         }
 
         // For side-effect imports specifically (TS/JS): module match is enough
-        if names.is_empty() && default_import.is_none() && imp.kind == ImportKind::SideEffect {
+        if names.is_empty()
+            && default_import.is_none()
+            && namespace_import.is_none()
+            && imp.kind == ImportKind::SideEffect
+        {
+            return true;
+        }
+
+        if names.is_empty()
+            && default_import.is_none()
+            && namespace_import.is_some()
+            && imp.names.is_empty()
+            && imp.default_import.is_none()
+            && imp.namespace_import.as_deref() == namespace_import
+        {
             return true;
         }
 
@@ -225,7 +257,7 @@ pub fn is_duplicate(
 
         // Check default import match
         if let Some(def) = default_import {
-            if imp.default_import.as_deref() == Some(def) {
+            if imp.default_import.as_deref() == Some(def) && imp.namespace_import.is_none() {
                 return true;
             }
         }
@@ -245,6 +277,14 @@ pub fn is_duplicate(
     }
 
     false
+}
+
+fn sort_named_specifiers(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        specifier_imported_name(a)
+            .cmp(specifier_imported_name(b))
+            .then_with(|| a.cmp(b))
+    });
 }
 
 /// Find the byte offset where a new import should be inserted.
@@ -706,7 +746,7 @@ fn generate_ts_import_line(
     // Named imports only
     if default_import.is_none() {
         let mut sorted_names = names.to_vec();
-        sorted_names.sort();
+        sort_named_specifiers(&mut sorted_names);
         let names_str = sorted_names.join(", ");
         return format!("import {type_prefix}{{ {names_str} }} from '{module_path}';");
     }
@@ -714,7 +754,7 @@ fn generate_ts_import_line(
     // Both default and named imports
     if let Some(def) = default_import {
         let mut sorted_names = names.to_vec();
-        sorted_names.sort();
+        sort_named_specifiers(&mut sorted_names);
         let names_str = sorted_names.join(", ");
         return format!("import {type_prefix}{def}, {{ {names_str} }} from '{module_path}';");
     }
@@ -1626,6 +1666,40 @@ import { Config } from '../config';
     }
 
     #[test]
+    fn dedup_namespace_import_distinct_from_side_effect_import() {
+        let side_effect_source = "import 'fs';\n";
+        let (_, side_effect_block) = parse_ts(side_effect_source);
+        assert!(!is_duplicate_with_namespace(
+            &side_effect_block,
+            "fs",
+            &[],
+            None,
+            Some("fs"),
+            false
+        ));
+
+        let namespace_source = "import * as fs from 'fs';\n";
+        let (_, namespace_block) = parse_ts(namespace_source);
+        assert!(!is_duplicate(&namespace_block, "fs", &[], None, false));
+        assert!(is_duplicate_with_namespace(
+            &namespace_block,
+            "fs",
+            &[],
+            None,
+            Some("fs"),
+            false
+        ));
+        assert!(!is_duplicate_with_namespace(
+            &namespace_block,
+            "fs",
+            &[],
+            None,
+            Some("other"),
+            false
+        ));
+    }
+
+    #[test]
     fn dedup_type_vs_value() {
         let source = "import { FC } from 'react';\n";
         let (_, block) = parse_ts(source);
@@ -1651,6 +1725,26 @@ import { Config } from '../config';
             false,
         );
         assert_eq!(line, "import { useEffect, useState } from 'react';");
+    }
+
+    #[test]
+    fn generate_named_import_sorts_by_imported_name() {
+        let line = generate_import_line(
+            LangId::TypeScript,
+            "x",
+            &[
+                "useState".to_string(),
+                "type Foo".to_string(),
+                "stdin as input".to_string(),
+                "type Bar".to_string(),
+            ],
+            None,
+            false,
+        );
+        assert_eq!(
+            line,
+            "import { type Bar, type Foo, stdin as input, useState } from 'x';"
+        );
     }
 
     #[test]

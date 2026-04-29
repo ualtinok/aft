@@ -1228,3 +1228,186 @@ fn organize_imports_ts_aliased_and_bare_are_not_duplicates() {
     fs::remove_file(&file).ok();
     aft.shutdown();
 }
+
+#[test]
+fn organize_imports_ts_preserves_namespace_and_side_effect_imports() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("namespace_side_effect_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import 'fs'\n\
+         import * as fs from 'fs'\n\
+         \n\
+         export const exists = fs.existsSync\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "namespace-side-effect-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("import 'fs';"),
+        "side-effect import must survive alongside namespace import. got:\n{content}"
+    );
+    assert!(
+        content.contains("import * as fs from 'fs';"),
+        "namespace import must not be dedup'd as a side-effect import. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_preserves_side_effect_and_namespace_imports_reverse_order() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("side_effect_namespace_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import * as fs from 'fs'\n\
+         import 'fs'\n\
+         \n\
+         export const exists = fs.existsSync\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "side-effect-namespace-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("import 'fs';"),
+        "side-effect import must survive when namespace import appears first. got:\n{content}"
+    );
+    assert!(
+        content.contains("import * as fs from 'fs';"),
+        "namespace import must survive when side-effect import appears second. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_dedupes_identical_namespace_imports() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("namespace_dedup_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import * as fs from 'fs'\n\
+         import * as fs from 'fs'\n\
+         \n\
+         export const exists = fs.existsSync\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "namespace-dedup-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        content.matches("import * as fs from 'fs';").count(),
+        1,
+        "identical namespace imports should dedupe. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_keeps_distinct_namespace_aliases() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("namespace_aliases_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import * as foo from 'fs'\n\
+         import * as bar from 'fs'\n\
+         \n\
+         export const a = foo.existsSync\n\
+         export const b = bar.readFileSync\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "namespace-aliases-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("import * as foo from 'fs';"),
+        "namespace alias `foo` must survive. got:\n{content}"
+    );
+    assert!(
+        content.contains("import * as bar from 'fs';"),
+        "namespace alias `bar` must survive. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
+#[test]
+fn organize_imports_ts_sorts_named_specifiers_by_imported_name() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("specifier_sort_ts_{}.ts", n));
+
+    fs::write(
+        &file,
+        "import { useState, type Foo, stdin as input, type Bar } from 'x'\n\
+         \n\
+         export const value = [input, useState]\n",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "specifier-sort-ts", &file_str);
+    assert_eq!(resp["success"], true, "organize succeeded: {:?}", resp);
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("import { type Bar, type Foo, stdin as input, useState } from 'x';"),
+        "named specifiers should sort by imported name, ignoring `type` and aliases. got:\n{content}"
+    );
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}

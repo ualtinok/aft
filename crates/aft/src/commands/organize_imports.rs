@@ -247,6 +247,7 @@ struct OrganizedImport {
     module_path: String,
     names: Vec<String>,
     default_import: Option<String>,
+    namespace_import: Option<String>,
     kind: ImportKind,
 }
 
@@ -266,18 +267,22 @@ fn organize_generic_group(
     sorted.sort_by(|a, b| a.module_path.cmp(&b.module_path));
 
     for imp in sorted {
-        // Build dedup key: module_path + kind + sorted names + default
+        // Build dedup key: module_path + kind + sorted names + default + namespace.
+        // Namespace imports introduce local bindings, so different aliases are
+        // distinct and side-effect imports are not duplicates of namespace
+        // imports from the same module.
         let names_key = {
             let mut n = imp.names.clone();
-            n.sort();
+            sort_named_specifiers(&mut n);
             n.join(",")
         };
         let dedup_key = format!(
-            "{}|{:?}|{}|{}",
+            "{}|{:?}|{}|{}|{}",
             imp.module_path,
             imp.kind,
             names_key,
-            imp.default_import.as_deref().unwrap_or("")
+            imp.default_import.as_deref().unwrap_or(""),
+            imp.namespace_import.as_deref().unwrap_or("")
         );
 
         if seen.contains(&dedup_key) {
@@ -287,17 +292,26 @@ fn organize_generic_group(
         seen.insert(dedup_key);
 
         let mut names = imp.names.clone();
-        names.sort();
+        sort_named_specifiers(&mut names);
 
         organized.push(OrganizedImport {
             module_path: imp.module_path.clone(),
             names,
             default_import: imp.default_import.clone(),
+            namespace_import: imp.namespace_import.clone(),
             kind: imp.kind,
         });
     }
 
     (organized, removed)
+}
+
+fn sort_named_specifiers(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        imports::specifier_imported_name(a)
+            .cmp(imports::specifier_imported_name(b))
+            .then_with(|| a.cmp(b))
+    });
 }
 
 /// Organize Rust use declarations: sort, deduplicate, and merge common prefixes.
@@ -414,6 +428,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                     } else {
                         None
                     },
+                    namespace_import: None,
                     kind: up.kind,
                 });
             }
@@ -447,6 +462,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
             } else {
                 None
             },
+            namespace_import: None,
             kind,
         });
     }
@@ -503,6 +519,14 @@ fn generate_organized_line(imp: &OrganizedImport, lang: LangId) -> String {
             } else {
                 format!("import \"{}\"", imp.module_path)
             }
+        }
+        LangId::TypeScript | LangId::Tsx | LangId::JavaScript
+            if imp.names.is_empty()
+                && imp.default_import.is_none()
+                && imp.namespace_import.is_some() =>
+        {
+            let namespace = imp.namespace_import.as_deref().unwrap_or_default();
+            format!("import * as {} from '{}';", namespace, imp.module_path)
         }
         _ => {
             // TS/JS/TSX/Python — use the standard generator
