@@ -1,6 +1,6 @@
 /**
  * aft_search — semantic (embedding-based) code search.
- * Only registered when config.experimental_semantic_search is enabled AND
+ * Only registered when config.semantic_search is enabled AND
  * the ONNX runtime / configured backend is available.
  */
 

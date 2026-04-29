@@ -21,8 +21,8 @@
     "typescript": "biome"
   },
 
-  // Enable experimental indexed search for grep and glob hoisting
-  "experimental_search_index": true
+  // Enable indexed search for grep and glob hoisting
+  "search_index": true
 
   // Example: lower the call-graph file cap. Default is 20000 which this repo
   // sits comfortably under — uncomment to experiment with tighter limits.

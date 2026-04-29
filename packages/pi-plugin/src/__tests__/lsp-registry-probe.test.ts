@@ -104,7 +104,6 @@ describe("pickEligibleVersion", () => {
       {
         time: {
           "1.0.0": isoDaysAgo(now, 30),
-          // biome-ignore lint/suspicious/noExplicitAny: testing defensive type guard
           "1.1.0": 12345 as any,
         },
       },

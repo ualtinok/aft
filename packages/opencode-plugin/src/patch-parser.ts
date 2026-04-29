@@ -323,8 +323,22 @@ export function applyUpdateChunks(
       replacements.push([found, pattern.length, newSlice]);
       lineIndex = found + pattern.length;
     } else {
+      // Diagnose: did the agent send a hunk whose REWRITE is already in the
+      // file? That happens when an agent partially applied the patch in a
+      // prior turn (e.g. via `edit`) and then re-runs `apply_patch` against
+      // an already-mutated file. Surface that explicitly so the agent
+      // doesn't waste a turn re-reading the file to figure it out.
+      const newSliceTrimmed = newSlice.filter((line) => line.trim().length > 0);
+      const alreadyApplied =
+        newSliceTrimmed.length > 0 &&
+        seekSequence(originalLines, newSliceTrimmed, 0, chunk.is_end_of_file) !== -1;
+      const hint = alreadyApplied
+        ? "\n\nHint: the replacement content for this hunk already appears in the file. " +
+          "The patch may have been partially applied in a prior turn — re-read the file " +
+          "to confirm which hunks still need to apply."
+        : "";
       throw new Error(
-        `Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}`,
+        `Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}${hint}`,
       );
     }
   }

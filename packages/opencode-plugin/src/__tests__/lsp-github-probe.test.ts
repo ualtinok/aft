@@ -94,7 +94,6 @@ describe("pickEligibleRelease", () => {
 
   test("ignores releases without published_at", () => {
     const releases = [
-      // biome-ignore lint/suspicious/noExplicitAny: simulating malformed payload
       { tag_name: "v1.0.0", draft: false, prerelease: false } as any,
       release({ tag: "v0.9.0", ageDays: 15 }),
     ];

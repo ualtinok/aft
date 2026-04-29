@@ -347,6 +347,14 @@ fn outline_skip_reason(path: &Path) -> Option<&'static str> {
         return Some("unsupported_language");
     }
 
+    // Honest reporting: tree-sitter is fault-tolerant and `list_symbols()` will
+    // return whatever symbols it can recover from a partially-broken file rather
+    // than surfacing a parse error. To honor the contract that parse-error files
+    // land in `skipped_files` (not the rendered outline), we still run
+    // `validate_syntax()` here. The cost is one extra parse per file, but
+    // Track 0's parser cache (per-language reused `Parser`, global compiled
+    // `Query`) makes that parse cheap relative to the full symbol-extraction
+    // pass that follows.
     match edit::validate_syntax(path) {
         Ok(Some(false)) => Some("parse_error"),
         Ok(Some(true)) | Ok(None) => None,

@@ -160,13 +160,30 @@ pub fn run_external_tool(
     }
 }
 
-/// TTL for tool availability cache entries.
+/// TTL for tool availability and resolution cache entries.
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(60);
 
-static TOOL_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolCacheKey {
+    command: String,
+    project_root: PathBuf,
+}
+
+static TOOL_RESOLUTION_CACHE: std::sync::LazyLock<
+    Mutex<HashMap<ToolCacheKey, (Option<PathBuf>, Instant)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static TOOL_AVAILABILITY_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn tool_cache_key(command: &str, project_root: Option<&Path>) -> String {
+fn tool_cache_key(command: &str, project_root: Option<&Path>) -> ToolCacheKey {
+    ToolCacheKey {
+        command: command.to_string(),
+        project_root: project_root.map(Path::to_path_buf).unwrap_or_default(),
+    }
+}
+
+fn availability_cache_key(command: &str, project_root: Option<&Path>) -> String {
     let root = project_root
         .map(|path| path.to_string_lossy())
         .unwrap_or_default();
@@ -174,7 +191,10 @@ fn tool_cache_key(command: &str, project_root: Option<&Path>) -> String {
 }
 
 pub fn clear_tool_cache() {
-    if let Ok(mut cache) = TOOL_CACHE.lock() {
+    if let Ok(mut cache) = TOOL_RESOLUTION_CACHE.lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = TOOL_AVAILABILITY_CACHE.lock() {
         cache.clear();
     }
 }
@@ -182,11 +202,30 @@ pub fn clear_tool_cache() {
 /// Resolve a tool by checking node_modules/.bin relative to project_root, then PATH.
 /// Returns the full path to the tool if found, otherwise None.
 fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
+    let key = tool_cache_key(command, project_root);
+    if let Ok(cache) = TOOL_RESOLUTION_CACHE.lock() {
+        if let Some((resolved, checked_at)) = cache.get(&key) {
+            if checked_at.elapsed() < TOOL_CACHE_TTL {
+                return resolved
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    let resolved = resolve_tool_uncached(command, project_root);
+    if let Ok(mut cache) = TOOL_RESOLUTION_CACHE.lock() {
+        cache.insert(key, (resolved.clone(), Instant::now()));
+    }
+    resolved.map(|path| path.to_string_lossy().to_string())
+}
+
+fn resolve_tool_uncached(command: &str, project_root: Option<&Path>) -> Option<PathBuf> {
     // 1. Check node_modules/.bin/<command> relative to project root
     if let Some(root) = project_root {
         let local_bin = root.join("node_modules").join(".bin").join(command);
         if local_bin.exists() {
-            return Some(local_bin.to_string_lossy().to_string());
+            return Some(local_bin);
         }
     }
 
@@ -205,7 +244,7 @@ fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         return if status.success() {
-                            Some(command.to_string())
+                            Some(PathBuf::from(command))
                         } else {
                             None
                         };
@@ -231,8 +270,8 @@ fn resolve_tool(command: &str, project_root: Option<&Path>) -> Option<String> {
 /// version from `ruff --version` (format: "ruff X.Y.Z") and require >= 0.1.2.
 /// Falls back to false if ruff is not found or version cannot be parsed.
 fn ruff_format_available(project_root: Option<&Path>) -> bool {
-    let key = tool_cache_key("ruff-format", project_root);
-    if let Ok(cache) = TOOL_CACHE.lock() {
+    let key = availability_cache_key("ruff-format", project_root);
+    if let Ok(cache) = TOOL_AVAILABILITY_CACHE.lock() {
         if let Some((available, checked_at)) = cache.get(&key) {
             if checked_at.elapsed() < TOOL_CACHE_TTL {
                 return *available;
@@ -241,7 +280,7 @@ fn ruff_format_available(project_root: Option<&Path>) -> bool {
     }
 
     let result = ruff_format_available_uncached(project_root);
-    if let Ok(mut cache) = TOOL_CACHE.lock() {
+    if let Ok(mut cache) = TOOL_AVAILABILITY_CACHE.lock() {
         cache.insert(key, (result, Instant::now()));
     }
     result
@@ -1621,6 +1660,46 @@ mod tests {
         assert!(cmd.contains("biome"), "expected biome in cmd, got: {}", cmd);
         assert!(args.contains(&"format".to_string()));
         assert!(args.contains(&"--write".to_string()));
+    }
+
+    #[test]
+    fn resolve_tool_caches_positive_result_until_clear() {
+        clear_tool_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let tool = bin_dir.join("aft-cache-hit-tool");
+        fs::write(&tool, "#!/bin/sh\necho cached").unwrap();
+
+        let first = resolve_tool("aft-cache-hit-tool", Some(dir.path()));
+        assert_eq!(first.as_deref(), Some(tool.to_string_lossy().as_ref()));
+
+        fs::remove_file(&tool).unwrap();
+        let cached = resolve_tool("aft-cache-hit-tool", Some(dir.path()));
+        assert_eq!(cached, first);
+
+        clear_tool_cache();
+        assert!(resolve_tool("aft-cache-hit-tool", Some(dir.path())).is_none());
+    }
+
+    #[test]
+    fn resolve_tool_caches_negative_result_until_clear() {
+        clear_tool_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules").join(".bin");
+        let tool = bin_dir.join("aft-cache-miss-tool");
+
+        assert!(resolve_tool("aft-cache-miss-tool", Some(dir.path())).is_none());
+
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(&tool, "#!/bin/sh\necho cached").unwrap();
+        assert!(resolve_tool("aft-cache-miss-tool", Some(dir.path())).is_none());
+
+        clear_tool_cache();
+        assert_eq!(
+            resolve_tool("aft-cache-miss-tool", Some(dir.path())).as_deref(),
+            Some(tool.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

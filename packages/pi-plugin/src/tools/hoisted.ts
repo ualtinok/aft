@@ -67,6 +67,12 @@ const EditParams = Type.Object({
   occurrence: Type.Optional(
     Type.Number({ description: "0-indexed occurrence when multiple matches exist" }),
   ),
+  appendContent: Type.Optional(
+    Type.String({
+      description:
+        "Append text to the end of the file (creates the file if missing, parent dirs auto-created). When set, oldString/newString are ignored.",
+    }),
+  ),
 });
 
 const GrepParams = Type.Object({
@@ -193,10 +199,11 @@ export function registerHoistedTools(
       description:
         "Find-and-replace edit with progressive fuzzy matching (handles whitespace and Unicode drift). Uses `filePath`, `oldString`, `newString`. Errors on multiple matches — use `occurrence` to pick one, or `replaceAll: true`. Always returns LSP diagnostics inline.",
       promptSnippet:
-        "Targeted find-and-replace (uses filePath/oldString/newString; occurrence or replaceAll for disambiguation; fuzzy whitespace matching)",
+        "Targeted find-and-replace (uses filePath/oldString/newString; occurrence or replaceAll for disambiguation; fuzzy whitespace matching). Pass appendContent to append to a file (creates if missing).",
       promptGuidelines: [
         "Prefer edit over write when changing part of an existing file.",
         "Include enough surrounding context in oldString to make the match unique, or set replaceAll/occurrence explicitly.",
+        "Use appendContent (instead of read+write) when adding text to the end of a file.",
       ],
       parameters: EditParams,
       async execute(
@@ -207,6 +214,23 @@ export function registerHoistedTools(
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
+
+        // Append mode: explicitly route through the Rust `append` op, which
+        // creates the file (and parent dirs) when missing and appends without
+        // reading the whole file first. oldString/newString are ignored when
+        // appendContent is set, matching the OpenCode-side hoisted edit shape.
+        if (typeof params.appendContent === "string") {
+          const req: Record<string, unknown> = {
+            op: "append",
+            file: params.filePath,
+            append_content: params.appendContent,
+            diagnostics: true,
+            include_diff: true,
+          };
+          const response = await callBridge(bridge, "edit_match", req, extCtx);
+          return buildMutationResult(params.filePath, response);
+        }
+
         const req: Record<string, unknown> = {
           file: params.filePath,
           match: params.oldString ?? "",

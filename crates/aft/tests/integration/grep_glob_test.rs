@@ -28,7 +28,7 @@ fn configure(aft: &mut AftProcess, root: &Path) {
 
 fn configure_with_index(aft: &mut AftProcess, root: &Path) {
     let resp = aft.send(&format!(
-        r#"{{"id":"cfg-index","command":"configure","project_root":"{}","experimental_search_index":true}}"#,
+        r#"{{"id":"cfg-index","command":"configure","project_root":"{}","search_index":true}}"#,
         root.display()
     ));
     assert_eq!(resp["success"], true, "configure should succeed: {resp:?}");

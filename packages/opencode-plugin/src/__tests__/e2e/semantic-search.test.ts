@@ -79,7 +79,7 @@ maybeDescribe("e2e semantic search tool", () => {
       harness.binaryPath,
       { timeoutMs: 20_000 },
       {
-        experimental_semantic_search: options?.experimentalSemanticSearch ?? false,
+        semantic_search: options?.experimentalSemanticSearch ?? false,
         storage_dir: join(harness.tempDir, ".storage"),
       },
     );

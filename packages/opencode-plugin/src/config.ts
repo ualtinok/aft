@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parse as parseJsonc } from "comment-json";
+import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { z } from "zod";
 import { error, log, warn } from "./logger.js";
 
@@ -103,64 +103,77 @@ const LspConfigSchema = z.object({
   versions: z.record(z.string().trim().min(1), z.string().trim().min(1)).optional(),
 });
 
-export const AftConfigSchema = z.object({
-  /** Whether to auto-format files after edits. Default: true. */
-  format_on_edit: z.boolean().optional(),
-  /** Auto-validate after edits: "syntax" (tree-sitter) or "full" (runs type checker). */
-  validate_on_edit: z.enum(["syntax", "full"]).optional(),
-  /** Per-language formatter overrides. Keys: "typescript", "python", "rust", "go". */
-  formatter: z.record(z.string(), FormatterEnum).optional(),
-  /** Per-language type checker overrides. Keys: "typescript", "python", "rust", "go". */
-  checker: z.record(z.string(), CheckerEnum).optional(),
-  /**
-   * Replace opencode's built-in read/write/edit/apply_patch tools with AFT's
-   * faster Rust implementations. Adds backup tracking, auto-formatting,
-   * inline diagnostics, and permission checks. Default: true.
-   */
-  hoist_builtin_tools: z.boolean().optional(),
-  /**
-   * Tool surface level. Controls which tools are registered:
-   * - "minimal":     aft_outline, aft_zoom, aft_safety (no hoisting)
-   * - "recommended": minimal + hoisted read/write/edit/apply_patch + lsp_diagnostics
-   *                  + ast_grep_search/replace + aft_import (default)
-   * - "all":         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
-   */
-  tool_surface: z.enum(["minimal", "recommended", "all"]).optional(),
-  /**
-   * List of tool names to disable. Disabled tools are not registered with
-   * OpenCode and will be invisible to agents. Use exact tool names, e.g.
-   * ["aft_navigate", "aft_refactor"]. Hoisted names ("read", "edit") and
-   * aft-prefixed names both work. Applied after tool_surface filtering.
-   */
-  disabled_tools: z.array(z.string()).optional(),
-  /**
-   * Restrict file operations to within the project root directory.
-   * When true, write-capable commands reject paths outside project_root.
-   * Default: false (matches OpenCode's built-in behavior).
-   */
-  restrict_to_project_root: z.boolean().optional(),
-  /** Enable experimental indexed search for grep and glob hoisting. Default: false. */
-  experimental_search_index: z.boolean().optional(),
-  /** Enable experimental semantic search. Default: false. */
-  experimental_semantic_search: z.boolean().optional(),
-  /** Enable experimental ty LSP support. Default: false. */
-  experimental_lsp_ty: z.boolean().optional(),
-  /** User-defined and built-in LSP server configuration. */
-  lsp: LspConfigSchema.optional(),
-  /** Allow URL fetch tools to request private/link-local hosts. Default: false. */
-  url_fetch_allow_private: z.boolean().optional(),
-  /** External semantic backend configuration for embedding and retrieval. */
-  semantic: SemanticConfigSchema.optional(),
-  /**
-   * Maximum source files allowed for call-graph operations (callers, trace_to,
-   * trace_data, impact). Projects above this size return `project_too_large`
-   * instead of attempting the reverse-index build. Does not affect grep,
-   * glob, read, edit, or any other tool. Default: 20000.
-   */
-  max_callgraph_files: z.number().int().positive().optional(),
-  /** Auto-refresh OpenCode's cached @cortexkit/aft-opencode package when a newer channel version exists. */
-  auto_update: z.boolean().optional(),
+const ExperimentalConfigSchema = z.object({
+  bash: z
+    .object({
+      rewrite: z.boolean().optional(),
+      compress: z.boolean().optional(),
+      background: z.boolean().optional(),
+    })
+    .optional(),
+  lsp_ty: z.boolean().optional(),
 });
+
+export const AftConfigSchema = z
+  .object({
+    /** Whether to auto-format files after edits. Default: true. */
+    format_on_edit: z.boolean().optional(),
+    /** Auto-validate after edits: "syntax" (tree-sitter) or "full" (runs type checker). */
+    validate_on_edit: z.enum(["syntax", "full"]).optional(),
+    /** Per-language formatter overrides. Keys: "typescript", "python", "rust", "go". */
+    formatter: z.record(z.string(), FormatterEnum).optional(),
+    /** Per-language type checker overrides. Keys: "typescript", "python", "rust", "go". */
+    checker: z.record(z.string(), CheckerEnum).optional(),
+    /**
+     * Replace opencode's built-in read/write/edit/apply_patch tools with AFT's
+     * faster Rust implementations. Adds backup tracking, auto-formatting,
+     * inline diagnostics, and permission checks. Default: true.
+     */
+    hoist_builtin_tools: z.boolean().optional(),
+    /**
+     * Tool surface level. Controls which tools are registered:
+     * - "minimal":     aft_outline, aft_zoom, aft_safety (no hoisting)
+     * - "recommended": minimal + hoisted read/write/edit/apply_patch + lsp_diagnostics
+     *                  + ast_grep_search/replace + aft_import (default)
+     * - "all":         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
+     */
+    tool_surface: z.enum(["minimal", "recommended", "all"]).optional(),
+    /**
+     * List of tool names to disable. Disabled tools are not registered with
+     * OpenCode and will be invisible to agents. Use exact tool names, e.g.
+     * ["aft_navigate", "aft_refactor"]. Hoisted names ("read", "edit") and
+     * aft-prefixed names both work. Applied after tool_surface filtering.
+     */
+    disabled_tools: z.array(z.string()).optional(),
+    /**
+     * Restrict file operations to within the project root directory.
+     * When true, write-capable commands reject paths outside project_root.
+     * Default: false (matches OpenCode's built-in behavior).
+     */
+    restrict_to_project_root: z.boolean().optional(),
+    /** Enable indexed search for grep and glob hoisting. Default: false. */
+    search_index: z.boolean().optional(),
+    /** Enable semantic search. Default: false. */
+    semantic_search: z.boolean().optional(),
+    /** Experimental opt-in features. Default: all false. */
+    experimental: ExperimentalConfigSchema.optional(),
+    /** User-defined and built-in LSP server configuration. */
+    lsp: LspConfigSchema.optional(),
+    /** Allow URL fetch tools to request private/link-local hosts. Default: false. */
+    url_fetch_allow_private: z.boolean().optional(),
+    /** External semantic backend configuration for embedding and retrieval. */
+    semantic: SemanticConfigSchema.optional(),
+    /**
+     * Maximum source files allowed for call-graph operations (callers, trace_to,
+     * trace_data, impact). Projects above this size return `project_too_large`
+     * instead of attempting the reverse-index build. Does not affect grep,
+     * glob, read, edit, or any other tool. Default: 20000.
+     */
+    max_callgraph_files: z.number().int().positive().optional(),
+    /** Auto-refresh OpenCode's cached @cortexkit/aft-opencode package when a newer channel version exists. */
+    auto_update: z.boolean().optional(),
+  })
+  .strict();
 
 export type AftConfig = z.infer<typeof AftConfigSchema>;
 
@@ -183,6 +196,13 @@ export interface ConfigureLspOverrides {
   disabled_lsp?: string[];
 }
 
+export interface ConfigureExperimentalOverrides {
+  experimental_bash_rewrite?: boolean;
+  experimental_bash_compress?: boolean;
+  experimental_bash_background?: boolean;
+  experimental_lsp_ty?: boolean;
+}
+
 function normalizeLspExtension(extension: string): string {
   return extension.trim().replace(/^\.+/, "");
 }
@@ -190,7 +210,7 @@ function normalizeLspExtension(extension: string): string {
 export function resolveLspConfigForConfigure(config: AftConfig): ConfigureLspOverrides {
   const overrides: ConfigureLspOverrides = {};
   const disabled = new Set(config.lsp?.disabled ?? []);
-  let experimentalTy = config.experimental_lsp_ty;
+  let experimentalTy = config.experimental?.lsp_ty;
 
   // Server IDs match Rust's `ServerKind::id_str()` — built-in Pyright is
   // identified as "python", and the experimental Astral checker as "ty".
@@ -238,6 +258,186 @@ export function resolveLspConfigForConfigure(config: AftConfig): ConfigureLspOve
   }
 
   return overrides;
+}
+
+export function resolveExperimentalConfigForConfigure(
+  config: AftConfig,
+): ConfigureExperimentalOverrides {
+  const overrides: ConfigureExperimentalOverrides = {};
+  if (config.experimental?.bash?.rewrite !== undefined) {
+    overrides.experimental_bash_rewrite = config.experimental.bash.rewrite;
+  }
+  if (config.experimental?.bash?.compress !== undefined) {
+    overrides.experimental_bash_compress = config.experimental.bash.compress;
+  }
+  if (config.experimental?.bash?.background !== undefined) {
+    overrides.experimental_bash_background = config.experimental.bash.background;
+  }
+  if (config.experimental?.lsp_ty !== undefined) {
+    overrides.experimental_lsp_ty = config.experimental.lsp_ty;
+  }
+  return overrides;
+}
+
+type Logger = {
+  log: (message: string) => void;
+  warn: (message: string) => void;
+};
+
+type MigrationTarget = {
+  oldKey: string;
+  newPath: readonly string[];
+};
+
+const CONFIG_MIGRATIONS: readonly MigrationTarget[] = [
+  { oldKey: "experimental_search_index", newPath: ["search_index"] },
+  { oldKey: "experimental_semantic_search", newPath: ["semantic_search"] },
+  { oldKey: "experimental_lsp_ty", newPath: ["experimental", "lsp_ty"] },
+  { oldKey: "experimental_bash_rewrite", newPath: ["experimental", "bash", "rewrite"] },
+  { oldKey: "experimental_bash_compress", newPath: ["experimental", "bash", "compress"] },
+  { oldKey: "experimental_bash_background", newPath: ["experimental", "bash", "background"] },
+];
+
+function isWritableMigrationError(errorValue: unknown): boolean {
+  const code = (errorValue as { code?: unknown })?.code;
+  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+}
+
+/**
+ * Pulls all `//` line comments and `/* ... *​/` block comments out of a JSONC
+ * source string. Inline trailing comments are kept verbatim; block comments
+ * are normalized to one line. Used as a backup safety net during migration so
+ * comments attached to deleted/reshaped keys don't disappear silently — any
+ * captured comment that doesn't survive the comment-json round-trip is
+ * prepended to the rewritten file.
+ */
+function extractCommentsForPreservation(content: string): string[] {
+  const comments: string[] = [];
+  // Match `//` line comments — both standalone (own-line) and inline trailing
+  // (after a value). Stripping any leading whitespace gives us a normalized
+  // form that we can dedupe against the rewritten file later.
+  const linePattern = /\/\/[^\n]*/g;
+  for (const match of content.match(linePattern) ?? []) {
+    comments.push(match.trim());
+  }
+  // Block comments may span multiple lines; collapse internal whitespace so
+  // they fit on a single preservation line if we have to relocate them.
+  const blockPattern = /\/\*[\s\S]*?\*\//g;
+  for (const match of content.match(blockPattern) ?? []) {
+    comments.push(match.replace(/\s+/g, " ").trim());
+  }
+  return comments;
+}
+
+function ensureRecordAtPath(root: Record<string, unknown>, path: readonly string[]) {
+  let current = root;
+  for (const segment of path) {
+    const existing = current[segment];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+      current[segment] = {};
+    }
+    current = current[segment] as Record<string, unknown>;
+  }
+  return current;
+}
+
+function hasPath(root: Record<string, unknown>, path: readonly string[]): boolean {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return false;
+    const record = current as Record<string, unknown>;
+    if (!Object.hasOwn(record, segment)) return false;
+    current = record[segment];
+  }
+  return true;
+}
+
+function setPath(root: Record<string, unknown>, path: readonly string[], value: unknown): void {
+  const parent = ensureRecordAtPath(root, path.slice(0, -1));
+  parent[path[path.length - 1]] = value;
+}
+
+function migrateRawConfig(
+  rawConfig: Record<string, unknown>,
+  configPath: string,
+  logger?: Logger,
+): string[] {
+  const oldKeys: string[] = [];
+  for (const migration of CONFIG_MIGRATIONS) {
+    if (!Object.hasOwn(rawConfig, migration.oldKey)) continue;
+
+    if (hasPath(rawConfig, migration.newPath)) {
+      logger?.warn(
+        `Config migration conflict at ${configPath}: ${migration.oldKey} ignored because ${migration.newPath.join(".")} is already set`,
+      );
+    } else {
+      setPath(rawConfig, migration.newPath, rawConfig[migration.oldKey]);
+    }
+    delete rawConfig[migration.oldKey];
+    oldKeys.push(migration.oldKey);
+  }
+  return oldKeys;
+}
+
+export function migrateAftConfigFile(
+  configPath: string,
+  logger: Logger = { log, warn },
+): { migrated: boolean; oldKeys: string[] } {
+  if (!existsSync(configPath)) {
+    return { migrated: false, oldKeys: [] };
+  }
+
+  let tmpPath: string | null = null;
+  let oldKeys: string[] = [];
+  try {
+    const content = readFileSync(configPath, "utf-8");
+    const rawConfig = parseJsonc<Record<string, unknown>>(content);
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+      return { migrated: false, oldKeys: [] };
+    }
+
+    oldKeys = migrateRawConfig(rawConfig, configPath, logger);
+    if (oldKeys.length === 0) {
+      return { migrated: false, oldKeys: [] };
+    }
+
+    // `comment-json` preserves comments natively through parse → mutate →
+    // stringify round-trip, including inline trailing comments and block
+    // comments — for any keys that survived the migration. Comments
+    // attached to keys we DELETED get dropped (they have no semantic anchor
+    // in the new shape). To keep user-authored prose around, we pull every
+    // comment out of the original file and prepend any that didn't make it
+    // into the rewritten form back onto the top so nothing is silently lost.
+    const serialized = `${stringifyJsonc(rawConfig, null, 2)}\n`;
+    const originalComments = extractCommentsForPreservation(content);
+    const droppedComments = originalComments.filter(
+      (comment) => !serialized.includes(comment.trim()),
+    );
+    const nextContent =
+      droppedComments.length > 0 ? `${droppedComments.join("\n")}\n${serialized}` : serialized;
+
+    tmpPath = `${configPath}.tmp.${process.pid}`;
+    writeFileSync(tmpPath, nextContent, "utf-8");
+    renameSync(tmpPath, configPath);
+    logger.log(`Migrated config at ${configPath}: removed ${oldKeys.join(", ")}`);
+    return { migrated: true, oldKeys };
+  } catch (err) {
+    if (tmpPath) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    if (isWritableMigrationError(err)) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        `Config migration could not write ${configPath} (${errorMsg}); using migrated config in memory`,
+      );
+      return { migrated: oldKeys.length > 0, oldKeys };
+    }
+    return { migrated: false, oldKeys: [] };
+  }
 }
 
 // JSONC parsing via comment-json (bundled at build time).
@@ -313,6 +513,7 @@ function loadConfigFromPath(configPath: string): AftConfig | null {
 
     const content = readFileSync(configPath, "utf-8");
     const rawConfig = parseJsonc<Record<string, unknown>>(content);
+    migrateRawConfig(rawConfig, configPath, { log, warn });
     const result = AftConfigSchema.safeParse(rawConfig);
 
     if (result.success) {
@@ -402,6 +603,33 @@ function mergeLspConfig(
   ) as AftConfig["lsp"];
 }
 
+function mergeExperimentalConfig(
+  baseExperimental: AftConfig["experimental"],
+  overrideExperimental: AftConfig["experimental"],
+): AftConfig["experimental"] {
+  const bash: Record<string, unknown> = {
+    ...baseExperimental?.bash,
+    ...overrideExperimental?.bash,
+  };
+  const experimental: Record<string, unknown> = {
+    ...baseExperimental,
+    ...overrideExperimental,
+  };
+
+  if (Object.values(bash).some((value) => value !== undefined)) {
+    experimental.bash = bash;
+  } else {
+    delete experimental.bash;
+  }
+  if (Object.values(experimental).every((value) => value === undefined)) {
+    return undefined;
+  }
+
+  return Object.fromEntries(
+    Object.entries(experimental).filter(([, value]) => value !== undefined),
+  ) as AftConfig["experimental"];
+}
+
 function getProjectLspStrippedKeys(lsp: AftConfig["lsp"]): string[] {
   if (!lsp) {
     return [];
@@ -435,9 +663,11 @@ const PROJECT_SAFE_TOP_LEVEL_FIELDS = new Set<keyof AftConfig>([
   "hoist_builtin_tools",
   "format_on_edit",
   "validate_on_edit",
-  "experimental_search_index",
-  "experimental_semantic_search",
-  "experimental_lsp_ty",
+  // Experimental flags: project-settable so users can enable globally
+  // and toggle per-project (or vice versa). Project value overrides user value.
+  "search_index",
+  "semantic_search",
+  "experimental",
   // "disabled_tools" handled separately — unioned via array merge.
   // "formatter"/"checker" handled separately — deep-merged.
   // "semantic"/"lsp" handled separately — strict field-level merge.
@@ -478,6 +708,7 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   const checker = { ...base.checker, ...override.checker };
   const semantic = mergeSemanticConfig(base.semantic, override.semantic);
   const lsp = mergeLspConfig(base.lsp, override.lsp);
+  const experimental = mergeExperimentalConfig(base.experimental, override.experimental);
 
   // STRICT ALLOWLIST: only project-safe top-level fields are inherited.
   // See PROJECT_SAFE_TOP_LEVEL_FIELDS above for the full security rationale.
@@ -490,6 +721,7 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
     ...(Object.keys(formatter).length > 0 ? { formatter } : {}),
     ...(Object.keys(checker).length > 0 ? { checker } : {}),
     ...(lsp ? { lsp } : {}),
+    experimental,
     // Always set semantic to the merge result (even if undefined) to prevent
     // override.semantic from leaking through any future spread above.
     semantic,
@@ -531,12 +763,16 @@ export function loadAftConfig(projectDirectory: string): AftConfig {
   // User-level config
   const configDir = getOpenCodeConfigDir();
   const userBasePath = join(configDir, "aft");
+  migrateAftConfigFile(`${userBasePath}.jsonc`);
+  migrateAftConfigFile(`${userBasePath}.json`);
   const userDetected = detectConfigFile(userBasePath);
   const userConfigPath =
     userDetected.format !== "none" ? userDetected.path : `${userBasePath}.json`;
 
   // Project-level config
   const projectBasePath = join(projectDirectory, ".opencode", "aft");
+  migrateAftConfigFile(`${projectBasePath}.jsonc`);
+  migrateAftConfigFile(`${projectBasePath}.json`);
   const projectDetected = detectConfigFile(projectBasePath);
   const projectConfigPath =
     projectDetected.format !== "none" ? projectDetected.path : `${projectBasePath}.json`;

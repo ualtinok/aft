@@ -3,7 +3,8 @@
  */
 
 import type { AgentToolResult, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { BinaryBridge } from "../bridge.js";
+import { ingestBgCompletions } from "../bg-notifications.js";
+import type { BinaryBridge, BridgeRequestOptions } from "../bridge.js";
 import type { PluginContext } from "../types.js";
 
 /**
@@ -63,6 +64,7 @@ export async function callBridge(
   command: string,
   params: Record<string, unknown> = {},
   extCtx?: ExtensionContext,
+  options?: BridgeRequestOptions,
 ): Promise<Record<string, unknown>> {
   const timeoutMs = timeoutForCommand(command);
   const merged: Record<string, unknown> = { ...params };
@@ -73,6 +75,7 @@ export async function callBridge(
   const sendOptions = {
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     configureWarningClient: extCtx,
+    ...options,
   };
   const response = await bridge.send(
     command,
@@ -86,6 +89,7 @@ export async function callBridge(
         : `${command} failed`;
     throw new Error(message);
   }
+  ingestBgCompletions(sessionId, response.bg_completions);
   return response;
 }
 

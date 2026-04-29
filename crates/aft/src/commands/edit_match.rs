@@ -1,6 +1,7 @@
 //! Handler for the `edit_match` command: content-based string matching with
 //! disambiguation for multiple occurrences.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::context::AppContext;
@@ -16,6 +17,7 @@ use crate::protocol::{RawRequest, Response};
 ///   - `occurrence` (integer, optional, 0-indexed) — select a specific occurrence (single-file only)
 ///   - `replace_all` (bool, optional) — replace all occurrences (default: false)
 ///   - `dry_run` (bool, optional) — preview changes without writing
+///   - `op` (string, optional) — when `append`, appends `append_content`/`appendContent`
 ///
 /// When `file` is a glob pattern:
 ///   - Applies match/replace across all matching files
@@ -27,6 +29,10 @@ use crate::protocol::{RawRequest, Response};
 ///   - Original single-file behavior
 ///   - Returns: `{ file, replacements: 1, syntax_valid, backup_id? }`
 pub fn handle_edit_match(req: &RawRequest, ctx: &AppContext) -> Response {
+    if req.params.get("op").and_then(|v| v.as_str()) == Some("append") {
+        return handle_append(req, ctx);
+    }
+
     let file = match req.params.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => {
@@ -79,6 +85,169 @@ pub fn handle_edit_match(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // Single-file path
     handle_single_file_edit_match(req, ctx, file, match_str, replacement)
+}
+
+fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
+    let file = match req
+        .params
+        .get("file")
+        .or_else(|| req.params.get("filePath"))
+        .and_then(|v| v.as_str())
+    {
+        Some(f) => f,
+        None => {
+            return Response::error(
+                &req.id,
+                "invalid_request",
+                "edit_match append: missing required param 'file'",
+            );
+        }
+    };
+
+    let append_content = match req
+        .params
+        .get("append_content")
+        .or_else(|| req.params.get("appendContent"))
+        .and_then(|v| v.as_str())
+    {
+        Some(content) => content,
+        None => {
+            return Response::error(
+                &req.id,
+                "invalid_request",
+                "edit_match append: missing required param 'appendContent'",
+            );
+        }
+    };
+
+    let create_dirs = req
+        .params
+        .get("create_dirs")
+        .or_else(|| req.params.get("createDirs"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let path = match ctx.validate_path(&req.id, Path::new(file)) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    if create_dirs {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    return Response::error(
+                        &req.id,
+                        "invalid_request",
+                        format!("edit_match append: failed to create directories: {}", error),
+                    );
+                }
+            }
+        }
+    }
+
+    let existed = path.exists();
+    let backup_id = if existed {
+        match edit::auto_backup(ctx, req.session(), path.as_path(), "edit_match: append") {
+            Ok(id) => id,
+            Err(error) => return Response::error(&req.id, error.code(), error.to_string()),
+        }
+    } else {
+        None
+    };
+
+    // Capture before-content for diff computation if requested. Only read it
+    // when the caller asked, since this allocates the whole file string.
+    let want_diff = edit::wants_diff(&req.params);
+    let before_content = if want_diff && existed {
+        std::fs::read_to_string(path.as_path()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let mut file_handle = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_path())
+    {
+        Ok(file_handle) => file_handle,
+        Err(error) => {
+            return Response::error(
+                &req.id,
+                "write_error",
+                format!("edit_match append: failed to open {}: {}", file, error),
+            );
+        }
+    };
+
+    if let Err(error) = file_handle.write_all(append_content.as_bytes()) {
+        return Response::error(
+            &req.id,
+            "write_error",
+            format!("edit_match append: failed to write {}: {}", file, error),
+        );
+    }
+
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) =
+            std::fs::set_permissions(path.as_path(), std::fs::Permissions::from_mode(0o644))
+        {
+            return Response::error(
+                &req.id,
+                "write_error",
+                format!(
+                    "edit_match append: failed to set permissions on {}: {}",
+                    file, error
+                ),
+            );
+        }
+    }
+
+    // Re-read final content for LSP notification + optional diff. Read once
+    // and reuse for both purposes.
+    let final_content = std::fs::read_to_string(path.as_path()).unwrap_or_default();
+
+    // Honor `diagnostics: true` like other write-style handlers (write,
+    // edit_match, edit_symbol). When false/absent, this still notifies the
+    // LSP layer that the file changed but doesn't wait for diagnostics.
+    let lsp_outcome = ctx.lsp_post_write(path.as_path(), &final_content, &req.params);
+
+    let mut result = serde_json::json!({
+        "ok": true,
+        "file": file,
+        "created": !existed,
+        "bytes_written": append_content.len(),
+    });
+
+    if let Some(id) = backup_id {
+        result["backup_id"] = serde_json::json!(id);
+    }
+
+    if want_diff {
+        // For new files, before-content is empty; compute_diff_info handles
+        // that correctly (additions = number of lines in append_content).
+        result["diff"] = edit::compute_diff_info(&before_content, &final_content);
+    }
+
+    // Reuse the standard WriteResult formatter so append's response carries
+    // the same `lsp_diagnostics`, `lsp_complete`, `lsp_pending_servers`, and
+    // `lsp_exited_servers` shape as `write` and `edit_match` find/replace.
+    if lsp_outcome.is_some() {
+        let write_result = edit::WriteResult {
+            syntax_valid: None,
+            formatted: false,
+            format_skipped_reason: None,
+            validate_requested: false,
+            validation_errors: Vec::new(),
+            validate_skipped_reason: None,
+            lsp_outcome,
+        };
+        write_result.append_lsp_diagnostics_to(&mut result);
+    }
+
+    Response::success(&req.id, result)
 }
 
 /// Returns true if the file path contains glob characters.

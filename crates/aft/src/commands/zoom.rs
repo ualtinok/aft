@@ -36,6 +36,13 @@ pub struct ZoomResponse {
     pub annotations: Annotations,
 }
 
+struct RawCall {
+    name: String,
+    line: u32,
+    start_byte: usize,
+    end_byte: usize,
+}
+
 /// Handle a `zoom` request.
 ///
 /// Expects `file`, `symbol` in request params, optional `context_lines` (default 3).
@@ -337,20 +344,20 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
         target.range.end_col,
     );
 
-    let raw_calls = extract_calls_in_range(
-        &resolved_source,
-        tree.root_node(),
-        target_byte_start,
-        target_byte_end,
-        lang,
-    );
+    let all_file_calls = extract_calls_with_ranges(&resolved_source, tree.root_node(), lang);
+
+    let raw_calls = all_file_calls
+        .iter()
+        .filter(|call| call.start_byte >= target_byte_start && call.end_byte <= target_byte_end);
     let calls_out: Vec<CallRef> = raw_calls
-        .into_iter()
-        .filter(|(name, _)| known_names.contains(&name.as_str()) && *name != target.name)
-        .map(|(name, line)| CallRef { name, line })
+        .filter(|call| known_names.contains(&call.name.as_str()) && call.name != target.name)
+        .map(|call| CallRef {
+            name: call.name.clone(),
+            line: call.line,
+        })
         .collect();
 
-    // called_by: scan all other symbols for calls to this symbol
+    // called_by: bucket the single file-wide call extraction by enclosing symbol range
     let mut called_by: Vec<CallRef> = Vec::new();
     for sym in &all_symbols {
         if sym.name == target.name && sym.range.start_line == target.range.start_line {
@@ -360,18 +367,14 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
             line_col_to_byte(&resolved_source, sym.range.start_line, sym.range.start_col);
         let sym_byte_end =
             line_col_to_byte(&resolved_source, sym.range.end_line, sym.range.end_col);
-        let calls = extract_calls_in_range(
-            &resolved_source,
-            tree.root_node(),
-            sym_byte_start,
-            sym_byte_end,
-            lang,
-        );
-        for (name, line) in calls {
-            if name == target.name {
+        for call in &all_file_calls {
+            if call.name == target.name
+                && call.start_byte >= sym_byte_start
+                && call.end_byte <= sym_byte_end
+            {
                 called_by.push(CallRef {
                     name: sym.name.clone(),
-                    line,
+                    line: call.line,
                 });
             }
         }
@@ -412,6 +415,7 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
 /// Extract call expression names within a byte range of the AST.
 ///
 /// Delegates to `crate::calls::extract_calls_in_range`.
+#[cfg(test)]
 fn extract_calls_in_range(
     source: &str,
     root: tree_sitter::Node,
@@ -420,6 +424,41 @@ fn extract_calls_in_range(
     lang: LangId,
 ) -> Vec<(String, u32)> {
     crate::calls::extract_calls_in_range(source, root, byte_start, byte_end, lang)
+}
+
+fn extract_calls_with_ranges(source: &str, root: tree_sitter::Node, lang: LangId) -> Vec<RawCall> {
+    let mut results = Vec::new();
+    let call_kinds = crate::calls::call_node_kinds(lang);
+    collect_calls_with_ranges(root, source, &call_kinds, &mut results);
+    results
+}
+
+fn collect_calls_with_ranges(
+    node: tree_sitter::Node,
+    source: &str,
+    call_kinds: &[&str],
+    results: &mut Vec<RawCall>,
+) {
+    if call_kinds.contains(&node.kind()) {
+        if let Some(name) = crate::calls::extract_callee_name(&node, source) {
+            results.push(RawCall {
+                name,
+                line: node.start_position().row as u32 + 1,
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+            });
+        }
+    }
+
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_calls_with_ranges(cursor.node(), source, call_kinds, results);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

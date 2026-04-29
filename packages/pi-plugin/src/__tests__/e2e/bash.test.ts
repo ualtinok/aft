@@ -1,0 +1,395 @@
+/**
+ * E2E coverage for Pi's hoisted bash tool.
+ *
+ * These tests intentionally exercise the real Rust binary through Pi's
+ * BinaryBridge-backed adapter. Pi has no permission system, so the OpenCode
+ * permission-scan e2e case is intentionally not mirrored here.
+ */
+
+/// <reference path="../../bun-test.d.ts" />
+
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { BridgePool } from "../../pool.js";
+import { registerBashTool } from "../../tools/bash.js";
+import type { PluginContext } from "../../types.js";
+import {
+  createHarness,
+  type Harness,
+  type MockExtensionContext,
+  type MockToolDef,
+  prepareBinary,
+} from "./helpers.js";
+
+const initialBinary = await prepareBinary();
+const maybeDescribe = initialBinary.binaryPath ? describe : describe.skip;
+
+interface BashDetails {
+  exit_code?: number;
+  task_id?: string;
+  bg_completions?: Array<{ task_id: string; status: string; exit_code?: number; command?: string }>;
+}
+
+interface BashStatusDetails {
+  success: boolean;
+  status: string;
+  exit_code?: number;
+  output_preview?: string;
+  command?: string;
+}
+
+interface BashKillDetails {
+  success: boolean;
+  status: string;
+}
+
+maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
+  let harnesses: Harness[] = [];
+
+  beforeAll(async () => {
+    await prepareBinary();
+  });
+
+  afterEach(async () => {
+    await Promise.allSettled(harnesses.map((harness) => harness.cleanup()));
+    harnesses = [];
+  });
+
+  async function harness(configOverrides: Record<string, unknown> = {}): Promise<Harness> {
+    const created = await createHarness(initialBinary, {
+      fixtureNames: [],
+      config: { search_index: false, ...toConfigureOverrides(configOverrides) },
+      timeoutMs: 60_000,
+    });
+    harnesses.push(created);
+    return created;
+  }
+
+  async function pluginHarness(configOverrides: Record<string, unknown> = {}) {
+    const h = await harness();
+    const pool = new BridgePool(
+      h.binaryPath,
+      { timeoutMs: 60_000 },
+      {
+        project_root: h.tempDir,
+        restrict_to_project_root: false,
+        storage_dir: join(h.tempDir, ".aft-storage"),
+        ...configOverrides,
+      },
+    );
+    const ctx: PluginContext = {
+      pool,
+      config: {} as PluginContext["config"],
+      storageDir: join(h.tempDir, ".aft-storage"),
+    };
+    const tools = new Map<string, MockToolDef>();
+    registerBashTool(
+      { registerTool: (tool: MockToolDef) => tools.set(tool.name, tool) } as never,
+      ctx,
+    );
+    const cleanup = h.cleanup;
+    Object.defineProperty(h, "cleanup", {
+      value: async () => {
+        await pool.shutdown();
+        await cleanup.call(h);
+      },
+    });
+    return {
+      h,
+      pool,
+      bash: tools.get("bash")!,
+      bashStatus: tools.get("bash_status")!,
+      bashKill: tools.get("bash_kill")!,
+    };
+  }
+
+  async function callBash(
+    bash: MockToolDef,
+    h: Harness,
+    params: Record<string, unknown>,
+  ): Promise<{ output: string; details: BashDetails }> {
+    const extCtx: MockExtensionContext = { cwd: h.tempDir, hasUI: false };
+    const result = await bash.execute(
+      `test-bash-${Date.now()}`,
+      params,
+      undefined,
+      undefined,
+      extCtx,
+    );
+    return { output: h.text(result), details: (result.details ?? {}) as BashDetails };
+  }
+
+  async function callTaskTool<TDetails>(
+    tool: MockToolDef,
+    h: Harness,
+    taskId: string,
+  ): Promise<{ output: string; details: TDetails }> {
+    const extCtx: MockExtensionContext = { cwd: h.tempDir, hasUI: false };
+    const result = await tool.execute(
+      `test-${tool.name}-${Date.now()}`,
+      { task_id: taskId },
+      undefined,
+      undefined,
+      extCtx,
+    );
+    return { output: h.text(result), details: result.details as TDetails };
+  }
+
+  test("foreground simple command returns output and exit code", async () => {
+    const { h, bash } = await pluginHarness();
+
+    const result = await callBash(bash, h, { command: "echo hello" });
+
+    expect(result.output).toBe("hello\n");
+    expect(result.details.exit_code).toBe(0);
+  });
+
+  test("foreground non-zero exit is a successful tool response", async () => {
+    const { h, bash } = await pluginHarness();
+
+    const result = await callBash(bash, h, { command: "false" });
+
+    expect(result.output).toBe("");
+    expect(result.details.exit_code).toBe(1);
+  });
+
+  test("foreground workdir is respected", async () => {
+    const { h, bash } = await pluginHarness();
+    const subdir = h.path("subdir");
+    await mkdir(subdir);
+
+    const result = await callBash(bash, h, { command: "pwd", workdir: subdir });
+
+    expect(result.output.trim()).toBe(await realpath(subdir));
+    expect(result.details.exit_code).toBe(0);
+  });
+
+  test("foreground timeout returns timed-out process exit without throwing", async () => {
+    const h = await harness();
+
+    const response = await h.bridge.send("bash", { command: "sleep 5", timeout: 1 });
+
+    expect(response.success).toBe(true);
+    expect(response.timed_out).toBe(true);
+    expect(response.exit_code).toBe(124);
+  });
+
+  test("rewrites cat to read with footer hint when enabled", async () => {
+    const h = await harness({ rewrite: true });
+    const filePath = h.path("notes.txt");
+    await writeFile(filePath, "alpha\nbeta\n", "utf8");
+
+    const response = await h.bridge.send("bash", { command: `cat ${filePath}`, compressed: false });
+
+    expect(response.id).toBeDefined();
+    expect(response.id).not.toBe("bash_rewrite");
+    expect(response.success).toBe(true);
+    expect(String(response.output)).toContain("1: alpha");
+    expect(String(response.output)).toContain("2: beta");
+    expect(String(response.output)).toContain("call the `read` tool directly next time");
+  }, 60_000);
+
+  test("rewrites grep -r to grep tool with footer hint when enabled", async () => {
+    const h = await harness({ rewrite: true });
+    await mkdir(h.path("src"));
+    await writeFile(h.path("src", "lib.ts"), "needle\nhaystack\n", "utf8");
+
+    const response = await h.bridge.send("bash", {
+      command: `grep -r needle ${h.path("src")}`,
+      compressed: false,
+    });
+
+    expect(response.id).toBeDefined();
+    expect(response.id).not.toBe("bash_rewrite");
+    expect(response.success).toBe(true);
+    expect(String(response.output)).toContain("lib.ts");
+    expect(String(response.output)).toContain("needle");
+    expect(String(response.output)).toContain("call the `grep` tool directly next time");
+  }, 60_000);
+
+  test("rewriter disabled runs cat as raw bash without footer", async () => {
+    const h = await harness({ rewrite: false });
+    const filePath = h.path("raw.txt");
+    await writeFile(filePath, "raw cat output\n", "utf8");
+
+    const response = await h.bridge.send("bash", { command: `cat ${filePath}`, compressed: false });
+
+    expect(response.success).toBe(true);
+    expect(response.output).toBe("raw cat output\n");
+    expect(String(response.output)).not.toContain("call the `read` tool directly next time");
+  });
+
+  test("generic compressor strips ANSI and collapses four-plus duplicate lines", async () => {
+    const h = await harness({ compress: true });
+
+    const response = await h.bridge.send("bash", {
+      command: "printf '\\033[31mred\\033[0m\\nred\\nred\\nred\\nred\\n'",
+    });
+
+    expect(response.success).toBe(true);
+    expect(response.output).toBe("red\n... (4 more)\n");
+  });
+
+  test("compressed false opts out of duplicate-line compression", async () => {
+    const h = await harness({ compress: true });
+
+    const response = await h.bridge.send("bash", {
+      command: "printf '\\033[31mred\\033[0m\\nred\\nred\\nred\\nred\\n'",
+      compressed: false,
+    });
+
+    expect(response.success).toBe(true);
+    expect(String(response.output)).toContain("red\nred\nred\nred");
+    expect(String(response.output)).not.toContain("... (4 more)");
+  });
+
+  test("background spawn returns task_id immediately", async () => {
+    const h = await harness({ background: true });
+    const started = Date.now();
+
+    const response = await h.bridge.send("bash", {
+      command: "sleep 1 && echo done",
+      background: true,
+    });
+
+    expect(response.success).toBe(true);
+    expect(response.status).toBe("running");
+    expect(typeof response.task_id).toBe("string");
+    expect(Date.now() - started).toBeLessThan(750);
+  });
+
+  test("bash_status reports running then completed output", async () => {
+    const h = await harness({ background: true });
+    const spawned = await h.bridge.send("bash", {
+      command: "sleep 0.3 && echo done",
+      background: true,
+    });
+    const taskId = String(spawned.task_id);
+
+    const running = await h.bridge.send("bash_status", { task_id: taskId });
+    expect(running.success).toBe(true);
+    expect(running.status).toBe("running");
+
+    const completed = await waitForStatus(h, taskId, "completed");
+    expect(completed.exit_code).toBe(0);
+    expect(completed.output_preview).toBe("done\n");
+  });
+
+  test("Pi bash_status tool reports running for an in-flight background task", async () => {
+    const { h, bash, bashStatus } = await pluginHarness({ experimental_bash_background: true });
+    const spawned = await callBash(bash, h, { command: "sleep 2 && echo done", background: true });
+    const taskId = String(spawned.details.task_id);
+
+    const status = await callTaskTool<BashStatusDetails>(bashStatus, h, taskId);
+
+    expect(status.output).toBe(`Task ${taskId}: running`);
+    expect(status.details.success).toBe(true);
+    expect(status.details.status).toBe("running");
+  });
+
+  test("Pi bash_status tool reports completed exit and output preview", async () => {
+    const { h, bash, bashStatus } = await pluginHarness({ experimental_bash_background: true });
+    const spawned = await callBash(bash, h, {
+      command: "sleep 0.2 && echo pi-done",
+      background: true,
+    });
+    const taskId = String(spawned.details.task_id);
+
+    const completed = await waitForToolStatus(h, bashStatus, taskId, "completed");
+
+    expect(completed.output).toContain(`Task ${taskId}: completed (exit 0)`);
+    expect(completed.output).toContain("pi-done");
+    expect(completed.details.success).toBe(true);
+    expect(completed.details.exit_code).toBe(0);
+    expect(completed.details.output_preview).toBe("pi-done\n");
+  });
+
+  test("bash_kill terminates a running task", async () => {
+    const h = await harness({ background: true });
+    const spawned = await h.bridge.send("bash", { command: "sleep 60", background: true });
+    const taskId = String(spawned.task_id);
+
+    const killed = await h.bridge.send("bash_kill", { task_id: taskId });
+    const status = await h.bridge.send("bash_status", { task_id: taskId });
+
+    expect(killed.success).toBe(true);
+    expect(killed.status).toBe("killed");
+    expect(status.status).toBe("killed");
+  });
+
+  test("Pi bash_kill tool terminates a running task and bash_status confirms killed", async () => {
+    const { h, bash, bashStatus, bashKill } = await pluginHarness({
+      experimental_bash_background: true,
+    });
+    const spawned = await callBash(bash, h, { command: "sleep 60", background: true });
+    const taskId = String(spawned.details.task_id);
+
+    const killed = await callTaskTool<BashKillDetails>(bashKill, h, taskId);
+    const status = await callTaskTool<BashStatusDetails>(bashStatus, h, taskId);
+
+    expect(killed.output).toBe(`Task ${taskId}: killed`);
+    expect(killed.details.success).toBe(true);
+    expect(killed.details.status).toBe("killed");
+    expect(status.output).toContain(`Task ${taskId}: killed`);
+    expect(status.details.status).toBe("killed");
+  });
+
+  test("background completions are no longer appended by the bash adapter", async () => {
+    const { h, pool, bash } = await pluginHarness({ experimental_bash_background: true });
+    const pluginBridge = pool.getBridge(h.tempDir);
+    const spawned = await pluginBridge.send("bash", { command: "echo bg-done", background: true });
+    const taskId = String(spawned.task_id);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const result = await callBash(bash, h, { command: "echo foreground" });
+
+    expect(result.output).toContain("foreground\n");
+    expect(result.output).not.toContain("Background task");
+    expect(result.output).not.toContain(taskId);
+    expect(result.output).not.toContain("echo bg-done");
+    expect(result.details.bg_completions).toBeUndefined();
+  });
+});
+
+function toConfigureOverrides(config: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(config.rewrite !== undefined ? { experimental_bash_rewrite: config.rewrite } : {}),
+    ...(config.compress !== undefined ? { experimental_bash_compress: config.compress } : {}),
+    ...(config.background !== undefined ? { experimental_bash_background: config.background } : {}),
+  };
+}
+
+async function waitForStatus(h: Harness, taskId: string, expected: string) {
+  const started = Date.now();
+  while (Date.now() - started < 5_000) {
+    const response = await h.bridge.send("bash_status", { task_id: taskId });
+    expect(response.success).toBe(true);
+    if (response.status === expected) return response;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for ${expected}`);
+}
+
+async function waitForToolStatus(
+  h: Harness,
+  bashStatus: MockToolDef,
+  taskId: string,
+  expected: string,
+): Promise<{ output: string; details: BashStatusDetails }> {
+  const started = Date.now();
+  while (Date.now() - started < 5_000) {
+    const response = await bashStatus.execute(
+      `test-bash-status-${Date.now()}`,
+      { task_id: taskId },
+      undefined,
+      undefined,
+      { cwd: h.tempDir, hasUI: false },
+    );
+    const result = { output: h.text(response), details: response.details as BashStatusDetails };
+    expect(result.details.success).toBe(true);
+    if (result.details.status === expected) return result;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for ${expected}`);
+}

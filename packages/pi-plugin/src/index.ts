@@ -16,7 +16,7 @@
  * AFT-specific:
  *   - aft_outline    Structural outline (symbols, headings) for files/URLs
  *   - aft_zoom       Symbol-level inspection with call-graph annotations
- *   - aft_search     Semantic search (when experimental_semantic_search=true)
+ *   - aft_search     Semantic search (when semantic_search=true)
  *   - aft_navigate   Call-graph navigation (callers, call_tree, impact, trace_to, trace_data)
  *   - aft_conflicts  One-call merge conflict inspection
  *   - aft_import     Language-aware import add/remove/organize
@@ -34,8 +34,17 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+  appendToolResultBgCompletions,
+  handleTurnEndBgCompletions,
+  resetBgWake,
+} from "./bg-notifications.js";
 import { registerStatusCommand } from "./commands/aft-status.js";
-import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
+import {
+  loadAftConfig,
+  resolveExperimentalConfigForConfigure,
+  resolveLspConfigForConfigure,
+} from "./config.js";
 import { log, warn } from "./logger.js";
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
@@ -43,12 +52,18 @@ import {
   discoverRelevantGithubServers,
   runGithubAutoInstall,
 } from "./lsp-github-install.js";
-import { type ConfigureWarning, deliverConfigureWarnings } from "./notifications.js";
+import {
+  type ConfigureWarning,
+  deliverConfigureWarnings,
+  sendFeatureAnnouncement,
+} from "./notifications.js";
 import { ensureOnnxRuntime, getManualInstallHint } from "./onnx-runtime.js";
 import { BridgePool } from "./pool.js";
 import { findBinary } from "./resolver.js";
 import { registerShutdownCleanup } from "./shutdown-hooks.js";
+import { resolveSessionId } from "./tools/_shared.js";
 import { registerAstTools } from "./tools/ast.js";
+import { registerBashTool } from "./tools/bash.js";
 import { registerConflictsTool } from "./tools/conflicts.js";
 import { registerFsTools } from "./tools/fs.js";
 import { registerHoistedTools } from "./tools/hoisted.js";
@@ -71,6 +86,11 @@ const PLUGIN_VERSION: string = (() => {
     return "0.0.0";
   }
 })();
+
+const ANNOUNCEMENT_VERSION = "0.18.0";
+const ANNOUNCEMENT_FEATURES: string[] = [
+  "v0.18.0 highlights\n\nHoisted bash with permission scan — your bash calls now flow through AFT with OpenCode's tree-sitter permission model preserved.\n\nThree new opt-in bash features behind experimental flags (default off):\n• experimental.bash.rewrite — common bash patterns (cat, grep, find, sed, ls) auto-rewrite to AFT tool calls with a footer hint.\n• experimental.bash.compress — RTK-style output compression for git, cargo, npm, bun, pnpm, pytest, tsc + generic ANSI/dedup/truncate fallback.\n• experimental.bash.background — bash({ background: true }) returns task_id; bash_status / bash_kill manage long-running tasks.\n\nConfig schema upgrade — auto-migration on first load:\n• experimental_search_index → top-level search_index (graduated)\n• experimental_semantic_search → top-level semantic_search (graduated)\n• experimental_lsp_ty → experimental.lsp_ty\n• experimental_bash_* → experimental.bash.*\n\nRun aft doctor to verify your config migrated cleanly.",
+];
 
 const ALL_ONLY_TOOLS = new Set([
   "aft_navigate",
@@ -163,10 +183,10 @@ function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
     hoistRead: ok("read"),
     hoistWrite: ok("write"),
     hoistEdit: ok("edit"),
-    hoistGrep: ok("grep") && config.experimental_search_index === true,
+    hoistGrep: ok("grep") && config.search_index === true,
     outline: ok("aft_outline"),
     zoom: ok("aft_zoom"),
-    semantic: ok("aft_search") && config.experimental_semantic_search === true,
+    semantic: ok("aft_search") && config.semantic_search === true,
     navigate: false,
     conflicts: ok("aft_conflicts"),
     importTool: ok("aft_import"),
@@ -222,7 +242,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // ONNX runtime for semantic search (optional, best-effort). `ensureOnnxRuntime`
   // handles unsupported platforms by returning null, so we don't need to pre-check.
   let ortDylibDir: string | null = null;
-  if (config.experimental_semantic_search) {
+  if (config.semantic_search) {
     try {
       ortDylibDir = await ensureOnnxRuntime(storageDir);
       if (!ortDylibDir) {
@@ -257,10 +277,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   if (config.formatter !== undefined) configOverrides.formatter = config.formatter;
   if (config.checker !== undefined) configOverrides.checker = config.checker;
   configOverrides.restrict_to_project_root = config.restrict_to_project_root ?? true;
-  if (config.experimental_search_index !== undefined)
-    configOverrides.experimental_search_index = config.experimental_search_index;
-  if (config.experimental_semantic_search !== undefined)
-    configOverrides.experimental_semantic_search = config.experimental_semantic_search;
+  if (config.search_index !== undefined) configOverrides.search_index = config.search_index;
+  if (config.semantic_search !== undefined)
+    configOverrides.semantic_search = config.semantic_search;
+  Object.assign(configOverrides, resolveExperimentalConfigForConfigure(config));
   Object.assign(configOverrides, resolveLspConfigForConfigure(config));
   if (config.semantic !== undefined) configOverrides.semantic = config.semantic;
   if (config.max_callgraph_files !== undefined)
@@ -366,9 +386,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   );
   const ctx: PluginContext = { pool, config, storageDir };
 
+  if (ANNOUNCEMENT_VERSION && ANNOUNCEMENT_FEATURES.length > 0) {
+    sendFeatureAnnouncement(ANNOUNCEMENT_VERSION, ANNOUNCEMENT_FEATURES, storageDir);
+  }
+
   const surface = resolveToolSurface(config);
 
-  // Hoisted tool overrides (replace Pi's built-in read/write/edit/grep with AFT versions).
+  // Hoisted tool overrides (replace Pi's built-in bash/read/write/edit/grep with AFT versions).
+  if (surface.hoistRead) {
+    registerBashTool(pi, ctx);
+  }
   registerHoistedTools(pi, ctx, surface);
 
   // AFT-specific tools
@@ -408,6 +435,51 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   // Slash command: /aft-status
   registerStatusCommand(pi, ctx);
+
+  (
+    pi.on as (
+      event: "tool_result",
+      handler: (
+        event: {
+          content: Array<
+            { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+          >;
+          details: unknown;
+          isError: boolean;
+        },
+        ctx: Parameters<typeof resolveSessionId>[0] & { cwd: string },
+      ) => unknown,
+    ) => void
+  )("tool_result", async (event, extCtx) => {
+    const content = await appendToolResultBgCompletions(
+      { ctx, directory: extCtx.cwd, sessionID: resolveSessionId(extCtx) },
+      event.content,
+    );
+    if (!content) return undefined;
+    return { content, details: event.details, isError: event.isError };
+  });
+
+  (
+    pi.on as (
+      event: "turn_end",
+      handler: (
+        event: unknown,
+        ctx: Parameters<typeof resolveSessionId>[0] & { cwd: string },
+      ) => unknown,
+    ) => void
+  )("turn_end", async (_event, extCtx) => {
+    await handleTurnEndBgCompletions({
+      ctx,
+      directory: extCtx.cwd,
+      sessionID: resolveSessionId(extCtx),
+      runtime: pi,
+    });
+  });
+
+  pi.on("input", (_event, extCtx) => {
+    resetBgWake(resolveSessionId(extCtx));
+    return { action: "continue" };
+  });
 
   // Clean up bridges on session shutdown.
   pi.on("session_shutdown", async () => {

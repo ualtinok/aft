@@ -22,7 +22,7 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
             }
             Some(_) => serde_json::json!({ "status": "building" }),
             None => {
-                let status = if ctx.config().experimental_search_index {
+                let status = if ctx.config().search_index {
                     "loading"
                 } else {
                     "disabled"
@@ -121,8 +121,8 @@ pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
                 "format_on_edit": config.format_on_edit,
                 "validate_on_edit": config.validate_on_edit.as_deref().unwrap_or("off"),
                 "restrict_to_project_root": config.restrict_to_project_root,
-                "experimental_search_index": config.experimental_search_index,
-                "experimental_semantic_search": config.experimental_semantic_search,
+                "search_index": config.search_index,
+                "semantic_search": config.semantic_search,
             },
             "search_index": search_index_info,
             "semantic_index": semantic_index_info,

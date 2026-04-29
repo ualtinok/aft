@@ -1,10 +1,11 @@
 /// <reference path="../bun-test.d.ts" />
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AftConfigSchema } from "../config.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const tempRoots = new Set<string>();
@@ -26,7 +27,9 @@ function createConfigFixture() {
     xdgConfigHome,
     projectDirectory,
     userConfigPath: join(userConfigDir, "aft.jsonc"),
+    userJsonPath: join(userConfigDir, "aft.json"),
     projectConfigPath: join(projectConfigDir, "aft.jsonc"),
+    projectJsonPath: join(projectConfigDir, "aft.json"),
   };
 }
 
@@ -213,6 +216,312 @@ describe("loadAftConfig", () => {
     // User's undefined preserved; project's false ignored.
     expect(config.auto_update).toBeUndefined();
     expect(result.stderr).toContain("Ignoring auto_update from project config");
+  });
+
+  // v0.18 bash hoisting features: nested experimental flags are project-settable.
+  test("user config can set experimental.bash.rewrite", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { rewrite: true } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(config).toMatchObject({ experimental: { bash: { rewrite: true } } });
+    expect(result.stderr).not.toContain("Ignoring");
+  });
+
+  test("project config can override experimental.bash.rewrite", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { rewrite: true } } }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({ experimental: { bash: { rewrite: false } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // Project's false value wins over user's true.
+    expect(config).toMatchObject({ experimental: { bash: { rewrite: false } } });
+    expect(result.stderr).not.toContain("Ignoring experimental from project config");
+  });
+
+  test("user config can set experimental.bash.compress", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { compress: true } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(config).toMatchObject({ experimental: { bash: { compress: true } } });
+    expect(result.stderr).not.toContain("Ignoring");
+  });
+
+  test("project config can override experimental.bash.compress", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { compress: false } } }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({ experimental: { bash: { compress: true } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // Project's true value wins over user's false.
+    expect(config).toMatchObject({ experimental: { bash: { compress: true } } });
+    expect(result.stderr).not.toContain("Ignoring experimental from project config");
+  });
+
+  test("user config can set experimental.bash.background", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { background: true } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(config).toMatchObject({ experimental: { bash: { background: true } } });
+    expect(result.stderr).not.toContain("Ignoring");
+  });
+
+  test("project config can set experimental.bash.background", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({}));
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({ experimental: { bash: { background: true } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const config = JSON.parse(result.stdout) as Record<string, unknown>;
+    // Project's true value is accepted (user has no value set).
+    expect(config).toMatchObject({ experimental: { bash: { background: true } } });
+    expect(result.stderr).not.toContain("Ignoring experimental from project config");
+  });
+
+  test("deep merges nested experimental config", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ experimental: { bash: { rewrite: true }, lsp_ty: true } }),
+    );
+    writeFileSync(
+      fixture.projectConfigPath,
+      JSON.stringify({ experimental: { bash: { compress: false } } }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      experimental: { bash: { rewrite: true, compress: false }, lsp_ty: true },
+    });
+  });
+
+  test("migrates all old config keys to the v0.18 schema", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({
+        experimental_search_index: true,
+        experimental_semantic_search: true,
+        experimental_lsp_ty: true,
+        experimental_bash_rewrite: true,
+        experimental_bash_compress: true,
+        experimental_bash_background: true,
+      }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      search_index: true,
+      semantic_search: true,
+      experimental: { bash: { rewrite: true, compress: true, background: true }, lsp_ty: true },
+    });
+    const migrated = readFileSync(fixture.userConfigPath, "utf-8");
+    expect(migrated).toContain('"search_index": true');
+    expect(migrated).not.toContain("experimental_search_index");
+    expect(result.stderr).toContain(
+      `Migrated config at ${fixture.userConfigPath}: removed experimental_search_index, experimental_semantic_search, experimental_lsp_ty, experimental_bash_rewrite, experimental_bash_compress, experimental_bash_background`,
+    );
+  });
+
+  test("migration is idempotent", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ experimental_search_index: true }));
+    const env = { HOME: join(fixture.root, "home"), XDG_CONFIG_HOME: fixture.xdgConfigHome };
+
+    const first = runConfigLoader(fixture.projectDirectory, env);
+    const second = runConfigLoader(fixture.projectDirectory, env);
+
+    expect(first.stderr).toContain(`Migrated config at ${fixture.userConfigPath}`);
+    expect(second.stderr).not.toContain(`Migrated config at ${fixture.userConfigPath}`);
+    expect(JSON.parse(second.stdout)).toEqual({ search_index: true });
+  });
+
+  test("migration preserves JSONC comments", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      '{\n  // keep me\n  "experimental_bash_rewrite": true,\n}\n',
+    );
+
+    runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const migrated = readFileSync(fixture.userConfigPath, "utf-8");
+    expect(migrated).toContain("// keep me");
+    expect(migrated).toContain('"experimental"');
+    expect(migrated).not.toContain("experimental_bash_rewrite");
+  });
+
+  test("migration preserves inline trailing and block comments", () => {
+    // Regression: previous regex only matched standalone `//` lines and
+    // dropped inline trailing comments + `/* */` blocks. comment-json now
+    // handles structural preservation; the safety-net regex captures
+    // anything that doesn't survive (i.e. comments tied to deleted keys) so
+    // we don't lose user-authored prose silently.
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      [
+        "{",
+        "  // top comment",
+        '  "tool_surface": "all", // inline on retained key',
+        "  /* block comment */",
+        '  "experimental_bash_rewrite": true,',
+        '  "experimental_bash_compress": false  // inline on removed key',
+        "}\n",
+      ].join("\n"),
+    );
+
+    runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    const migrated = readFileSync(fixture.userConfigPath, "utf-8");
+    expect(migrated).toContain("// top comment");
+    expect(migrated).toContain("// inline on retained key");
+    expect(migrated).toContain("// inline on removed key");
+    expect(migrated).toContain("/* block comment */");
+    expect(migrated).not.toContain("experimental_bash_rewrite");
+    expect(migrated).not.toContain("experimental_bash_compress");
+  });
+
+  test("migrates both jsonc and json candidate files", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ experimental_search_index: true }));
+    writeFileSync(fixture.userJsonPath, JSON.stringify({ experimental_semantic_search: true }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(result.stderr).toContain(`Migrated config at ${fixture.userConfigPath}`);
+    expect(result.stderr).toContain(`Migrated config at ${fixture.userJsonPath}`);
+    expect(readFileSync(fixture.userConfigPath, "utf-8")).toContain("search_index");
+    expect(readFileSync(fixture.userJsonPath, "utf-8")).toContain("semantic_search");
+  });
+
+  test("migrates project and user config independently", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ experimental_search_index: true }));
+    writeFileSync(fixture.projectConfigPath, JSON.stringify({ experimental_bash_compress: true }));
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      search_index: true,
+      experimental: { bash: { compress: true } },
+    });
+    expect(result.stderr).toContain(`Migrated config at ${fixture.userConfigPath}`);
+    expect(result.stderr).toContain(`Migrated config at ${fixture.projectConfigPath}`);
+  });
+
+  test("migration conflict keeps new value and removes old key", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(
+      fixture.userConfigPath,
+      JSON.stringify({ search_index: false, experimental_search_index: true }),
+    );
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({ search_index: false });
+    expect(readFileSync(fixture.userConfigPath, "utf-8")).not.toContain(
+      "experimental_search_index",
+    );
+    expect(result.stderr).toContain("Config migration conflict");
+  });
+
+  test("read-only migration warning does not fail load", () => {
+    const fixture = createConfigFixture();
+    writeFileSync(fixture.userConfigPath, JSON.stringify({ experimental_search_index: true }));
+    chmodSync(fixture.userConfigPath, 0o444);
+
+    const result = runConfigLoader(fixture.projectDirectory, {
+      HOME: join(fixture.root, "home"),
+      XDG_CONFIG_HOME: fixture.xdgConfigHome,
+    });
+
+    expect(JSON.parse(result.stdout)).toEqual({ search_index: true });
+    if (result.stderr.includes("Config migration could not write")) {
+      expect(readFileSync(fixture.userConfigPath, "utf-8")).toContain("experimental_search_index");
+    }
+  });
+
+  test("strict cutover rejects manually re-added old keys", () => {
+    expect(AftConfigSchema.safeParse({ experimental_search_index: true }).success).toBe(false);
   });
 
   test("loads semantic config block and propagates nested fields", () => {

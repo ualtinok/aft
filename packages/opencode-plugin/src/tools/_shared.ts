@@ -18,7 +18,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { BinaryBridge } from "../bridge.js";
+import { ingestBgCompletions } from "../bg-notifications.js";
+import type { BinaryBridge, BridgeRequestOptions } from "../bridge.js";
 import type { PluginContext } from "../types.js";
 
 /**
@@ -109,6 +110,7 @@ export function callBridge(
   runtime: ToolRuntime,
   command: string,
   params: Record<string, unknown> = {},
+  options?: BridgeRequestOptions,
 ): ReturnType<BinaryBridge["send"]> {
   const merged: Record<string, unknown> = { ...params };
   if (runtime.sessionID) {
@@ -118,10 +120,12 @@ export function callBridge(
   const sendOptions = {
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     configureWarningClient: ctx.client,
+    ...options,
   };
-  return bridgeFor(ctx, runtime).send(
-    command,
-    merged,
-    Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
-  );
+  return bridgeFor(ctx, runtime)
+    .send(command, merged, Object.keys(sendOptions).length > 0 ? sendOptions : undefined)
+    .then((response) => {
+      ingestBgCompletions(runtime.sessionID, response.bg_completions);
+      return response;
+    });
 }

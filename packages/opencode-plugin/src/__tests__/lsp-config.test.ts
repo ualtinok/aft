@@ -49,7 +49,7 @@ describe("lsp configure forwarding", () => {
 
   test('python="pyright" disables ty even when ty was explicitly enabled', () => {
     const config = AftConfigSchema.parse({
-      experimental_lsp_ty: true,
+      experimental: { lsp_ty: true },
       lsp: { python: "pyright" },
     });
 
@@ -61,7 +61,7 @@ describe("lsp configure forwarding", () => {
 
   test('python="auto" leaves ty and disabled ids unchanged', () => {
     const config = AftConfigSchema.parse({
-      experimental_lsp_ty: false,
+      experimental: { lsp_ty: false },
       lsp: {
         disabled: ["pyright"],
         python: "auto",

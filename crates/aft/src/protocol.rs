@@ -1,5 +1,65 @@
 use serde::{Deserialize, Serialize};
 
+/// v0.18 streaming semantics for hoisted bash.
+///
+/// Foreground `bash` execution may emit zero or more `progress` frames before
+/// its final `Response`. Each progress frame is NDJSON on stdout with the same
+/// `request_id` as the original request and a `kind` of `stdout` or `stderr`.
+/// The final response remains the existing `{ id, success, ... }` envelope so
+/// older callers can ignore streaming frames. Bash permission prompts use the
+/// recognized `permission_required` error code; Phase 1 Track C will attach the
+/// full permission ask payload and retry loop.
+pub const ERROR_PERMISSION_REQUIRED: &str = "permission_required";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressKind {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressFrame {
+    #[serde(rename = "type")]
+    pub frame_type: &'static str,
+    pub request_id: String,
+    pub kind: ProgressKind,
+    pub chunk: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PermissionAskFrame {
+    #[serde(rename = "type")]
+    pub frame_type: &'static str,
+    pub request_id: String,
+    pub asks: serde_json::Value,
+}
+
+impl PermissionAskFrame {
+    pub fn new(request_id: impl Into<String>, asks: serde_json::Value) -> Self {
+        Self {
+            frame_type: "permission_ask",
+            request_id: request_id.into(),
+            asks,
+        }
+    }
+}
+
+impl ProgressFrame {
+    pub fn new(
+        request_id: impl Into<String>,
+        kind: ProgressKind,
+        chunk: impl Into<String>,
+    ) -> Self {
+        Self {
+            frame_type: "progress",
+            request_id: request_id.into(),
+            kind,
+            chunk: chunk.into(),
+        }
+    }
+}
+
 /// Fallback session identifier used when a request arrives without one.
 ///
 /// Introduced alongside project-shared bridges (issue #14): one `aft` process
@@ -18,6 +78,7 @@ pub const DEFAULT_SESSION_ID: &str = "__default__";
 #[derive(Debug, Deserialize)]
 pub struct RawRequest {
     pub id: String,
+    #[serde(alias = "method")]
     pub command: String,
     /// Optional LSP hints from the plugin (R031 forward compatibility).
     #[serde(default)]

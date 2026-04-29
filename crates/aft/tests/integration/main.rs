@@ -4,10 +4,18 @@ mod test_helpers;
 mod helpers;
 
 mod ast_commands_test;
+mod bash_background_test;
+mod bash_compress_extras_test;
+mod bash_compress_test;
+mod bash_drain_completions_test;
+mod bash_permissions_test;
+mod bash_rewrite_test;
+mod bash_test;
 mod callgraph_test;
 mod commands_test;
 mod configure_test;
 mod dryrun_test;
+mod edit_append_test;
 mod edit_match_test;
 mod edit_test;
 mod error_path_test;

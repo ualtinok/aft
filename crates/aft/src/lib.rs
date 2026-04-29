@@ -45,10 +45,14 @@
 
 pub mod ast_grep_lang;
 pub mod backup;
+pub mod bash_background;
+pub mod bash_permissions;
+pub mod bash_rewrite;
 pub mod callgraph;
 pub mod calls;
 pub mod checkpoint;
 pub mod commands;
+pub mod compress;
 pub mod config;
 pub mod context;
 pub mod edit;

@@ -1,8 +1,9 @@
 use crate::config::{SemanticBackend, SemanticBackendConfig};
-use crate::parser::FileParser;
+use crate::parser::{detect_language, extract_symbols_from_tree, grammar_for};
 use crate::symbols::{Symbol, SymbolKind};
 
 use fastembed::{EmbeddingModel as FastembedEmbeddingModel, InitOptions, TextEmbedding};
+use rayon::prelude::*;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::SystemTime;
+use tree_sitter::Parser;
 use url::Url;
 
 const DEFAULT_DIMENSION: usize = 384;
@@ -784,26 +786,24 @@ impl SemanticIndex {
         project_root: &Path,
         files: &[PathBuf],
     ) -> (Vec<SemanticChunk>, HashMap<PathBuf, SystemTime>) {
-        let mut parser = FileParser::new();
+        let per_file: Vec<(PathBuf, SystemTime, Vec<SemanticChunk>)> = files
+            .par_iter()
+            .map_init(HashMap::new, |parsers, file| {
+                let mtime = std::fs::metadata(file)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                let chunks = collect_file_chunks(project_root, file, parsers).unwrap_or_default();
+
+                (file.clone(), mtime, chunks)
+            })
+            .collect();
+
         let mut chunks: Vec<SemanticChunk> = Vec::new();
         let mut file_mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
 
-        for file in files {
-            let mtime = std::fs::metadata(file)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            file_mtimes.insert(file.clone(), mtime);
-
-            let source = match std::fs::read_to_string(file) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let symbols = match parser.extract_symbols(file) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let file_chunks = symbols_to_chunks(file, &symbols, &source, project_root);
+        for (file, mtime, file_chunks) in per_file {
+            file_mtimes.insert(file, mtime);
             chunks.extend(file_chunks);
         }
 
@@ -1431,6 +1431,41 @@ fn build_embed_text(symbol: &Symbol, source: &str, file: &Path, project_root: &P
     text
 }
 
+fn parser_for(
+    parsers: &mut HashMap<crate::parser::LangId, Parser>,
+    lang: crate::parser::LangId,
+) -> Result<&mut Parser, String> {
+    use std::collections::hash_map::Entry;
+
+    match parsers.entry(lang) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => {
+            let grammar = grammar_for(lang);
+            let mut parser = Parser::new();
+            parser
+                .set_language(&grammar)
+                .map_err(|error| error.to_string())?;
+            Ok(entry.insert(parser))
+        }
+    }
+}
+
+fn collect_file_chunks(
+    project_root: &Path,
+    file: &Path,
+    parsers: &mut HashMap<crate::parser::LangId, Parser>,
+) -> Result<Vec<SemanticChunk>, String> {
+    let lang = detect_language(file).ok_or_else(|| "unsupported file extension".to_string())?;
+    let source = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
+    let tree = parser_for(parsers, lang)?
+        .parse(&source, None)
+        .ok_or_else(|| format!("tree-sitter parse returned None for {}", file.display()))?;
+    let symbols =
+        extract_symbols_from_tree(&source, &tree, lang).map_err(|error| error.to_string())?;
+
+    Ok(symbols_to_chunks(file, &symbols, &source, project_root))
+}
+
 /// Build a display snippet from a symbol's source
 fn build_snippet(symbol: &Symbol, source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
@@ -1586,6 +1621,7 @@ fn read_string(data: &[u8], pos: &mut usize) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::config::{SemanticBackend, SemanticBackendConfig};
+    use crate::parser::FileParser;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -1770,6 +1806,44 @@ mod tests {
         let snippet = build_snippet(&symbol, source);
 
         assert_eq!(snippet, "export const answer = 42;");
+    }
+
+    #[test]
+    fn optimized_file_chunk_collection_matches_file_parser_path() {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let file = project_root.join("src/semantic_index.rs");
+        let source = std::fs::read_to_string(&file).unwrap();
+
+        let mut legacy_parser = FileParser::new();
+        let legacy_symbols = legacy_parser.extract_symbols(&file).unwrap();
+        let legacy_chunks = symbols_to_chunks(&file, &legacy_symbols, &source, &project_root);
+
+        let mut parsers = HashMap::new();
+        let optimized_chunks = collect_file_chunks(&project_root, &file, &mut parsers).unwrap();
+
+        assert_eq!(
+            chunk_fingerprint(&optimized_chunks),
+            chunk_fingerprint(&legacy_chunks)
+        );
+    }
+
+    fn chunk_fingerprint(
+        chunks: &[SemanticChunk],
+    ) -> Vec<(String, SymbolKind, u32, u32, bool, String, String)> {
+        chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.name.clone(),
+                    chunk.kind.clone(),
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.exported,
+                    chunk.embed_text.clone(),
+                    chunk.snippet.clone(),
+                )
+            })
+            .collect()
     }
 
     #[test]

@@ -17,6 +17,7 @@ import { storeToolMetadata } from "../metadata-store.js";
 import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
+import { createBashTool } from "./bash.js";
 
 /** Extract callID from plugin context (exists on object but not in TS type). */
 function getCallID(ctx: unknown): string | undefined {
@@ -574,7 +575,7 @@ function getEditDescription(writeToolName: string): string {
 
 **Modes** (determined by which parameters you provide):
 
-Mode priority: operations > edits > symbol (without oldString) > oldString (find/replace). If none match, the call is rejected — there is no implicit "write" fallback.
+Mode priority: operations > appendContent > edits > symbol (without oldString) > oldString (find/replace). If none match, the call is rejected — there is no implicit "write" fallback.
 
 1. **Multi-file transaction** — pass \`operations\` array
    Edits across multiple files with checkpoint-based rollback on failure.
@@ -582,33 +583,37 @@ Mode priority: operations > edits > symbol (without oldString) > oldString (find
    For \`edit_match\`: include \`match\`, \`replacement\`. For \`write\`: include \`content\`.
    Example: \`{ "operations": [{ "file": "a.ts", "command": "edit_match", "match": "old", "replacement": "new" }, { "file": "b.ts", "command": "write", "content": "..." }] }\`
 
-2. **Batch edits** — pass \`filePath\` + \`edits\` array
+2. **Append** — pass \`filePath\` + \`appendContent\`
+   Appends text to the end of a file, creating the file if it does not exist.
+   Example: \`{ "filePath": "notes.txt", "appendContent": "new line\\n" }\`
+
+3. **Batch edits** — pass \`filePath\` + \`edits\` array
    Multiple edits in one file atomically. Each edit is either:
    - \`{ "oldString": "old", "newString": "new" }\` — find/replace
    - \`{ "startLine": 5, "endLine": 7, "content": "new lines" }\` — replace line range (1-based, both inclusive)
    Set content to empty string to delete lines.
 
-3. **Symbol replace** — pass \`filePath\` + \`symbol\` + \`content\`
+4. **Symbol replace** — pass \`filePath\` + \`symbol\` + \`content\`
    Replaces an entire named symbol (function, class, type) with new content.
    Includes decorators, attributes, and doc comments in the replacement range.
    **Important:** You must NOT provide \`oldString\` when using symbol mode — if present, the tool silently falls back to find/replace mode.
    Example: \`{ "filePath": "src/app.ts", "symbol": "handleRequest", "content": "function handleRequest() { ... }" }\`
 
-4. **Find and replace** — pass \`filePath\` + \`oldString\` + \`newString\`
+5. **Find and replace** — pass \`filePath\` + \`oldString\` + \`newString\`
    Finds the exact text in \`oldString\` and replaces it with \`newString\`.
    Supports fuzzy matching (handles whitespace differences automatically).
    If multiple matches exist, specify which one with \`occurrence\` or use \`replaceAll: true\`.
    Example: \`{ "filePath": "src/app.ts", "oldString": "const x = 1", "newString": "const x = 2" }\`
 
-5. **Replace all occurrences** — add \`replaceAll: true\`
+6. **Replace all occurrences** — add \`replaceAll: true\`
    Replaces every occurrence of \`oldString\` in the file.
    Example: \`{ "filePath": "src/app.ts", "oldString": "oldName", "newString": "newName", "replaceAll": true }\`
 
-6. **Select specific occurrence** — add \`occurrence: N\` (0-indexed)
+7. **Select specific occurrence** — add \`occurrence: N\` (0-indexed)
    When multiple matches exist, select the Nth one (0 = first, 1 = second, etc.).
    Example: \`{ "filePath": "src/app.ts", "oldString": "TODO", "newString": "DONE", "occurrence": 0 }\`
 
-Note: Modes 5 and 6 are options on mode 4 (find/replace) — they require \`oldString\`.
+Note: Modes 6 and 7 are options on mode 5 (find/replace) — they require \`oldString\`.
 
 **Behavior:**
 - Backs up files before editing (recoverable via aft_safety undo)
@@ -647,6 +652,10 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .describe("0-indexed occurrence to replace when multiple matches exist"),
       symbol: z.string().optional().describe("Named symbol to replace (function, class, type)"),
       content: z.string().optional().describe("New content for symbol replace or file write"),
+      appendContent: z
+        .string()
+        .optional()
+        .describe("Text to append to the end of filePath; creates the file if needed"),
       edits: z
         .array(z.record(z.string(), z.unknown()))
         .optional()
@@ -726,7 +735,12 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
       // Route to appropriate Rust command
       let command: string;
 
-      if (Array.isArray(args.edits)) {
+      if (typeof args.appendContent === "string") {
+        command = "edit_match";
+        params.op = "append";
+        params.append_content = args.appendContent;
+        params.create_dirs = true;
+      } else if (Array.isArray(args.edits)) {
         // Batch mode — translate camelCase to snake_case for Rust
         command = "batch";
         params.edits = (args.edits as Array<Record<string, unknown>>).map((edit) => {
@@ -1335,6 +1349,7 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
  */
 export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition> {
   return {
+    bash: createBashTool(ctx),
     read: createReadTool(ctx),
     write: createWriteTool(ctx, "edit"),
     edit: createEditTool(ctx, "write"),

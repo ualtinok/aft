@@ -4,7 +4,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
 
-import { loadAftConfig, resolveLspConfigForConfigure } from "./config.js";
+import {
+  appendInTurnBgCompletions,
+  extractSessionID,
+  handleIdleBgCompletions,
+  resetBgWake,
+} from "./bg-notifications.js";
+import {
+  loadAftConfig,
+  resolveExperimentalConfigForConfigure,
+  resolveLspConfigForConfigure,
+} from "./config.js";
 import { ensureBinary } from "./downloader.js";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker/index.js";
 import { error, log, warn } from "./logger.js";
@@ -133,8 +143,10 @@ const PLUGIN_VERSION: string = (() => {
  * dismisses an announcement, patch releases that don't bump ANNOUNCEMENT_VERSION
  * will not re-show it.
  */
-const ANNOUNCEMENT_VERSION = "";
-const ANNOUNCEMENT_FEATURES: string[] = [];
+const ANNOUNCEMENT_VERSION = "0.18.0";
+const ANNOUNCEMENT_FEATURES: string[] = [
+  "v0.18.0 highlights\n\nHoisted bash with permission scan — your bash calls now flow through AFT with OpenCode's tree-sitter permission model preserved.\n\nThree new opt-in bash features behind experimental flags (default off):\n• experimental.bash.rewrite — common bash patterns (cat, grep, find, sed, ls) auto-rewrite to AFT tool calls with a footer hint.\n• experimental.bash.compress — RTK-style output compression for git, cargo, npm, bun, pnpm, pytest, tsc + generic ANSI/dedup/truncate fallback.\n• experimental.bash.background — bash({ background: true }) returns task_id; bash_status / bash_kill manage long-running tasks.\n\nConfig schema upgrade — auto-migration on first load:\n• experimental_search_index → top-level search_index (graduated)\n• experimental_semantic_search → top-level semantic_search (graduated)\n• experimental_lsp_ty → experimental.lsp_ty\n• experimental_bash_* → experimental.bash.*\n\nRun aft doctor to verify your config migrated cleanly.",
+];
 
 /**
  * AFT (Agent File Toolkit) plugin for OpenCode.
@@ -145,7 +157,7 @@ const ANNOUNCEMENT_FEATURES: string[] = [];
  *
  * Tools organized into groups:
  * - Hoisted (default): read, write, edit, apply_patch, ast_grep_search, ast_grep_replace
- *   and experimental grep/glob when experimental_search_index is enabled
+ *   and grep/glob when search_index is enabled
  * - File ops: aft_delete, aft_move
  * - Reading: aft_outline
  * - Safety: aft_safety
@@ -177,10 +189,11 @@ const plugin: Plugin = async (input) => {
   // project-root boundary by default. Users can opt out by explicitly setting
   // `restrict_to_project_root: false` in their aft.jsonc.
   configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root ?? true;
-  if (aftConfig.experimental_search_index !== undefined)
-    configOverrides.experimental_search_index = aftConfig.experimental_search_index;
-  if (aftConfig.experimental_semantic_search !== undefined)
-    configOverrides.experimental_semantic_search = aftConfig.experimental_semantic_search;
+  configOverrides.bash_permissions = true;
+  if (aftConfig.search_index !== undefined) configOverrides.search_index = aftConfig.search_index;
+  if (aftConfig.semantic_search !== undefined)
+    configOverrides.semantic_search = aftConfig.semantic_search;
+  Object.assign(configOverrides, resolveExperimentalConfigForConfigure(aftConfig));
   Object.assign(configOverrides, resolveLspConfigForConfigure(aftConfig));
   if (aftConfig.semantic !== undefined) configOverrides.semantic = aftConfig.semantic;
   if (aftConfig.max_callgraph_files !== undefined)
@@ -196,7 +209,7 @@ const plugin: Plugin = async (input) => {
   // Auto-resolve ONNX Runtime for semantic search.
   // Downloads the shared library on first use if the platform is supported.
   // The resolved path is passed to bridges via ORT_DYLIB_PATH env var.
-  if (aftConfig.experimental_semantic_search && isFastembedSemanticBackend) {
+  if (aftConfig.semantic_search && isFastembedSemanticBackend) {
     const storageDir = configOverrides.storage_dir as string;
     const ortDylibDir = await ensureOnnxRuntime(storageDir).catch((err) => {
       warn(
@@ -377,6 +390,7 @@ const plugin: Plugin = async (input) => {
   const ctx: PluginContext = {
     pool,
     client: input.client,
+    plugin: (input as { plugin?: PluginContext["plugin"] }).plugin,
     config: aftConfig,
     storageDir: configOverrides.storage_dir as string,
   };
@@ -444,7 +458,7 @@ const plugin: Plugin = async (input) => {
   rpcServer.handle("get-warnings", async () => {
     const warnings: string[] = [];
     if (
-      aftConfig.experimental_semantic_search &&
+      aftConfig.semantic_search &&
       isFastembedSemanticBackend &&
       !configOverrides._ort_dylib_dir
     ) {
@@ -492,11 +506,7 @@ const plugin: Plugin = async (input) => {
   }
 
   // Warn about ONNX Runtime if semantic search is enabled but ORT is unavailable
-  if (
-    aftConfig.experimental_semantic_search &&
-    isFastembedSemanticBackend &&
-    !configOverrides._ort_dylib_dir
-  ) {
+  if (aftConfig.semantic_search && isFastembedSemanticBackend && !configOverrides._ort_dylib_dir) {
     // The ensureOnnxRuntime call above is async and may still be in flight.
     // Schedule the warning check after a short delay to let it resolve.
     setTimeout(() => {
@@ -541,11 +551,9 @@ const plugin: Plugin = async (input) => {
     ...navigationTools(ctx),
     // AST tools: recommended+
     ...(surface !== "minimal" && astTools(ctx)),
-    ...(surface !== "minimal" &&
-      aftConfig.experimental_semantic_search === true &&
-      semanticTools(ctx)),
+    ...(surface !== "minimal" && aftConfig.semantic_search === true && semanticTools(ctx)),
     // Indexed search tools: recommended+ and opt-in
-    ...(surface !== "minimal" && aftConfig.experimental_search_index === true && searchTools(ctx)),
+    ...(surface !== "minimal" && aftConfig.search_index === true && searchTools(ctx)),
     ...refactoringTools(ctx),
     // LSP diagnostics: recommended+
     ...(surface !== "minimal" && lspTools(ctx)),
@@ -577,13 +585,33 @@ const plugin: Plugin = async (input) => {
     log(`Disabled ${disabled.size} tool(s): ${[...disabled].join(", ")}`);
   }
 
+  const autoUpdateEventHook = createAutoUpdateCheckerHook(input, {
+    enabled: true,
+    autoUpdate: aftConfig.auto_update ?? true,
+    signal: autoUpdateAbort.signal,
+  });
+
   return {
     tool: allTools,
-    event: createAutoUpdateCheckerHook(input, {
-      enabled: true,
-      autoUpdate: aftConfig.auto_update ?? true,
-      signal: autoUpdateAbort.signal,
-    }),
+    event: async (eventInput: { event: { type: string; properties?: unknown } }) => {
+      await autoUpdateEventHook(eventInput);
+      if (eventInput.event.type !== "session.idle") return;
+      const sessionID = extractSessionID(eventInput.event.properties);
+      if (!sessionID) return;
+      await handleIdleBgCompletions({
+        ctx,
+        directory: input.directory,
+        sessionID,
+        client: input.client,
+      });
+    },
+    "chat.message": async (messageInput: {
+      sessionID?: string;
+      sessionId?: string;
+      id?: string;
+    }) => {
+      resetBgWake(messageInput.sessionID ?? messageInput.sessionId ?? messageInput.id);
+    },
     "command.execute.before": async (
       commandInput: { command: string; sessionID: string },
       _output: unknown,
@@ -606,18 +634,18 @@ const plugin: Plugin = async (input) => {
     },
     // Restore metadata that fromPlugin() overwrites (opencode bug workaround)
     "tool.execute.after": async (
-      input: { tool: string; sessionID: string; callID: string },
+      toolInput: { tool: string; sessionID: string; callID: string },
       output: { title: string; output: string; metadata: Record<string, unknown> } | undefined,
     ) => {
       if (!output) return;
-      const stored = consumeToolMetadata(input.sessionID, input.callID);
+      const stored = consumeToolMetadata(toolInput.sessionID, toolInput.callID);
       if (stored) {
         if (stored.title) output.title = stored.title;
         if (stored.metadata) output.metadata = { ...output.metadata, ...stored.metadata };
       }
       // Hint: when a git merge/rebase produces conflicts, nudge the agent toward aft_conflicts
       if (
-        input.tool === "bash" &&
+        toolInput.tool === "bash" &&
         output.output?.includes("Automatic merge failed; fix conflicts")
       ) {
         output.output +=
@@ -625,13 +653,17 @@ const plugin: Plugin = async (input) => {
       }
       // Hint: when agent runs grep/rg via bash, nudge toward the built-in grep tool.
       // Detection: check the first line of output (the echoed command) for rg or grep invocations.
-      if (input.tool === "bash" && output.output) {
+      if (toolInput.tool === "bash" && output.output) {
         const firstLine = output.output.slice(0, 300).split("\n")[0] ?? "";
         if (/\b(rg|grep)\s/.test(firstLine)) {
           output.output +=
             "\n\n[Hint] Use the grep tool instead of bash for faster indexed search.";
         }
       }
+      await appendInTurnBgCompletions(
+        { ctx, directory: input.directory, sessionID: toolInput.sessionID },
+        output,
+      );
     },
     config: async (config) => {
       // Register /aft-status for Desktop command palette.

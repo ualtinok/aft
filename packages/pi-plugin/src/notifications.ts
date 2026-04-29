@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { log } from "./logger.js";
 
 const WARNING_MARKER = "🔧 AFT: ⚠️";
+const FEATURE_MARKER = "🔧 AFT: ✨";
 const WARNED_TOOLS_FILE = "warned_tools.json";
 
 export interface ConfigureWarning {
@@ -133,5 +134,32 @@ export async function deliverConfigureWarnings(
 
   if (changed) {
     writeWarnedTools(opts.storageDir, warned);
+  }
+}
+
+export function sendFeatureAnnouncement(
+  version: string,
+  features: string[],
+  storageDir: string,
+): void {
+  const versionFile = join(storageDir, "last_announced_version");
+  try {
+    if (existsSync(versionFile)) {
+      const lastVersion = readFileSync(versionFile, "utf-8").trim();
+      if (lastVersion === version) return;
+    }
+  } catch {
+    // ignore read errors — proceed with announcement
+  }
+
+  log(
+    [`${FEATURE_MARKER} v${version}:`, ...features.map((feature) => `  • ${feature}`)].join("\n"),
+  );
+
+  try {
+    mkdirSync(storageDir, { recursive: true });
+    writeFileSync(versionFile, version);
+  } catch {
+    // best-effort
   }
 }

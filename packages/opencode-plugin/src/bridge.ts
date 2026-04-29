@@ -97,6 +97,7 @@ interface PendingRequest {
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onProgress?: (chunk: { kind: "stdout" | "stderr"; text: string }) => void;
 }
 
 interface ConfigureWarningsContext {
@@ -119,7 +120,13 @@ export interface BridgeOptions {
   onConfigureWarnings?: (context: ConfigureWarningsContext) => void | Promise<void>;
 }
 
-interface SendOptions {
+export interface BridgeRequestOptions {
+  onProgress?: (chunk: { kind: "stdout" | "stderr"; text: string }) => void;
+  /** Per-call transport timeout in milliseconds. Defaults to the bridge-wide timeout. */
+  transportTimeoutMs?: number;
+}
+
+interface SendOptions extends BridgeRequestOptions {
   timeoutMs?: number;
   configureWarningClient?: unknown;
 }
@@ -242,13 +249,16 @@ export class BinaryBridge {
     }
 
     const id = String(this.nextId++);
-    const request = { id, command, ...params };
+    const request =
+      Object.hasOwn(params, "command") || Object.hasOwn(params, "method")
+        ? { id, command, params }
+        : { id, command, ...params };
     const line = `${JSON.stringify(request)}\n`;
 
     // Per-op timeout override: tool wrappers can pass longer budgets for
     // commands that legitimately need them (callers, trace_to, grep on big
     // repos). Defaults to the bridge-wide timeout otherwise.
-    const effectiveTimeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    const effectiveTimeoutMs = options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
 
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -265,7 +275,7 @@ export class BinaryBridge {
         this.handleTimeout();
       }, effectiveTimeoutMs);
 
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, onProgress: options?.onProgress });
 
       if (!this.process?.stdin?.writable) {
         this.pending.delete(id);
@@ -516,6 +526,29 @@ export class BinaryBridge {
 
       try {
         const response = JSON.parse(line) as Record<string, unknown>;
+        if (response.type === "progress") {
+          const requestId = response.request_id as string | undefined;
+          const entry = requestId ? this.pending.get(requestId) : undefined;
+          const kind = response.kind === "stderr" ? "stderr" : "stdout";
+          const text = typeof response.chunk === "string" ? response.chunk : "";
+          entry?.onProgress?.({ kind, text });
+          continue;
+        }
+        if (response.type === "permission_ask") {
+          const requestId = response.request_id as string | undefined;
+          const entry = requestId ? this.pending.get(requestId) : undefined;
+          if (requestId && entry) {
+            this.pending.delete(requestId);
+            clearTimeout(entry.timer);
+            entry.resolve({
+              success: false,
+              code: "permission_required",
+              message: "bash command requires permission",
+              asks: response.asks,
+            });
+          }
+          continue;
+        }
         const id = response.id as string | undefined;
         if (id && this.pending.has(id)) {
           const entry = this.pending.get(id);

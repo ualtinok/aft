@@ -5,7 +5,7 @@ use aft::config::Config;
 use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
-use aft::protocol::{EchoParams, RawRequest, Response};
+use aft::protocol::{EchoParams, ProgressFrame, RawRequest, Response};
 
 fn main() {
     // Handle --version flag before anything else
@@ -31,12 +31,16 @@ fn main() {
     log::info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
+    ctx.set_progress_sender(Some(Box::new(|frame: ProgressFrame| {
+        let stdout = io::stdout();
+        let mut writer = BufWriter::new(stdout.lock());
+        if let Err(e) = write_progress_frame(&mut writer, &frame) {
+            log::error!("stdout progress write error: {}", e);
+        }
+    })));
 
     let stdin = io::stdin();
     let reader = stdin.lock();
-    let stdout = io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
-
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(l) => l,
@@ -60,7 +64,9 @@ fn main() {
                 drain_semantic_index_events(&ctx);
                 drain_watcher_events(&ctx);
                 drain_lsp_events(&ctx);
-                dispatch(req, &ctx)
+                let mut response = dispatch(req, &ctx);
+                attach_bg_completions(&mut response, &ctx);
+                response
             }
             Err(e) => {
                 log::error!("parse error: {} — input: {}", e, trimmed);
@@ -72,14 +78,31 @@ fn main() {
             }
         };
 
-        if let Err(e) = write_response(&mut writer, &response) {
+        if let Err(e) = write_response(&response) {
             log::error!("stdout write error: {}", e);
             break;
         }
     }
 
     ctx.lsp().shutdown_all();
+    ctx.bash_background().shutdown();
     log::info!("stdin closed, shutting down");
+}
+
+fn attach_bg_completions(response: &mut Response, ctx: &AppContext) {
+    let completions = ctx.drain_bg_completions();
+    if completions.is_empty() {
+        return;
+    }
+    let value = serde_json::json!(completions);
+    match response.data.as_object_mut() {
+        Some(data) => {
+            data.insert("bg_completions".to_string(), value);
+        }
+        None => {
+            response.data = serde_json::json!({ "bg_completions": value });
+        }
+    }
 }
 
 fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
@@ -90,6 +113,10 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
             serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
         ),
         "echo" => handle_echo(&req),
+        "bash" => aft::commands::bash::handle(&req, ctx),
+        "bash_drain_completions" => aft::commands::bash_drain_completions::handle(&req, ctx),
+        "bash_status" => aft::commands::bash_status::handle(&req, ctx),
+        "bash_kill" => aft::commands::bash_kill::handle(&req, ctx),
         "outline" => aft::commands::outline::handle_outline(&req, ctx),
         "zoom" => aft::commands::zoom::handle_zoom(&req, ctx),
         "read" => aft::commands::read::handle_read(&req, ctx),
@@ -201,8 +228,20 @@ fn handle_snapshot(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 }
 
-fn write_response(writer: &mut BufWriter<io::StdoutLock>, response: &Response) -> io::Result<()> {
-    serde_json::to_writer(&mut *writer, response)?;
+fn write_response(response: &Response) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+    serde_json::to_writer(&mut writer, response)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_progress_frame(
+    writer: &mut BufWriter<io::StdoutLock>,
+    frame: &ProgressFrame,
+) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, frame)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())

@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use serde::Serialize;
-use tree_sitter::{Parser, Tree};
+use tree_sitter::Parser;
 
 use crate::calls::extract_calls_full;
 use crate::edit::line_col_to_byte;
@@ -17,7 +18,7 @@ use crate::error::AftError;
 use crate::imports::{self, ImportBlock};
 use crate::language::LanguageProvider;
 use crate::parser::{detect_language, grammar_for, LangId};
-use crate::symbols::SymbolKind;
+use crate::symbols::{Range, SymbolKind};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -51,6 +52,10 @@ pub struct SymbolMeta {
     /// Function/method signature if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// 1-based start line of the symbol.
+    pub line: u32,
+    /// 0-based source range of the symbol.
+    pub range: Range,
 }
 
 /// Per-file call data: call sites grouped by containing symbol, plus
@@ -685,7 +690,10 @@ impl CallGraph {
 
         // Cycle detection
         if visited.contains(&visit_key) {
-            let (line, signature) = get_symbol_meta(&canon, symbol);
+            let (line, signature) = self
+                .lookup_file_data(&canon)
+                .map(|data| get_symbol_meta_from_data(data, symbol))
+                .unwrap_or_else(|| get_symbol_meta(&canon, symbol));
             return Ok(CallTreeNode {
                 name: symbol.to_string(),
                 file: self.relative_path(&canon),
@@ -698,23 +706,21 @@ impl CallGraph {
 
         visited.insert(visit_key.clone());
 
-        // Build file data
-        let file_data = build_file_data(&canon)?;
-        let import_block = file_data.import_block.clone();
-        let _lang = file_data.lang;
+        let (import_block, call_sites, sym_line, sym_signature) = {
+            let file_data = self.build_file(&canon)?;
+            let meta = get_symbol_meta_from_data(file_data, symbol);
 
-        // Get call sites for this symbol
-        let call_sites = file_data
-            .calls_by_symbol
-            .get(symbol)
-            .cloned()
-            .unwrap_or_default();
-
-        // Get symbol metadata (line, signature)
-        let (sym_line, sym_signature) = get_symbol_meta(&canon, symbol);
-
-        // Cache file data
-        self.data.insert(canon.clone(), file_data);
+            (
+                file_data.import_block.clone(),
+                file_data
+                    .calls_by_symbol
+                    .get(symbol)
+                    .cloned()
+                    .unwrap_or_default(),
+                meta.0,
+                meta.1,
+            )
+        };
 
         // Build children
         let mut children = Vec::new();
@@ -841,8 +847,19 @@ impl CallGraph {
         let all_files = self.project_files().to_vec();
 
         // Build file data for all project files
-        for f in &all_files {
-            let _ = self.build_file(f);
+        let uncached_files: Vec<PathBuf> = all_files
+            .iter()
+            .filter(|f| self.lookup_file_data(f).is_none())
+            .cloned()
+            .collect();
+
+        let computed: Vec<(PathBuf, FileCallData)> = uncached_files
+            .par_iter()
+            .filter_map(|f| build_file_data(f).ok().map(|data| (f.clone(), data)))
+            .collect();
+
+        for (file, data) in computed {
+            self.data.insert(file, data);
         }
 
         // Now build the reverse map
@@ -1019,7 +1036,10 @@ impl CallGraph {
         }
 
         // Get line/signature for the target symbol
-        let (target_line, target_sig) = get_symbol_meta(&canon, symbol);
+        let (target_line, target_sig) = self
+            .lookup_file_data(&canon)
+            .map(|data| get_symbol_meta_from_data(data, symbol))
+            .unwrap_or_else(|| get_symbol_meta(&canon, symbol));
 
         // Check if target itself is an entry point
         let target_is_entry = self
@@ -1091,8 +1111,12 @@ impl CallGraph {
                 has_new_path = true;
 
                 // Get caller's metadata
-                let (caller_line, caller_sig) =
-                    get_symbol_meta(site.caller_file.as_ref(), site.caller_symbol.as_ref());
+                let (caller_line, caller_sig) = self
+                    .lookup_file_data(site.caller_file.as_ref())
+                    .map(|data| get_symbol_meta_from_data(data, site.caller_symbol.as_ref()))
+                    .unwrap_or_else(|| {
+                        get_symbol_meta(site.caller_file.as_ref(), site.caller_symbol.as_ref())
+                    });
 
                 let mut new_path = path.clone();
                 new_path.push((
@@ -1460,14 +1484,18 @@ impl CallGraph {
         };
 
         // Find the symbol's AST node range
-        let symbols = list_symbols_from_tree(&source, &tree, lang, file);
+        let symbols = match crate::parser::extract_symbols_from_tree(&source, &tree, lang) {
+            Ok(symbols) => symbols,
+            Err(_) => return,
+        };
         let sym_info = match symbols.iter().find(|s| s.name == symbol) {
             Some(s) => s,
             None => return,
         };
 
-        let body_start = line_col_to_byte(&source, sym_info.start_line, sym_info.start_col);
-        let body_end = line_col_to_byte(&source, sym_info.end_line, sym_info.end_col);
+        let body_start =
+            line_col_to_byte(&source, sym_info.range.start_line, sym_info.range.start_col);
+        let body_end = line_col_to_byte(&source, sym_info.range.end_line, sym_info.range.end_col);
 
         let root = tree.root_node();
 
@@ -1808,8 +1836,8 @@ impl CallGraph {
                         e
                     );
                 }
-                let (params, _target_lang) = {
-                    match self.data.get(&target_file) {
+                let (params, target_line) = {
+                    match self.lookup_file_data(&target_file) {
                         Some(fd) => {
                             let meta = fd.symbol_metadata.get(&target_symbol);
                             let sig = meta.and_then(|m| m.signature.clone());
@@ -1817,7 +1845,8 @@ impl CallGraph {
                                 .as_deref()
                                 .map(|s| extract_parameters(s, fd.lang))
                                 .unwrap_or_default();
-                            (params, fd.lang)
+                            let line = meta.map(|m| m.line).unwrap_or(1);
+                            (params, line)
                         }
                         None => return,
                     }
@@ -1832,7 +1861,7 @@ impl CallGraph {
                             file: target_rel.clone(),
                             symbol: target_symbol.clone(),
                             variable: param_name.clone(),
-                            line: get_symbol_meta(&target_file, &target_symbol).0,
+                            line: target_line,
                             flow_type: "parameter".to_string(),
                             approximate: false,
                         });
@@ -1864,7 +1893,7 @@ impl CallGraph {
 
                 if has_local {
                     // Same-file call — get param info
-                    let (params, _target_lang) = {
+                    let (params, target_line) = {
                         let Some(fd) = self.data.get(file) else {
                             return;
                         };
@@ -1874,7 +1903,8 @@ impl CallGraph {
                             .as_deref()
                             .map(|s| extract_parameters(s, fd.lang))
                             .unwrap_or_default();
-                        (params, fd.lang)
+                        let line = meta.map(|m| m.line).unwrap_or(1);
+                        (params, line)
                     };
 
                     let file_rel = self.relative_path(file);
@@ -1885,7 +1915,7 @@ impl CallGraph {
                                 file: file_rel.clone(),
                                 symbol: callee_name.clone(),
                                 variable: param_name.clone(),
-                                line: get_symbol_meta(file, &callee_name).0,
+                                line: target_line,
                                 flow_type: "parameter".to_string(),
                                 approximate: false,
                             });
@@ -2066,15 +2096,15 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
     let import_block = imports::parse_imports(&source, &tree, lang);
 
     // Get symbols (for call site extraction and export detection)
-    let symbols = list_symbols_from_tree(&source, &tree, lang, path);
+    let symbols = crate::parser::extract_symbols_from_tree(&source, &tree, lang)?;
 
     // Build calls_by_symbol
     let mut calls_by_symbol: HashMap<String, Vec<CallSite>> = HashMap::new();
     let root = tree.root_node();
 
     for sym in &symbols {
-        let byte_start = line_col_to_byte(&source, sym.start_line, sym.start_col);
-        let byte_end = line_col_to_byte(&source, sym.end_line, sym.end_col);
+        let byte_start = line_col_to_byte(&source, sym.range.start_line, sym.range.start_col);
+        let byte_end = line_col_to_byte(&source, sym.range.end_line, sym.range.end_col);
 
         let raw_calls = extract_calls_full(&source, root, byte_start, byte_end, lang);
 
@@ -2112,6 +2142,8 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
                     kind: s.kind.clone(),
                     exported: s.exported,
                     signature: s.signature.clone(),
+                    line: s.range.start_line + 1,
+                    range: s.range.clone(),
                 },
             )
         })
@@ -2126,53 +2158,12 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
     })
 }
 
-/// Minimal symbol info needed for call graph construction.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct SymbolInfo {
-    name: String,
-    kind: SymbolKind,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-    exported: bool,
-    signature: Option<String>,
-}
-
-/// Extract symbols from a parsed tree without going through the full
-/// FileParser/AppContext machinery.
-fn list_symbols_from_tree(
-    _source: &str,
-    _tree: &Tree,
-    _lang: LangId,
-    path: &Path,
-) -> Vec<SymbolInfo> {
-    // Use the parser module's symbol listing via a temporary FileParser
-    let mut file_parser = crate::parser::FileParser::new();
-    match file_parser.parse(path) {
-        Ok(_) => {}
-        Err(_) => return vec![],
-    }
-
-    // Use the tree-sitter provider to list symbols
-    let provider = crate::parser::TreeSitterProvider::new();
-    match provider.list_symbols(path) {
-        Ok(symbols) => symbols
-            .into_iter()
-            .map(|s| SymbolInfo {
-                name: s.name,
-                kind: s.kind,
-                start_line: s.range.start_line,
-                start_col: s.range.start_col,
-                end_line: s.range.end_line,
-                end_col: s.range.end_col,
-                exported: s.exported,
-                signature: s.signature,
-            })
-            .collect(),
-        Err(_) => vec![],
-    }
+fn get_symbol_meta_from_data(file_data: &FileCallData, symbol_name: &str) -> (u32, Option<String>) {
+    file_data
+        .symbol_metadata
+        .get(symbol_name)
+        .map(|meta| (meta.line, meta.signature.clone()))
+        .unwrap_or((1, None))
 }
 
 /// Get symbol metadata (line, signature) from a file.

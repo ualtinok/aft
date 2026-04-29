@@ -266,6 +266,7 @@ impl SearchIndex {
         };
 
         if is_binary_path(path, metadata.len()) {
+            self.track_unindexed_file(path, &metadata);
             return;
         }
 
@@ -280,6 +281,7 @@ impl SearchIndex {
         };
 
         if is_binary_bytes(&content) {
+            self.track_unindexed_file(path, &metadata);
             return;
         }
 
@@ -482,15 +484,22 @@ impl SearchIndex {
             Err(_) => return Vec::new(),
         };
         let search_root = canonicalize_or_normalize(search_root);
-        let filter_root = if search_root.starts_with(&self.project_root) {
-            &self.project_root
-        } else {
-            &search_root
-        };
+        let mut entries = self
+            .files
+            .iter()
+            .filter(|file| !file.path.as_os_str().is_empty())
+            .filter(|file| is_within_search_root(&search_root, &file.path))
+            .filter(|file| filters.matches(&self.project_root, &file.path))
+            .map(|file| (file.path.clone(), file.modified))
+            .collect::<Vec<_>>();
 
-        let mut paths = walk_project_files_from(filter_root, &search_root, &filters);
-        sort_paths_by_mtime_desc(&mut paths);
-        paths
+        entries.sort_by(|(left_path, left_mtime), (right_path, right_mtime)| {
+            right_mtime
+                .cmp(left_mtime)
+                .then_with(|| left_path.cmp(right_path))
+        });
+
+        entries.into_iter().map(|(path, _)| path).collect()
     }
 
     pub fn candidates(&self, query: &RegexQuery) -> Vec<u32> {
@@ -970,6 +979,15 @@ fn search_candidate_file(
         Some(content) => content,
         None => return Vec::new(),
     };
+    // Defense in depth: even though indexing tries to filter binaries via
+    // `is_binary_path` + full-content `is_binary_bytes`, we double-check at
+    // query time. content_inspector is fast (~bytes-per-cycle on a small
+    // preview) and this guarantees we never surface matches inside binary
+    // files even if the indexer somehow let one through (e.g. file changed
+    // between indexing and query).
+    if is_binary_bytes(&content) {
+        return Vec::new();
+    }
     files_searched.fetch_add(1, Ordering::Relaxed);
 
     let shared_path = Arc::new(file.path.clone());

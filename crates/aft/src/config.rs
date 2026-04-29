@@ -104,10 +104,20 @@ pub struct Config {
     /// Whether to restrict file operations to within `project_root` (default: false).
     /// When true, write-capable commands reject paths outside the project root.
     pub restrict_to_project_root: bool,
-    /// Enable the experimental trigram search index (default: false).
-    pub experimental_search_index: bool,
-    /// Enable the experimental semantic search index (default: false).
-    pub experimental_semantic_search: bool,
+    /// Enable the trigram search index (default: false).
+    pub search_index: bool,
+    /// Enable semantic search (default: false).
+    pub semantic_search: bool,
+    /// Enable experimental bash command rewriting (default: false).
+    pub experimental_bash_rewrite: bool,
+    /// Enable experimental bash command compression (default: false).
+    pub experimental_bash_compress: bool,
+    /// Enable experimental bash background execution (default: false).
+    pub experimental_bash_background: bool,
+    /// Maximum number of background bash tasks allowed to run concurrently (default: 8).
+    pub max_background_bash_tasks: usize,
+    /// Enable OpenCode-style bash permission prompts (default: false).
+    pub bash_permissions: bool,
     /// Maximum file size to fully index in bytes (default: 1MB).
     pub search_index_max_file_size: u64,
     /// Maximum number of source files allowed for call-graph operations
@@ -158,8 +168,13 @@ impl Default for Config {
             // Default to false to match OpenCode's existing permission-based model.
             // The plugin opts into root restriction explicitly when desired.
             restrict_to_project_root: false,
-            experimental_search_index: false,
-            experimental_semantic_search: false,
+            search_index: false,
+            semantic_search: false,
+            experimental_bash_rewrite: false,
+            experimental_bash_compress: false,
+            experimental_bash_background: false,
+            max_background_bash_tasks: 8,
+            bash_permissions: false,
             search_index_max_file_size: 1_048_576,
             // Projects larger than this skip call-graph reverse index construction.
             // Chosen to cover typical monorepos (AFT ~2K, OpenCode ~5K, Reth ~8K)

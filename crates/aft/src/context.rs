@@ -5,11 +5,15 @@ use std::sync::mpsc;
 use notify::RecommendedWatcher;
 
 use crate::backup::BackupStore;
+use crate::bash_background::{BgCompletion, BgTaskRegistry};
 use crate::callgraph::CallGraph;
 use crate::checkpoint::CheckpointStore;
 use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
+use crate::protocol::ProgressFrame;
+
+pub type ProgressSender = Box<dyn Fn(ProgressFrame) + Send + Sync>;
 use crate::search_index::SearchIndex;
 use crate::semantic_index::SemanticIndex;
 
@@ -107,6 +111,8 @@ pub struct AppContext {
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
+    progress_sender: RefCell<Option<ProgressSender>>,
+    bash_background: BgTaskRegistry,
 }
 
 impl AppContext {
@@ -126,7 +132,27 @@ impl AppContext {
             watcher: RefCell::new(None),
             watcher_rx: RefCell::new(None),
             lsp_manager: RefCell::new(LspManager::new()),
+            progress_sender: RefCell::new(None),
+            bash_background: BgTaskRegistry::new(),
         }
+    }
+
+    pub fn set_progress_sender(&self, sender: Option<ProgressSender>) {
+        *self.progress_sender.borrow_mut() = sender;
+    }
+
+    pub fn emit_progress(&self, frame: ProgressFrame) {
+        if let Some(sender) = self.progress_sender.borrow().as_ref() {
+            sender(frame);
+        }
+    }
+
+    pub fn bash_background(&self) -> &BgTaskRegistry {
+        &self.bash_background
+    }
+
+    pub fn drain_bg_completions(&self) -> Vec<BgCompletion> {
+        self.bash_background.drain_completions()
     }
 
     /// Access the language provider.

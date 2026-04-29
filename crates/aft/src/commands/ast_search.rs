@@ -111,18 +111,46 @@ pub fn handle_ast_search(req: &RawRequest, ctx: &AppContext) -> Response {
         Err(resp) => return resp,
     };
 
+    // Pre-build the pattern ONCE so we don't re-parse it per file.
+    // Validate first (try_new returns Err on patterns that don't form a single AST node).
+    let compiled_pattern = match AstPattern::try_new(&pattern, lang.clone()) {
+        Ok(p) => p,
+        Err(_) => {
+            // Pattern is invalid for this language — return empty result, not error
+            return Response::success(
+                &req.id,
+                serde_json::json!({
+                    "matches": [],
+                    "total_matches": 0,
+                    "files_with_matches": 0,
+                    "files_searched": 0,
+                    "no_files_matched_scope": scope.no_files_matched_scope,
+                    "scope_warnings": scope.scope_warnings,
+                }),
+            );
+        }
+    };
+
+    use rayon::prelude::*;
+    let per_file: Vec<(usize, Vec<serde_json::Value>)> = scope
+        .files
+        .par_iter()
+        .map(|file_path| {
+            let source = match std::fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(_) => return (0usize, Vec::new()),
+            };
+            let matches =
+                search_file_compiled(&source, file_path, &compiled_pattern, &lang, context_lines);
+            (1usize, matches)
+        })
+        .collect();
+
     let mut all_matches: Vec<serde_json::Value> = Vec::new();
     let mut files_searched: usize = 0;
     let mut files_with_matches: usize = 0;
-
-    for file_path in &scope.files {
-        files_searched += 1;
-        let source = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let matches = search_file(&source, file_path, &pattern, &lang, context_lines);
+    for (counted, matches) in per_file {
+        files_searched += counted;
         if !matches.is_empty() {
             files_with_matches += 1;
         }
@@ -144,10 +172,10 @@ pub fn handle_ast_search(req: &RawRequest, ctx: &AppContext) -> Response {
     )
 }
 
-fn search_file(
+fn search_file_compiled(
     source: &str,
     file_path: &Path,
-    pattern: &str,
+    pattern: &ast_grep_core::matcher::Pattern,
     lang: &AstGrepLang,
     context_lines: usize,
 ) -> Vec<serde_json::Value> {
@@ -157,28 +185,18 @@ fn search_file(
     let source_lines: Vec<&str> = source.lines().collect();
     let file_str = file_path.display().to_string();
 
-    // Validate the pattern before searching. ast-grep-core panics (via unwrap) on patterns
-    // that parse to multiple AST nodes (e.g. bare `catch` or `finally` clauses).
-    use ast_grep_core::matcher::Pattern as AstPattern;
-    if AstPattern::try_new(pattern, lang.clone()).is_err() {
-        return Vec::new();
-    }
-
     let matches_iter: Vec<_> = root.find_all(pattern).collect();
 
     matches_iter
         .into_iter()
         .map(|node_match| {
             let start_pos = node_match.start_pos();
-            // ast-grep line() is 0-based; add 1 for 1-based response
             let line_1based = start_pos.line() + 1;
             let column = start_pos.byte_point().1;
-
             let text = node_match.text().to_string();
 
             let env = node_match.get_env();
             let mut meta_vars: HashMap<String, serde_json::Value> = HashMap::new();
-
             for meta_var in env.get_matched_variables() {
                 use ast_grep_core::meta_var::MetaVariable;
                 match &meta_var {
@@ -213,10 +231,8 @@ fn search_file(
             if context_lines > 0 {
                 let match_line_0 = start_pos.line();
                 let end_line_0 = node_match.end_pos().line();
-
                 let ctx_start = match_line_0.saturating_sub(context_lines);
                 let ctx_end = (end_line_0 + context_lines + 1).min(source_lines.len());
-
                 let context: Vec<serde_json::Value> = (ctx_start..ctx_end)
                     .map(|i| {
                         serde_json::json!({
@@ -226,7 +242,6 @@ fn search_file(
                         })
                     })
                     .collect();
-
                 result["context"] = serde_json::Value::Array(context);
             }
 

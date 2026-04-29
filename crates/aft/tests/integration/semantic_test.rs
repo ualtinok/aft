@@ -56,7 +56,7 @@ fn configure_semantic(
             "id": "cfg-semantic",
             "command": "configure",
             "project_root": root.display().to_string(),
-            "experimental_semantic_search": enabled,
+            "semantic_search": enabled,
             "storage_dir": storage_dir.display().to_string(),
         }),
     )

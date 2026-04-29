@@ -140,11 +140,13 @@ function, edit it by name, then follow its callers across the workspace. All wit
 single line they don't need.
 
 AFT **hoists** itself into the host harness's built-in tool slots. Whichever tools your
-harness exposes natively (`read`, `write`, `edit`, `apply_patch`, `grep`, `ast_grep_search`,
-`lsp_diagnostics`, etc.) are replaced by AFT-enhanced versions — same names the agent already
-knows, but now backed by the Rust binary for backups, formatting, inline diagnostics, and
-symbol-aware operations. With the experimental search index enabled, `grep` and `glob` are
-also hoisted with a trigram index for sub-millisecond search on any project size.
+harness exposes natively (`read`, `write`, `edit`, `bash`, `apply_patch`, `grep`,
+`ast_grep_search`, `lsp_diagnostics`, etc.) are replaced by AFT-enhanced versions — same
+names the agent already knows, but now backed by the Rust binary for backups, formatting,
+inline diagnostics, indexed search, output compression, and symbol-aware operations. Bash
+hoisting is a peer feature alongside file tools: agents can keep calling `bash`, while AFT
+adds optional command rewriting, compression, background task control, and OpenCode's
+tree-sitter permission model.
 
 The toolkit is a two-component system: a Rust binary that does the heavy lifting (parsing,
 analysis, edits, formatting) and a thin TypeScript plugin per harness that adapts the binary
@@ -237,7 +239,7 @@ src/auth/session.ts:40-52
 
 ## Search Benchmarks
 
-With `experimental_search_index: true`, AFT builds a trigram index in the background and serves
+With `search_index: true`, AFT builds a trigram index in the background and serves
 grep queries from memory. Here's how it compares to ripgrep on real codebases:
 
 ### opencode-aft (253 files)
@@ -247,7 +249,7 @@ grep queries from memory. Here's how it compares to ripgrep on real codebases:
 | `validate_path` | 31.4ms | 1.48ms | **21x** |
 | `BinaryBridge` | 31.0ms | 1.3ms | **24x** |
 | `fn handle_grep` | 31.3ms | 0.2ms | **136x** |
-| `experimental_search_index` | 31.5ms | 0.4ms | **71x** |
+| `search_index` | 31.5ms | 0.4ms | **71x** |
 
 ### reth (1,878 Rust files)
 
@@ -295,8 +297,9 @@ instant cold starts and stays fresh via file watcher and mtime verification.
 - **Safety & recovery** — undo last edit, named checkpoints, restore to any checkpoint
 - **AST pattern search & replace** — structural code search using meta-variables (`$VAR`, `$$$`), powered by ast-grep
 - **Git conflict viewer** — show all merge conflicts across the repository in a single call with line-numbered regions
-- **Indexed search** *(experimental)* — trigram-indexed `grep` and `glob` that hoist the host harness's built-ins, with background index building, disk persistence, and compressed output mode
-- **Semantic search** *(experimental)* — search code by meaning using local embeddings (fastembed + all-MiniLM-L6-v2), with cAST-style symbol chunking, cosine similarity ranking, and disk persistence
+- **Indexed search** — trigram-indexed `grep` and `glob` that hoist the host harness's built-ins, with background index building, disk persistence, and compressed output mode
+- **Semantic search** — search code by meaning using local embeddings (fastembed + all-MiniLM-L6-v2), with cAST-style symbol chunking, cosine similarity ranking, and disk persistence
+- **Bash hoisting** — replaces the host's built-in `bash` with an AFT-backed shell that supports rewriter rules (`cat` → `read`, `grep` → `grep` tool, `cat >>` → edit append), per-command output compression (`git`/`cargo`/`npm`/`bun`/`pnpm`/`pytest`/`tsc`), background tasks via `background: true` with `bash_status`/`bash_kill` for control, and tree-sitter-based permission scanning (OpenCode)
 - **Inline diagnostics** — write and edit return LSP errors detected after the change
 - **UI metadata** — diff previews (`+N/-N`) and file paths surface in the harness UI (OpenCode desktop, Pi terminal renderer)
 - **Local tool discovery** — finds biome, prettier, tsc, pyright in `node_modules/.bin` automatically
@@ -345,8 +348,8 @@ them either way when the surface tier includes them.)
 | `ast_grep_search` | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
 | `ast_grep_replace` | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
 | `lsp_diagnostics` | Errors/warnings from language server | `filePath`, `directory`, `severity`, `waitMs` |
-| `grep` *(experimental)* | Trigram-indexed regex search with compressed output | `pattern`, `path`, `include`, `exclude` |
-| `glob` *(experimental)* | Indexed file discovery with compressed output | `pattern`, `path` |
+| `grep` | Trigram-indexed regex search with compressed output | `pattern`, `path`, `include`, `exclude` |
+| `glob` | Indexed file discovery with compressed output | `pattern`, `path` |
 
 ### AFT-only tools
 
@@ -475,6 +478,15 @@ Set `content` to `""` to delete lines. Per-edit `occurrence` is supported.
 { "filePath": "src/**/*.ts", "oldString": "oldName", "newString": "newName", "replaceAll": true }
 ```
 
+**Append to file** — pass `filePath` + `appendContent`:
+
+```json
+{ "filePath": "notes.md", "appendContent": "\n## New section\n..." }
+```
+
+Creates the file (and parent directories) if missing. Faster than read+write for adding to logs,
+notepad files, or large appendable structures.
+
 All modes support `dryRun: true` to preview as a diff without modifying files. LSP diagnostics
 are returned automatically after every edit (unless `dryRun` is set) — if type errors are
 introduced, they appear inline in the response.
@@ -501,6 +513,67 @@ renames files atomically — if any operation fails, all revert.
 
 Context anchors (`@@`) use fuzzy matching to handle whitespace and Unicode differences.
 Returns LSP diagnostics inline for any updated files that introduce type errors.
+
+---
+
+### bash
+
+Execute shell commands through AFT's unified bash handler. AFT registers `bash` in the
+recommended tool surface; experimental flags gate advanced behavior, not the tool itself.
+
+**Schema:**
+
+| Param | Type | Description |
+|---|---|---|
+| `command` | string | Shell command to execute |
+| `timeout` | number | Foreground timeout in milliseconds (default: 120000) |
+| `workdir` | string | Working directory for command execution |
+| `description` | string | Short human-readable summary for harness UI metadata |
+| `background` | boolean | Spawn detached and return a task id when enabled |
+| `compressed` | boolean | Opt in/out of output compression for this call (default true; requires compression flag) |
+
+**Foreground example:**
+
+```json
+{ "command": "git status" }
+```
+
+Returns combined stdout/stderr plus `exit_code`, `duration_ms`, truncation status, and an
+`output_path` when large output spills to disk.
+
+**Rewriter** — when `experimental.bash.rewrite: true`, common shell command shapes route to AFT
+tools instead of spawning bash:
+
+| Pattern | Routes to | Example |
+|---|---|---|
+| `cat <file>` | `read` | `cat README.md` → `read` |
+| `grep [-r] PATTERN <path>` | `grep` | `grep -r TODO src/` → `grep` |
+| `find <path> -name '<glob>'` | `glob` | `find src -name '*.ts'` → `glob` |
+| `sed -n 'N,Mp' <file>` | `read startLine/endLine` | `sed -n '10,20p' src/x.ts` → `read` |
+| `ls [-l] [-R] [<path>]` | `read` directory mode / `glob` | `ls src/` → `read` |
+| `rg PATTERN [<path>]` | `grep` | `rg foo` → `grep` |
+| `cat >> <file>` / `echo "X" >> <file>` | `edit` append op | `cat >> notes.md <<< 'note'` → `edit appendContent` |
+
+Each rewrite returns the AFT tool's result with a footer hint reminding the agent to call the
+direct tool next time.
+
+**Compression** — when `experimental.bash.compress: true` (default-on once enabled), output for
+known commands is compressed via per-command compressors (`git`, `cargo`, `npm`, `bun`, `pnpm`,
+`pytest`, `tsc`). Everything else uses generic ANSI stripping and deduplication. Pass
+`compressed: false` to opt out for a single call.
+
+**Background** — when `experimental.bash.background: true`, pass `background: true` to spawn
+detached. The call returns `task_id`; inspect with `bash_status({ "task_id": "..." })`; kill
+with `bash_kill({ "task_id": "..." })`. Completed-but-unread tasks surface in
+`bg_completions: [...]` on the next foreground tool call. Output is buffered in memory up to 1MB
+and spills beyond that to AFT's bash-output cache (default `~/.cache/aft/bash-output/<task_id>.log`,
+or the harness storage directory when configured).
+
+**Permissions (OpenCode only)** — bash uses tree-sitter to parse the command into sub-commands
+and asks for permission per sub-command via `ctx.ask({ permission: "bash", patterns, always })`.
+File-touching commands (`rm`, `cp`, `mv`, etc.) also fire
+`ctx.ask({ permission: "external_directory" })` for paths outside the project root. Pi has no
+permission system; bash runs without prompts.
 
 ---
 
@@ -554,7 +627,7 @@ for servers that don't support pull (bash-language-server, yaml-language-server,
 
 **Built-in servers (6 + 1 experimental):** TypeScript (`.ts`/`.tsx`/`.js`/`.jsx`), Pyright (Python),
 rust-analyzer (Rust), gopls (Go), bash-language-server (`.sh`/`.bash`/`.zsh`),
-yaml-language-server (`.yaml`/`.yml`), and ty (Python, gated by `experimental_lsp_ty`).
+yaml-language-server (`.yaml`/`.yml`), and ty (Python, gated by `experimental.lsp_ty`).
 
 User-defined servers go in `lsp.servers` (see Configuration). Disable any built-in via `lsp.disabled`.
 
@@ -674,10 +747,10 @@ suggesting `aft_conflicts` to the bash output.
 
 ---
 
-### grep *(experimental)*
+### grep
 
 Trigram-indexed regex search that hoists the host harness's built-in `grep`. Requires
-`experimental_search_index: true` in config. The trigram index is built in a background thread
+`search_index: true` in config. The trigram index is built in a background thread
 at session start, persisted to disk for fast cold starts, and kept fresh via file watcher.
 Falls back to direct file scanning when the index isn't ready.
 
@@ -710,10 +783,10 @@ Parameters: `pattern` (required), `path` (optional — scope to subdirectory or 
 
 ---
 
-### glob *(experimental)*
+### glob
 
 Indexed file discovery that hoists the host harness's built-in `glob`. Requires
-`experimental_search_index: true`. Returns absolute paths sorted by modification time,
+`search_index: true`. Returns absolute paths sorted by modification time,
 capped at 100 files.
 
 ```json
@@ -751,7 +824,7 @@ Parameters: `pattern` (required), `path` (optional — scope to subdirectory or 
 ### aft_search *(experimental)*
 
 Find symbols by **concept** when grep keywords fall short. Returns ranked code matches with
-similarity scores. Requires `experimental_semantic_search: true` and
+similarity scores. Requires `semantic_search: true` and
 [ONNX Runtime](https://onnxruntime.ai/) installed on the system.
 
 **When to use it:**
@@ -1015,29 +1088,29 @@ The schema is identical across harnesses. Only file location differs.
 
   // Tool surface level: "minimal" | "recommended" (default) | "all"
   // minimal:     aft_outline, aft_zoom, aft_safety only (no hoisting)
-  // recommended: minimal + hoisted tools + lsp_diagnostics + ast_grep + aft_import + aft_conflicts
-  //              + grep/glob (when experimental_search_index is enabled)
-  //              + aft_search (when experimental_semantic_search is enabled)
+  // recommended: minimal + hoisted tools (read/write/edit/apply_patch/bash)
+  //              + lsp_diagnostics + ast_grep + aft_import + aft_conflicts
+  //              + grep/glob (when search_index is enabled)
+  //              + aft_search (when semantic_search is enabled)
+  //              (advanced bash behavior is gated by experimental.bash.* flags)
   // all:         recommended + aft_navigate, aft_delete, aft_move, aft_transform, aft_refactor
   "tool_surface": "recommended",
 
   // List of tool names to disable after surface filtering
   "disabled_tools": [],
 
-  // --- Experimental ---
-
-  // Enable trigram-indexed grep/glob that hoist the host harness's built-ins.
+  // Trigram-indexed grep/glob (graduated from experimental in v0.18).
   // Builds a background index on session start, persists to disk, updates via file watcher.
   // Falls back to direct scanning when the index isn't ready or for out-of-project paths.
   // Default: false
-  "experimental_search_index": false,
+  "search_index": false,
 
-  // Enable semantic code search (aft_search tool).
+  // Semantic code search (graduated from experimental in v0.18; aft_search tool).
   // Requires ONNX Runtime installed (brew install onnxruntime on macOS).
   // Builds embeddings for all symbols using a local model (all-MiniLM-L6-v2, ~22MB).
   // The model is downloaded on first use. Index persists to disk for fast cold start.
   // Default: false
-  "experimental_semantic_search": false,
+  "semantic_search": false,
 
   // Restrict all file operations to the project root directory.
   // Default: false (most harnesses gate out-of-root access via permission prompts; AFT
@@ -1095,9 +1168,29 @@ The schema is identical across harnesses. Only file location differs.
     "diagnostic_cache_size": 5000
   },
 
-  // Enable Astral's experimental ty Python type checker. Implied when lsp.python === "ty".
-  // Default: false
-  "experimental_lsp_ty": false
+  "experimental": {
+    // Use the experimental Astral `ty` Python type checker.
+    // Implied when `lsp.python === "ty"`.
+    "lsp_ty": false,
+
+    // Bash-related experimental features (all default false).
+    "bash": {
+      // Rewrite common shell commands (cat / grep / find / sed / ls / rg / cat >>)
+      // to AFT tools. Adds a footer hint nudging the agent to call the AFT tool
+      // directly next time.
+      "rewrite": false,
+
+      // Compress bash output via per-command compressors (git, cargo, npm, bun,
+      // pnpm, pytest, tsc) plus generic ANSI-strip + dedup. Pass `compressed: false`
+      // on a single bash call to opt out for that call.
+      "compress": false,
+
+      // Enable background bash via `bash({ background: true })`. Adds the
+      // `bash_status` and `bash_kill` tools. Completed-but-unread tasks surface
+      // on the next foreground tool call as `bg_completions`.
+      "background": false
+    }
+  }
 }
 ```
 
@@ -1106,6 +1199,38 @@ AFT auto-detects the formatter and checker from project config files (`biome.jso
 goimports). Local tool binaries (biome, prettier, tsc, pyright) are discovered in
 `node_modules/.bin` before falling back to the system PATH. You only need per-language overrides
 if auto-detection picks the wrong tool or you want to pin a specific formatter.
+
+### Config schema migration
+
+v0.18 reorganized experimental flags. Old config files using the flat shape:
+
+```jsonc
+{
+  "experimental_search_index": true,
+  "experimental_semantic_search": true,
+  "experimental_lsp_ty": true,
+  "experimental_bash_rewrite": true,
+  "experimental_bash_compress": true,
+  "experimental_bash_background": true
+}
+```
+
+are migrated automatically on first load to the v0.18 shape:
+
+```jsonc
+{
+  "search_index": true,        // graduated
+  "semantic_search": true,     // graduated
+  "experimental": {
+    "lsp_ty": true,
+    "bash": { "rewrite": true, "compress": true, "background": true }
+  }
+}
+```
+
+The original file is rewritten in place (both `.jsonc` and `.json` candidates are migrated).
+JSONC comments are preserved. Both user-level and project-level configs are migrated
+independently. The migration is idempotent — running again is a no-op.
 
 ### Language servers (LSP)
 
@@ -1124,9 +1249,10 @@ only if their binary is on `PATH`.
 | bash-language-server | `.sh .bash .zsh` | `bash-language-server` |
 | yaml-language-server | `.yaml .yml` | `yaml-language-server` |
 
-**Experimental:** `ty` (Astral's Python type checker) — gated behind `experimental_lsp_ty: true`
-or `lsp.python: "ty"`. When enabled, ty runs alongside Pyright unless you also disable Pyright
-via `lsp.disabled: ["python"]` (or use `lsp.python: "ty"` which does both automatically).
+**Experimental:** `ty` (Astral's Python type checker) — gated behind
+`experimental.lsp_ty: true` or `lsp.python: "ty"`. When enabled, ty runs alongside Pyright
+unless you also disable Pyright via `lsp.disabled: ["python"]` (or use `lsp.python: "ty"`
+which does both automatically).
 
 **Registering a custom server:** add it under `lsp.servers` in your config. The example
 configuration above shows registering `tinymist` for Typst files. Required fields per server:

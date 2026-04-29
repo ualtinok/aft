@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use rayon::prelude::*;
 use regex::RegexBuilder;
 
 use crate::context::AppContext;
@@ -204,57 +206,106 @@ fn fallback_grep(
         }
     };
 
-    let mut matches = Vec::new();
-    let mut total_matches = 0usize;
-    let mut files_searched = 0usize;
-    let mut files_with_matches = 0usize;
-    let mut truncated = false;
+    let total_matches = AtomicUsize::new(0);
+    let files_searched = AtomicUsize::new(0);
+    let files_with_matches = AtomicUsize::new(0);
+    let truncated = AtomicBool::new(false);
+    let stop_after = max_results.saturating_mul(2);
 
-    for file in files {
-        let Some(content) = read_searchable_text(&file) else {
-            continue;
-        };
-        files_searched += 1;
-        let line_starts = line_starts(&content);
-        let mut seen_lines = HashSet::new();
-        let mut matched_this_file = false;
-
-        for matched in regex.find_iter(&content) {
-            let (line, column, line_text) = line_details(&content, &line_starts, matched.start());
-            if !seen_lines.insert(line) {
-                continue;
-            }
-
-            total_matches += 1;
-            if matches.len() < max_results {
-                matches.push(GrepMatch {
-                    file: file.clone(),
-                    line,
-                    column,
-                    line_text,
-                    match_text: matched.as_str().to_string(),
-                });
-            } else {
-                truncated = true;
-            }
-            matched_this_file = true;
-        }
-
-        if matched_this_file {
-            files_with_matches += 1;
-        }
-    }
+    let mut matches = files
+        .par_iter()
+        .map(|file| {
+            fallback_search_file(
+                file,
+                &regex,
+                max_results,
+                stop_after,
+                &total_matches,
+                &files_searched,
+                &files_with_matches,
+                &truncated,
+            )
+        })
+        .reduce(Vec::new, |mut left, mut right| {
+            left.append(&mut right);
+            left
+        });
 
     sort_grep_matches_by_mtime_desc(&mut matches, project_root);
 
     GrepResult {
-        total_matches,
+        total_matches: total_matches.load(Ordering::Relaxed),
         matches,
-        files_searched,
-        files_with_matches,
+        files_searched: files_searched.load(Ordering::Relaxed),
+        files_with_matches: files_with_matches.load(Ordering::Relaxed),
         index_status,
-        truncated,
+        truncated: truncated.load(Ordering::Relaxed),
     }
+}
+
+fn fallback_search_file(
+    file: &std::path::PathBuf,
+    regex: &regex::Regex,
+    max_results: usize,
+    stop_after: usize,
+    total_matches: &AtomicUsize,
+    files_searched: &AtomicUsize,
+    files_with_matches: &AtomicUsize,
+    truncated: &AtomicBool,
+) -> Vec<GrepMatch> {
+    if should_stop_fallback_search(truncated, total_matches, stop_after) {
+        return Vec::new();
+    }
+
+    let Some(content) = read_searchable_text(file) else {
+        return Vec::new();
+    };
+    files_searched.fetch_add(1, Ordering::Relaxed);
+
+    let line_starts = line_starts(&content);
+    let mut seen_lines = HashSet::new();
+    let mut matched_this_file = false;
+    let mut matches = Vec::new();
+
+    for matched in regex.find_iter(&content) {
+        if should_stop_fallback_search(truncated, total_matches, stop_after) {
+            break;
+        }
+
+        let (line, column, line_text) = line_details(&content, &line_starts, matched.start());
+        if !seen_lines.insert(line) {
+            continue;
+        }
+
+        matched_this_file = true;
+        let match_number = total_matches.fetch_add(1, Ordering::Relaxed) + 1;
+        if match_number > max_results {
+            truncated.store(true, Ordering::Relaxed);
+            break;
+        }
+
+        matches.push(GrepMatch {
+            file: file.clone(),
+            line,
+            column,
+            line_text,
+            match_text: matched.as_str().to_string(),
+        });
+    }
+
+    if matched_this_file {
+        files_with_matches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    matches
+}
+
+fn should_stop_fallback_search(
+    truncated: &AtomicBool,
+    total_matches: &AtomicUsize,
+    stop_after: usize,
+) -> bool {
+    truncated.load(Ordering::Relaxed) && total_matches.load(Ordering::Relaxed) >= stop_after
 }
 
 /// Shell out to ripgrep for out-of-project searches.

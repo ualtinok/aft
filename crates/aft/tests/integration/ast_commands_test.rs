@@ -829,3 +829,142 @@ fn ast_search_and_replace_support_csharp_patterns() {
     let status = aft.shutdown();
     assert!(status.success());
 }
+
+/// Regression guard for the v0.18 perf fix.
+///
+/// Pre-fix, `ast_search` over ~150 files took ~23 seconds because
+/// `find_all(&str)` reparsed the pattern via tree-sitter on every file and
+/// the file loop was strictly serial. Post-fix (precompiled `Pattern` +
+/// rayon parallel iter), the same query completes in ~1 second.
+///
+/// We test against a 60-file synthetic Rust crate with a meta-variable
+/// member-access pattern (the worst-case shape that originally triggered
+/// the bug). Threshold of 5 seconds gives generous margin for slow CI
+/// runners while still catching ~5x regressions.
+#[test]
+fn ast_search_member_access_pattern_completes_in_reasonable_time() {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let body = r#"
+        pub fn handle(ctx: &Ctx, req: &Request) -> Response {
+            let cfg = ctx.config();
+            if cfg.search_index {
+                run_indexed(req)
+            } else {
+                run_direct(req)
+            }
+        }
+
+        struct Ctx;
+        struct Request;
+        struct Response;
+        impl Ctx {
+            fn config(&self) -> Config { Config { search_index: true } }
+        }
+        struct Config { search_index: bool }
+    "#;
+
+    for i in 0..60 {
+        files.push((format!("src/file_{i:03}.rs"), body.to_string()));
+    }
+
+    let owned: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let project = setup_project(&owned);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let start = std::time::Instant::now();
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "perf-search",
+            "method": "ast_search",
+            "pattern": "$X.search_index",
+            "lang": "rust",
+            "paths": ["src"],
+            "globs": ["*.rs"],
+            "context_lines": 2,
+        }),
+    );
+    let elapsed = start.elapsed();
+
+    assert_eq!(resp["success"], true, "ast_search should succeed: {resp:?}");
+    assert_eq!(resp["files_searched"], 60);
+    assert_eq!(resp["files_with_matches"], 60);
+    // Each file has 1 occurrence of the field-access pattern.
+    assert_eq!(resp["total_matches"], 60);
+
+    assert!(
+        elapsed.as_secs_f64() < 5.0,
+        "ast_search regressed: {} files took {:.2}s (expected < 5s). \
+         If this fails, check that ast_search.rs still pre-compiles the pattern \
+         outside the file loop and uses rayon par_iter for the file walk.",
+        resp["files_searched"],
+        elapsed.as_secs_f64()
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+/// Regression guard for the same perf bug in `ast_replace`.
+#[test]
+fn ast_replace_member_access_pattern_completes_in_reasonable_time() {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let body = r#"
+        pub fn handle(ctx: &Ctx) -> bool {
+            ctx.experimental_search_index
+        }
+        struct Ctx { experimental_search_index: bool }
+    "#;
+
+    for i in 0..60 {
+        files.push((format!("src/file_{i:03}.rs"), body.to_string()));
+    }
+
+    let owned: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let project = setup_project(&owned);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let start = std::time::Instant::now();
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "perf-replace",
+            "method": "ast_replace",
+            "pattern": "$X.experimental_search_index",
+            "rewrite": "$X.search_index",
+            "lang": "rust",
+            "paths": ["src"],
+            "globs": ["*.rs"],
+            "dry_run": true,
+        }),
+    );
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        resp["success"], true,
+        "ast_replace should succeed: {resp:?}"
+    );
+    assert_eq!(resp["files_searched"], 60);
+    assert_eq!(resp["files_with_matches"], 60);
+    assert_eq!(resp["total_replacements"], 60);
+
+    assert!(
+        elapsed.as_secs_f64() < 5.0,
+        "ast_replace regressed: {} files took {:.2}s (expected < 5s). \
+         If this fails, check that ast_replace.rs still pre-compiles the pattern \
+         outside the file loop and uses rayon par_iter for the file walk.",
+        resp["files_searched"],
+        elapsed.as_secs_f64()
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}

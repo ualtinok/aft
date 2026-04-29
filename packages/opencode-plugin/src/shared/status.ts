@@ -5,8 +5,8 @@ export interface AftStatusSnapshot {
     format_on_edit: boolean;
     validate_on_edit: string;
     restrict_to_project_root: boolean;
-    experimental_search_index: boolean;
-    experimental_semantic_search: boolean;
+    search_index: boolean;
+    semantic_search: boolean;
   };
   search_index: {
     status: string;
@@ -112,8 +112,10 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
       format_on_edit: readBoolean(features.format_on_edit),
       validate_on_edit: readString(features.validate_on_edit, "off"),
       restrict_to_project_root: readBoolean(features.restrict_to_project_root),
-      experimental_search_index: readBoolean(features.experimental_search_index),
-      experimental_semantic_search: readBoolean(features.experimental_semantic_search),
+      search_index: readBoolean(features.search_index ?? features.experimental_search_index),
+      semantic_search: readBoolean(
+        features.semantic_search ?? features.experimental_semantic_search,
+      ),
     },
     search_index: {
       status: readString(searchIndex.status, "unknown"),
@@ -159,8 +161,8 @@ export function formatStatusDialogMessage(status: AftStatusSnapshot): string {
     "",
     "Enabled features",
     `- format_on_edit: ${formatFlag(status.features.format_on_edit)}`,
-    `- experimental_search_index: ${formatFlag(status.features.experimental_search_index)}`,
-    `- experimental_semantic_search: ${formatFlag(status.features.experimental_semantic_search)}`,
+    `- search_index: ${formatFlag(status.features.search_index)}`,
+    `- semantic_search: ${formatFlag(status.features.semantic_search)}`,
     "",
     "Search index",
     `- status: ${status.search_index.status}`,
@@ -233,8 +235,8 @@ export function formatStatusMarkdown(status: AftStatusSnapshot): string {
     "",
     "### Enabled features",
     `- \`format_on_edit\`: ${formatFlag(status.features.format_on_edit)}`,
-    `- \`experimental_search_index\`: ${formatFlag(status.features.experimental_search_index)}`,
-    `- \`experimental_semantic_search\`: ${formatFlag(status.features.experimental_semantic_search)}`,
+    `- \`search_index\`: ${formatFlag(status.features.search_index)}`,
+    `- \`semantic_search\`: ${formatFlag(status.features.semantic_search)}`,
     "",
     "### Search index",
     `- **Status:** \`${status.search_index.status}\``,

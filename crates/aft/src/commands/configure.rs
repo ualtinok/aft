@@ -12,6 +12,7 @@ use crate::callgraph::CallGraph;
 use crate::config::{SemanticBackend, SemanticBackendConfig, UserServerDef};
 use crate::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerKind};
+use crate::parser::{detect_language, LangId};
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
     build_path_filters, current_git_head, resolve_cache_dir, walk_project_files, SearchIndex,
@@ -338,23 +339,395 @@ fn lsp_missing_hint(binary: &str) -> String {
     crate::format::install_hint(binary)
 }
 
-fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config) -> Vec<Value> {
+fn lang_key(lang: LangId) -> &'static str {
+    match lang {
+        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => "typescript",
+        LangId::Python => "python",
+        LangId::Rust => "rust",
+        LangId::Go => "go",
+        LangId::C => "c",
+        LangId::Cpp => "cpp",
+        LangId::Zig => "zig",
+        LangId::CSharp => "csharp",
+        LangId::Bash => "bash",
+        LangId::Html => "html",
+        LangId::Markdown => "markdown",
+    }
+}
+
+fn has_project_config(project_root: Option<&Path>, filenames: &[&str]) -> bool {
+    let Some(root) = project_root else {
+        return false;
+    };
+    filenames.iter().any(|file| root.join(file).exists())
+}
+
+fn has_pyproject_tool(project_root: Option<&Path>, tool_name: &str) -> bool {
+    let Some(root) = project_root else {
+        return false;
+    };
+    let pyproject = root.join("pyproject.toml");
+    if !pyproject.exists() {
+        return false;
+    }
+    std::fs::read_to_string(pyproject)
+        .map(|content| content.contains(&format!("[tool.{tool_name}]")))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+struct ConfigureToolCandidate {
+    tool: String,
+    source: String,
+    required: bool,
+}
+
+fn configure_tool_candidate(tool: &str, source: &str, required: bool) -> ConfigureToolCandidate {
+    ConfigureToolCandidate {
+        tool: tool.to_string(),
+        source: source.to_string(),
+        required,
+    }
+}
+
+fn explicit_formatter_candidate(name: &str) -> Vec<ConfigureToolCandidate> {
+    match name {
+        "none" | "off" | "false" => Vec::new(),
+        "biome" | "prettier" | "deno" | "ruff" | "black" | "rustfmt" | "goimports" | "gofmt" => {
+            vec![configure_tool_candidate(name, "formatter config", true)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn explicit_checker_candidate(name: &str) -> Vec<ConfigureToolCandidate> {
+    match name {
+        "none" | "off" | "false" => Vec::new(),
+        "tsc" | "cargo" | "go" | "biome" | "pyright" | "ruff" | "staticcheck" => {
+            vec![configure_tool_candidate(name, "checker config", true)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn formatter_candidates(
+    lang: LangId,
+    config: &crate::config::Config,
+) -> Vec<ConfigureToolCandidate> {
+    let project_root = config.project_root.as_deref();
+    if let Some(preferred) = config.formatter.get(lang_key(lang)) {
+        return explicit_formatter_candidate(preferred);
+    }
+
+    match lang {
+        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
+            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
+                vec![configure_tool_candidate("biome", "biome.json", true)]
+            } else if has_project_config(
+                project_root,
+                &[
+                    ".prettierrc",
+                    ".prettierrc.json",
+                    ".prettierrc.yml",
+                    ".prettierrc.yaml",
+                    ".prettierrc.js",
+                    ".prettierrc.cjs",
+                    ".prettierrc.mjs",
+                    ".prettierrc.toml",
+                    "prettier.config.js",
+                    "prettier.config.cjs",
+                    "prettier.config.mjs",
+                ],
+            ) {
+                vec![configure_tool_candidate(
+                    "prettier",
+                    "Prettier config",
+                    true,
+                )]
+            } else if has_project_config(project_root, &["deno.json", "deno.jsonc"]) {
+                vec![configure_tool_candidate("deno", "deno.json", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Python => {
+            if has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
+                || has_pyproject_tool(project_root, "ruff")
+            {
+                vec![configure_tool_candidate("ruff", "ruff config", true)]
+            } else if has_pyproject_tool(project_root, "black") {
+                vec![configure_tool_candidate("black", "pyproject.toml", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Rust => {
+            if has_project_config(project_root, &["Cargo.toml"]) {
+                vec![configure_tool_candidate("rustfmt", "Cargo.toml", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Go => {
+            if has_project_config(project_root, &["go.mod"]) {
+                vec![
+                    configure_tool_candidate("goimports", "go.mod", false),
+                    configure_tool_candidate("gofmt", "go.mod", true),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::Html | LangId::Markdown => Vec::new(),
+    }
+}
+
+fn checker_candidates(lang: LangId, config: &crate::config::Config) -> Vec<ConfigureToolCandidate> {
+    let project_root = config.project_root.as_deref();
+    if let Some(preferred) = config.checker.get(lang_key(lang)) {
+        return explicit_checker_candidate(preferred);
+    }
+
+    match lang {
+        LangId::TypeScript | LangId::JavaScript | LangId::Tsx => {
+            if has_project_config(project_root, &["biome.json", "biome.jsonc"]) {
+                vec![configure_tool_candidate("biome", "biome.json", true)]
+            } else if has_project_config(project_root, &["tsconfig.json"]) {
+                vec![configure_tool_candidate("tsc", "tsconfig.json", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Python => {
+            if has_project_config(project_root, &["pyrightconfig.json"])
+                || has_pyproject_tool(project_root, "pyright")
+            {
+                vec![configure_tool_candidate("pyright", "pyright config", true)]
+            } else if has_project_config(project_root, &["ruff.toml", ".ruff.toml"])
+                || has_pyproject_tool(project_root, "ruff")
+            {
+                vec![configure_tool_candidate("ruff", "ruff config", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Rust => {
+            if has_project_config(project_root, &["Cargo.toml"]) {
+                vec![configure_tool_candidate("cargo", "Cargo.toml", true)]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::Go => {
+            if has_project_config(project_root, &["go.mod"]) {
+                vec![
+                    configure_tool_candidate("staticcheck", "go.mod", false),
+                    configure_tool_candidate("go", "go.mod", true),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::Html | LangId::Markdown => Vec::new(),
+    }
+}
+
+fn resolve_tool_cached(
+    tool: &str,
+    project_root: Option<&Path>,
+    cache: &mut HashMap<String, bool>,
+) -> bool {
+    if let Some(is_available) = cache.get(tool) {
+        return *is_available;
+    }
+
+    let is_available = resolve_tool_uncached(tool, project_root);
+    cache.insert(tool.to_string(), is_available);
+    is_available
+}
+
+fn resolve_tool_uncached(tool: &str, project_root: Option<&Path>) -> bool {
+    if tool == "ruff" {
+        return ruff_format_available(project_root);
+    }
+
+    if let Some(root) = project_root {
+        if root.join("node_modules").join(".bin").join(tool).exists() {
+            return true;
+        }
+    }
+
+    let mut child = match std::process::Command::new(tool)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn ruff_format_available(project_root: Option<&Path>) -> bool {
+    let command = if let Some(root) = project_root {
+        let local = root.join("node_modules").join(".bin").join("ruff");
+        if local.exists() {
+            local
+        } else {
+            PathBuf::from("ruff")
+        }
+    } else {
+        PathBuf::from("ruff")
+    };
+
+    let output = match std::process::Command::new(command)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version
+        .trim()
+        .strip_prefix("ruff ")
+        .unwrap_or(version.trim());
+    let parts = version
+        .split('.')
+        .take(3)
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>();
+    match parts.as_deref() {
+        Ok([major, minor, patch]) => (*major, *minor, *patch) >= (0, 1, 2),
+        _ => false,
+    }
+}
+
+fn missing_tool_warning(
+    kind: &str,
+    language: &str,
+    candidate: &ConfigureToolCandidate,
+    project_root: Option<&Path>,
+    tool_cache: &mut HashMap<String, bool>,
+) -> Option<crate::format::MissingTool> {
+    if !candidate.required || resolve_tool_cached(&candidate.tool, project_root, tool_cache) {
+        return None;
+    }
+
+    Some(crate::format::MissingTool {
+        kind: kind.to_string(),
+        language: language.to_string(),
+        tool: candidate.tool.clone(),
+        hint: format!(
+            "{} is configured in {} but not installed. {}",
+            candidate.tool,
+            candidate.source,
+            crate::format::install_hint(&candidate.tool)
+        ),
+    })
+}
+
+fn detect_missing_tools_for_languages(
+    languages: &HashSet<LangId>,
+    config: &crate::config::Config,
+) -> Vec<crate::format::MissingTool> {
     let mut warnings = Vec::new();
     let mut seen = HashSet::new();
+    let mut tool_cache = HashMap::new();
+
+    for &lang in languages {
+        let language = lang_key(lang);
+
+        for candidate in formatter_candidates(lang, config) {
+            if let Some(warning) = missing_tool_warning(
+                "formatter_not_installed",
+                language,
+                &candidate,
+                config.project_root.as_deref(),
+                &mut tool_cache,
+            ) {
+                if seen.insert((
+                    warning.kind.clone(),
+                    warning.language.clone(),
+                    warning.tool.clone(),
+                )) {
+                    warnings.push(warning);
+                }
+            }
+        }
+
+        for candidate in checker_candidates(lang, config) {
+            if let Some(warning) = missing_tool_warning(
+                "checker_not_installed",
+                language,
+                &candidate,
+                config.project_root.as_deref(),
+                &mut tool_cache,
+            ) {
+                if seen.insert((
+                    warning.kind.clone(),
+                    warning.language.clone(),
+                    warning.tool.clone(),
+                )) {
+                    warnings.push(warning);
+                }
+            }
+        }
+    }
+
+    warnings.sort_by(|left, right| {
+        (&left.kind, &left.language, &left.tool).cmp(&(&right.kind, &right.language, &right.tool))
+    });
+    warnings
+}
+
+fn detect_missing_lsp_binaries(files: &[PathBuf], config: &crate::config::Config) -> Vec<Value> {
+    let mut warnings = Vec::new();
+    let mut seen = HashSet::new();
+    let mut resolved_binaries = HashSet::new();
+    let mut missing_binaries = HashSet::new();
 
     let project_root = config.project_root.as_deref();
     let extra_paths = &config.lsp_paths_extra;
 
-    for file in crate::callgraph::walk_project_files(root_path) {
+    for file in files {
         for server in servers_for_file(&file, config) {
             if is_custom_server(&server.kind)
-                || resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some()
+                || !seen.insert((server.kind.id_str().to_string(), server.binary.clone()))
             {
                 continue;
             }
 
-            let key = (server.kind.id_str().to_string(), server.binary.clone());
-            if seen.insert(key) {
+            if !resolved_binaries.contains(&server.binary) {
+                if resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some() {
+                    resolved_binaries.insert(server.binary.clone());
+                } else {
+                    missing_binaries.insert(server.binary.clone());
+                }
+            }
+
+            if missing_binaries.contains(&server.binary) {
                 warnings.push(json!({
                     "kind": "lsp_binary_missing",
                     "server": server.binary,
@@ -366,14 +739,19 @@ fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config)
     }
 
     for server in &config.lsp_servers {
-        if server.disabled
-            || resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some()
-        {
+        if server.disabled || !seen.insert((server.id.clone(), server.binary.clone())) {
             continue;
         }
 
-        let key = (server.id.clone(), server.binary.clone());
-        if seen.insert(key) {
+        if !resolved_binaries.contains(&server.binary) {
+            if resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some() {
+                resolved_binaries.insert(server.binary.clone());
+            } else {
+                missing_binaries.insert(server.binary.clone());
+            }
+        }
+
+        if missing_binaries.contains(&server.binary) {
             warnings.push(json!({
                 "kind": "lsp_binary_missing",
                 "server": server.id,
@@ -397,7 +775,8 @@ fn detect_missing_lsp_binaries(root_path: &Path, config: &crate::config::Config)
 /// Stderr log: `[aft] project root set: <path>`
 /// Stderr log: `[aft] watcher started: <path>`
 pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
-    let root = match req.params.get("project_root").and_then(|v| v.as_str()) {
+    let params = req.params.get("params").unwrap_or(&req.params);
+    let root = match params.get("project_root").and_then(|v| v.as_str()) {
         Some(r) => r,
         None => {
             return Response::error(
@@ -427,10 +806,10 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // Optional feature flags from plugin config
     // Optional feature flags from plugin config
-    if let Some(v) = req.params.get("format_on_edit").and_then(|v| v.as_bool()) {
+    if let Some(v) = params.get("format_on_edit").and_then(|v| v.as_bool()) {
         ctx.config_mut().format_on_edit = v;
     }
-    if let Some(raw) = req.params.get("validate_on_edit") {
+    if let Some(raw) = params.get("validate_on_edit") {
         if let Some(v) = raw.as_bool() {
             ctx.config_mut().validate_on_edit = Some(if v { "syntax" } else { "off" }.to_string());
         } else if let Some(v) = raw.as_str() {
@@ -443,7 +822,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
     // Per-language formatter overrides: { "typescript": "biome", "python": "ruff" }
-    if let Some(v) = req.params.get("formatter").and_then(|v| v.as_object()) {
+    if let Some(v) = params.get("formatter").and_then(|v| v.as_object()) {
         for (lang, tool) in v {
             if let Some(tool_str) = tool.as_str() {
                 ctx.config_mut()
@@ -453,15 +832,14 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
     // Restrict file operations to project root (default: false)
-    if let Some(v) = req
-        .params
+    if let Some(v) = params
         .get("restrict_to_project_root")
         .and_then(|v| v.as_bool())
     {
         ctx.config_mut().restrict_to_project_root = v;
     }
     // Per-language checker overrides: { "typescript": "tsc", "python": "pyright" }
-    if let Some(v) = req.params.get("checker").and_then(|v| v.as_object()) {
+    if let Some(v) = params.get("checker").and_then(|v| v.as_object()) {
         for (lang, tool) in v {
             if let Some(tool_str) = tool.as_str() {
                 ctx.config_mut()
@@ -471,56 +849,64 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    if let Some(v) = req
-        .params
-        .get("experimental_search_index")
-        .and_then(|v| v.as_bool())
-    {
-        ctx.config_mut().experimental_search_index = v;
+    if let Some(v) = params.get("search_index").and_then(|v| v.as_bool()) {
+        ctx.config_mut().search_index = v;
     }
-    if let Some(v) = req
-        .params
-        .get("experimental_semantic_search")
-        .and_then(|v| v.as_bool())
-    {
-        ctx.config_mut().experimental_semantic_search = v;
+    if let Some(v) = params.get("semantic_search").and_then(|v| v.as_bool()) {
+        ctx.config_mut().semantic_search = v;
     }
-    if let Some(v) = req
-        .params
-        .get("experimental_lsp_ty")
+    if let Some(v) = params
+        .get("experimental_bash_rewrite")
         .and_then(|v| v.as_bool())
     {
+        ctx.config_mut().experimental_bash_rewrite = v;
+    }
+    if let Some(v) = params
+        .get("experimental_bash_compress")
+        .and_then(|v| v.as_bool())
+    {
+        ctx.config_mut().experimental_bash_compress = v;
+    }
+    if let Some(v) = params
+        .get("experimental_bash_background")
+        .and_then(|v| v.as_bool())
+    {
+        ctx.config_mut().experimental_bash_background = v;
+    }
+    if let Some(v) = params.get("experimental_lsp_ty").and_then(|v| v.as_bool()) {
         ctx.config_mut().experimental_lsp_ty = v;
     }
-    if let Some(v) = req.params.get("lsp_servers") {
+    if let Some(v) = params.get("lsp_servers") {
         let servers = match parse_lsp_servers(v) {
             Ok(servers) => servers,
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().lsp_servers = servers;
     }
-    if let Some(v) = req.params.get("disabled_lsp") {
+    if let Some(v) = params.get("bash_permissions").and_then(|v| v.as_bool()) {
+        ctx.config_mut().bash_permissions = v;
+    }
+    if let Some(v) = params.get("disabled_lsp") {
         let disabled_lsp = match parse_disabled_lsp(v) {
             Ok(disabled_lsp) => disabled_lsp,
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().disabled_lsp = disabled_lsp;
     }
-    if let Some(v) = req.params.get("lsp_paths_extra") {
+    if let Some(v) = params.get("lsp_paths_extra") {
         let paths = match parse_lsp_paths_extra(v) {
             Ok(paths) => paths,
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().lsp_paths_extra = paths;
     }
-    if let Some(v) = req
-        .params
+    if let Some(v) = params
         .get("search_index_max_file_size")
         .and_then(|v| v.as_u64())
     {
         ctx.config_mut().search_index_max_file_size = v;
     }
-    if let Some(v) = req.params.get("storage_dir").and_then(|v| v.as_str()) {
+    if let Some(v) = params.get("storage_dir").and_then(|v| v.as_str()) {
         let storage_dir = match validate_storage_dir(v) {
             Ok(path) => path,
             Err(error) => {
@@ -533,7 +919,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             .borrow_mut()
             .set_storage_dir(storage_dir, ttl_hours);
     }
-    if let Some(v) = req.params.get("semantic") {
+    if let Some(v) = params.get("semantic") {
         let current = ctx.config().semantic.clone();
         let semantic = match parse_semantic_config(v, &current) {
             Ok(config) => config,
@@ -543,7 +929,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         };
         ctx.config_mut().semantic = semantic;
     }
-    if let Some(raw) = req.params.get("max_callgraph_files") {
+    if let Some(raw) = params.get("max_callgraph_files") {
         // Reject invalid values explicitly so user typos surface instead of
         // being silently swallowed (Oracle v0.15.1 review blocker).
         // Accepts: positive integers (u64).
@@ -563,14 +949,32 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             }
         }
     }
+    if let Some(raw) = params.get("max_background_bash_tasks") {
+        let parsed = raw.as_u64().filter(|v| *v >= 1);
+        match parsed.and_then(|v| usize::try_from(v).ok()) {
+            Some(v) => ctx.config_mut().max_background_bash_tasks = v,
+            None => {
+                return Response::error(
+                    &req.id,
+                    "invalid_request",
+                    format!(
+                        "max_background_bash_tasks must be a positive integer (>= 1); got {}",
+                        raw
+                    ),
+                );
+            }
+        }
+    }
 
-    // Bounded count — `.take(max + 1)` short-circuits the `ignore::Walk`
-    // iterator so huge roots don't pay full walk cost here. `saturating_add`
-    // guards the pathological case where a user sets `max_callgraph_files`
-    // to `usize::MAX`.
-    let source_file_count = crate::callgraph::walk_project_files(&root_path)
-        .take(ctx.config().max_callgraph_files.saturating_add(1))
-        .count();
+    // Single foreground source-file walk for configure-time decisions. From
+    // this list we derive source count, detected languages for formatter/checker
+    // warnings, and LSP server activation for missing-binary warnings.
+    let source_files: Vec<PathBuf> = crate::callgraph::walk_project_files(&root_path).collect();
+    let detected_languages: HashSet<LangId> = source_files
+        .iter()
+        .filter_map(|path| detect_language(path))
+        .collect();
+    let source_file_count = source_files.len();
     let exceeds = source_file_count > ctx.config().max_callgraph_files;
     if exceeds {
         log::warn!(
@@ -580,8 +984,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         );
     }
 
-    let experimental_search_index = ctx.config().experimental_search_index;
-    let experimental_semantic_search = ctx.config().experimental_semantic_search;
+    let search_index = ctx.config().search_index;
+    let semantic_search = ctx.config().semantic_search;
     let search_index_max_file_size = ctx.config().search_index_max_file_size;
     let semantic_config = ctx.config().semantic.clone();
 
@@ -615,7 +1019,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
     let storage_dir = ctx.config().storage_dir.clone();
 
-    if experimental_search_index {
+    if search_index {
         let cache_dir = resolve_cache_dir(&root_path, storage_dir.as_deref());
         let current_head = current_git_head(&root_path);
         let mut baseline = SearchIndex::read_from_disk(&cache_dir);
@@ -664,7 +1068,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         });
     }
 
-    if experimental_semantic_search {
+    if semantic_search {
         *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Building {
             stage: "queued".to_string(),
             files: None,
@@ -842,11 +1246,11 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     log::info!("project root set: {}", root_path.display());
 
     let config_snapshot = ctx.config().clone();
-    let mut warnings = crate::format::detect_missing_tools(&root_path, &config_snapshot)
+    let mut warnings = detect_missing_tools_for_languages(&detected_languages, &config_snapshot)
         .into_iter()
         .map(|warning| json!(warning))
         .collect::<Vec<_>>();
-    warnings.extend(detect_missing_lsp_binaries(&root_path, &config_snapshot));
+    warnings.extend(detect_missing_lsp_binaries(&source_files, &config_snapshot));
 
     Response::success(
         &req.id,

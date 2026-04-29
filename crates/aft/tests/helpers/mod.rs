@@ -92,6 +92,32 @@ impl AftProcess {
         stdin.flush().expect("flush stdin");
     }
 
+    /// Send a raw line and collect response lines until `predicate` returns true.
+    pub fn send_until<F>(&mut self, request: &str, mut predicate: F) -> Vec<serde_json::Value>
+    where
+        F: FnMut(&serde_json::Value) -> bool,
+    {
+        let stdin = self.child.stdin.as_mut().expect("stdin handle");
+        writeln!(stdin, "{}", request).expect("write to stdin");
+        stdin.flush().expect("flush stdin");
+
+        let mut responses = Vec::new();
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).expect("read from stdout");
+            assert!(
+                !line.is_empty(),
+                "expected a response line but got EOF from aft"
+            );
+            let value: serde_json::Value = serde_json::from_str(line.trim()).expect("parse JSON");
+            let done = predicate(&value);
+            responses.push(value);
+            if done {
+                return responses;
+            }
+        }
+    }
+
     /// Close stdin and wait for the process to exit. Returns the exit status.
     pub fn shutdown(mut self) -> std::process::ExitStatus {
         drop(self.child.stdin.take());

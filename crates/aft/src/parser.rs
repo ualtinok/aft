@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::SystemTime;
 
 use streaming_iterator::StreamingIterator;
@@ -389,6 +390,60 @@ fn query_for(lang: LangId) -> Option<&'static str> {
     }
 }
 
+static TS_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::TypeScript));
+static TSX_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Tsx));
+static JS_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::JavaScript));
+static PY_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Python));
+static RS_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Rust));
+static GO_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Go));
+static C_QUERY_CACHE: LazyLock<Result<Query, String>> = LazyLock::new(|| compile_query(LangId::C));
+static CPP_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Cpp));
+static ZIG_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Zig));
+static CSHARP_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::CSharp));
+static BASH_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Bash));
+
+fn compile_query(lang: LangId) -> Result<Query, String> {
+    let query_src = query_for(lang).ok_or_else(|| format!("missing query for {lang:?}"))?;
+    let grammar = grammar_for(lang);
+    Query::new(&grammar, query_src)
+        .map_err(|error| format!("query compile error for {lang:?}: {error}"))
+}
+
+fn cached_query_for(lang: LangId) -> Result<Option<&'static Query>, AftError> {
+    let query = match lang {
+        LangId::TypeScript => Some(&*TS_QUERY_CACHE),
+        LangId::Tsx => Some(&*TSX_QUERY_CACHE),
+        LangId::JavaScript => Some(&*JS_QUERY_CACHE),
+        LangId::Python => Some(&*PY_QUERY_CACHE),
+        LangId::Rust => Some(&*RS_QUERY_CACHE),
+        LangId::Go => Some(&*GO_QUERY_CACHE),
+        LangId::C => Some(&*C_QUERY_CACHE),
+        LangId::Cpp => Some(&*CPP_QUERY_CACHE),
+        LangId::Zig => Some(&*ZIG_QUERY_CACHE),
+        LangId::CSharp => Some(&*CSHARP_QUERY_CACHE),
+        LangId::Bash => Some(&*BASH_QUERY_CACHE),
+        LangId::Html | LangId::Markdown => None,
+    };
+
+    query
+        .map(|result| {
+            result.as_ref().map_err(|message| AftError::ParseError {
+                message: message.clone(),
+            })
+        })
+        .transpose()
+}
+
 /// Cached parse result: mtime at parse time + the tree.
 struct CachedTree {
     mtime: SystemTime,
@@ -444,6 +499,7 @@ impl SymbolCache {
 /// symbol table caching, and query pattern execution via tree-sitter.
 pub struct FileParser {
     cache: HashMap<PathBuf, CachedTree>,
+    parsers: HashMap<LangId, Parser>,
     symbol_cache: HashMap<PathBuf, CachedSymbols>,
     /// Shared pre-warmed cache from background indexing
     warm_cache: Option<SymbolCache>,
@@ -454,8 +510,28 @@ impl FileParser {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            parsers: HashMap::new(),
             symbol_cache: HashMap::new(),
             warm_cache: None,
+        }
+    }
+
+    fn parser_for(&mut self, lang: LangId) -> Result<&mut Parser, AftError> {
+        use std::collections::hash_map::Entry;
+
+        match self.parsers.entry(lang) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let grammar = grammar_for(lang);
+                let mut parser = Parser::new();
+                parser.set_language(&grammar).map_err(|e| {
+                    log::error!("grammar init failed for {:?}: {}", lang, e);
+                    AftError::ParseError {
+                        message: format!("grammar init failed for {:?}: {}", lang, e),
+                    }
+                })?;
+                Ok(entry.insert(parser))
+            }
         }
     }
 
@@ -504,16 +580,7 @@ impl FileParser {
                 path: format!("{}: {}", path.display(), e),
             })?;
 
-            let grammar = grammar_for(lang);
-            let mut parser = Parser::new();
-            parser.set_language(&grammar).map_err(|e| {
-                log::error!("grammar init failed for {:?}: {}", lang, e);
-                AftError::ParseError {
-                    message: format!("grammar init failed for {:?}: {}", lang, e),
-                }
-            })?;
-
-            let tree = parser.parse(&source, None).ok_or_else(|| {
+            let tree = self.parser_for(lang)?.parse(&source, None).ok_or_else(|| {
                 log::error!("parse failed for {}", path.display());
                 AftError::ParseError {
                     message: format!("tree-sitter parse returned None for {}", path.display()),
@@ -575,40 +642,9 @@ impl FileParser {
             path: format!("{}: {}", path.display(), e),
         })?;
 
-        let (tree, lang) = self.parse(path)?;
-        let root = tree.root_node();
-
-        // HTML and Markdown use direct tree walking, not query patterns
-        let symbols = if lang == LangId::Html {
-            extract_html_symbols(&source, &root)?
-        } else if lang == LangId::Markdown {
-            extract_md_symbols(&source, &root)?
-        } else {
-            let query_src = query_for(lang).ok_or_else(|| AftError::InvalidRequest {
-                message: format!("no query patterns implemented for {:?} yet", lang),
-            })?;
-
-            let grammar = grammar_for(lang);
-            let query = Query::new(&grammar, query_src).map_err(|e| {
-                log::error!("query compile failed for {:?}: {}", lang, e);
-                AftError::ParseError {
-                    message: format!("query compile error for {:?}: {}", lang, e),
-                }
-            })?;
-
-            match lang {
-                LangId::TypeScript | LangId::Tsx => extract_ts_symbols(&source, &root, &query)?,
-                LangId::JavaScript => extract_js_symbols(&source, &root, &query)?,
-                LangId::Python => extract_py_symbols(&source, &root, &query)?,
-                LangId::Rust => extract_rs_symbols(&source, &root, &query)?,
-                LangId::Go => extract_go_symbols(&source, &root, &query)?,
-                LangId::C => extract_c_symbols(&source, &root, &query)?,
-                LangId::Cpp => extract_cpp_symbols(&source, &root, &query)?,
-                LangId::Zig => extract_zig_symbols(&source, &root, &query)?,
-                LangId::CSharp => extract_csharp_symbols(&source, &root, &query)?,
-                LangId::Bash => extract_bash_symbols(&source, &root, &query)?,
-                LangId::Html | LangId::Markdown => vec![],
-            }
+        let symbols = {
+            let (tree, lang) = self.parse(path)?;
+            extract_symbols_from_tree(&source, tree, lang)?
         };
 
         // Cache the result
@@ -627,6 +663,43 @@ impl FileParser {
     pub fn invalidate_symbols(&mut self, path: &Path) {
         self.symbol_cache.remove(path);
         self.cache.remove(path);
+    }
+}
+
+/// Extract symbols from an already-parsed tree without reparsing.
+///
+/// Callers that already have a `tree_sitter::Tree` (e.g. callgraph::build_file_data)
+/// should use this instead of `list_symbols(path)` to avoid the redundant parse.
+pub fn extract_symbols_from_tree(
+    source: &str,
+    tree: &Tree,
+    lang: LangId,
+) -> Result<Vec<Symbol>, AftError> {
+    let root = tree.root_node();
+
+    if lang == LangId::Html {
+        return extract_html_symbols(source, &root);
+    }
+    if lang == LangId::Markdown {
+        return extract_md_symbols(source, &root);
+    }
+
+    let query = cached_query_for(lang)?.ok_or_else(|| AftError::InvalidRequest {
+        message: format!("no query patterns implemented for {:?} yet", lang),
+    })?;
+
+    match lang {
+        LangId::TypeScript | LangId::Tsx => extract_ts_symbols(source, &root, query),
+        LangId::JavaScript => extract_js_symbols(source, &root, query),
+        LangId::Python => extract_py_symbols(source, &root, query),
+        LangId::Rust => extract_rs_symbols(source, &root, query),
+        LangId::Go => extract_go_symbols(source, &root, query),
+        LangId::C => extract_c_symbols(source, &root, query),
+        LangId::Cpp => extract_cpp_symbols(source, &root, query),
+        LangId::Zig => extract_zig_symbols(source, &root, query),
+        LangId::CSharp => extract_csharp_symbols(source, &root, query),
+        LangId::Bash => extract_bash_symbols(source, &root, query),
+        LangId::Html | LangId::Markdown => unreachable!("handled before query lookup"),
     }
 }
 
@@ -3713,6 +3786,42 @@ mod tests {
 
         // Same tree (cache hit) should return identical root node range
         assert_eq!(tree1_root, tree2_root);
+    }
+
+    #[test]
+    fn extract_symbols_from_tree_matches_list_symbols() {
+        let path = fixture_path("sample.rs");
+        let source = std::fs::read_to_string(&path).unwrap();
+
+        let provider = TreeSitterProvider::new();
+        let listed = provider.list_symbols(&path).unwrap();
+
+        let mut parser = FileParser::new();
+        let (tree, lang) = parser.parse(&path).unwrap();
+        let extracted = extract_symbols_from_tree(&source, tree, lang).unwrap();
+
+        assert_eq!(symbols_as_debug(&extracted), symbols_as_debug(&listed));
+    }
+
+    fn symbols_as_debug(symbols: &[Symbol]) -> Vec<String> {
+        symbols
+            .iter()
+            .map(|symbol| {
+                format!(
+                    "{}|{:?}|{}:{}-{}:{}|{:?}|{:?}|{}|{:?}",
+                    symbol.name,
+                    symbol.kind,
+                    symbol.range.start_line,
+                    symbol.range.start_col,
+                    symbol.range.end_line,
+                    symbol.range.end_col,
+                    symbol.signature,
+                    symbol.scope_chain,
+                    symbol.exported,
+                    symbol.parent,
+                )
+            })
+            .collect()
     }
 
     // --- Python extraction ---

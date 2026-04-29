@@ -12,8 +12,8 @@ const baseResponse = Object.freeze({
     format_on_edit: false,
     validate_on_edit: "off",
     restrict_to_project_root: false,
-    experimental_search_index: true,
-    experimental_semantic_search: true,
+    search_index: true,
+    semantic_search: true,
   },
   search_index: { status: "ready", files: 4, trigrams: 400 },
   semantic_index: {

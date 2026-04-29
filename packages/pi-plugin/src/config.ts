@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { z } from "zod";
 import { error, log, warn } from "./logger.js";
 
@@ -60,10 +61,26 @@ export interface LspConfig {
   versions?: Record<string, string>;
 }
 
+export interface ExperimentalConfig {
+  bash?: {
+    rewrite?: boolean;
+    compress?: boolean;
+    background?: boolean;
+  };
+  lsp_ty?: boolean;
+}
+
 export interface ConfigureLspOverrides {
   experimental_lsp_ty?: boolean;
   lsp_servers?: LspServerConfig[];
   disabled_lsp?: string[];
+}
+
+export interface ConfigureExperimentalOverrides {
+  experimental_bash_rewrite?: boolean;
+  experimental_bash_compress?: boolean;
+  experimental_bash_background?: boolean;
+  experimental_lsp_ty?: boolean;
 }
 
 export type ToolSurface = "minimal" | "recommended" | "all";
@@ -76,9 +93,9 @@ export interface AftConfig {
   tool_surface?: ToolSurface;
   disabled_tools?: string[];
   restrict_to_project_root?: boolean;
-  experimental_search_index?: boolean;
-  experimental_semantic_search?: boolean;
-  experimental_lsp_ty?: boolean;
+  search_index?: boolean;
+  semantic_search?: boolean;
+  experimental?: ExperimentalConfig;
   lsp?: LspConfig;
   url_fetch_allow_private?: boolean;
   semantic?: SemanticConfig;
@@ -173,22 +190,35 @@ const LspConfigSchema = z.object({
   versions: z.record(z.string().trim().min(1), z.string().trim().min(1)).optional(),
 });
 
-export const AftConfigSchema = z.object({
-  format_on_edit: z.boolean().optional(),
-  validate_on_edit: z.enum(["syntax", "full"]).optional(),
-  formatter: z.record(z.string(), FormatterEnum).optional(),
-  checker: z.record(z.string(), CheckerEnum).optional(),
-  tool_surface: z.enum(["minimal", "recommended", "all"]).optional(),
-  disabled_tools: z.array(z.string()).optional(),
-  restrict_to_project_root: z.boolean().optional(),
-  experimental_search_index: z.boolean().optional(),
-  experimental_semantic_search: z.boolean().optional(),
-  experimental_lsp_ty: z.boolean().optional(),
-  lsp: LspConfigSchema.optional(),
-  url_fetch_allow_private: z.boolean().optional(),
-  semantic: SemanticConfigSchema.optional(),
-  max_callgraph_files: z.number().int().positive().optional(),
+const ExperimentalConfigSchema = z.object({
+  bash: z
+    .object({
+      rewrite: z.boolean().optional(),
+      compress: z.boolean().optional(),
+      background: z.boolean().optional(),
+    })
+    .optional(),
+  lsp_ty: z.boolean().optional(),
 });
+
+export const AftConfigSchema = z
+  .object({
+    format_on_edit: z.boolean().optional(),
+    validate_on_edit: z.enum(["syntax", "full"]).optional(),
+    formatter: z.record(z.string(), FormatterEnum).optional(),
+    checker: z.record(z.string(), CheckerEnum).optional(),
+    tool_surface: z.enum(["minimal", "recommended", "all"]).optional(),
+    disabled_tools: z.array(z.string()).optional(),
+    restrict_to_project_root: z.boolean().optional(),
+    search_index: z.boolean().optional(),
+    semantic_search: z.boolean().optional(),
+    experimental: ExperimentalConfigSchema.optional(),
+    lsp: LspConfigSchema.optional(),
+    url_fetch_allow_private: z.boolean().optional(),
+    semantic: SemanticConfigSchema.optional(),
+    max_callgraph_files: z.number().int().positive().optional(),
+  })
+  .strict();
 
 function normalizeLspExtension(extension: string): string {
   return extension.trim().replace(/^\.+/, "");
@@ -197,7 +227,7 @@ function normalizeLspExtension(extension: string): string {
 export function resolveLspConfigForConfigure(config: AftConfig): ConfigureLspOverrides {
   const overrides: ConfigureLspOverrides = {};
   const disabled = new Set(config.lsp?.disabled ?? []);
-  let experimentalTy = config.experimental_lsp_ty;
+  let experimentalTy = config.experimental?.lsp_ty;
 
   // Server IDs match Rust's `ServerKind::id_str()` — built-in Pyright is
   // identified as "python", and the experimental Astral checker as "ty".
@@ -247,54 +277,149 @@ export function resolveLspConfigForConfigure(config: AftConfig): ConfigureLspOve
   return overrides;
 }
 
-// ---------------------------------------------------------------------------
-// Minimal JSONC parser (strips comments + trailing commas before JSON.parse).
-// Kept inline to avoid adding comment-json as a runtime dep for Pi.
-// ---------------------------------------------------------------------------
-
-function stripJsonc(input: string): string {
-  let result = "";
-  let i = 0;
-  const n = input.length;
-  let inString = false;
-  let stringChar = "";
-  while (i < n) {
-    const ch = input[i];
-    const next = input[i + 1];
-    if (inString) {
-      result += ch;
-      if (ch === "\\" && i + 1 < n) {
-        result += input[i + 1];
-        i += 2;
-        continue;
-      }
-      if (ch === stringChar) inString = false;
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      stringChar = ch;
-      result += ch;
-      i++;
-      continue;
-    }
-    if (ch === "/" && next === "/") {
-      // line comment
-      while (i < n && input[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      i += 2;
-      while (i < n && !(input[i] === "*" && input[i + 1] === "/")) i++;
-      i += 2;
-      continue;
-    }
-    result += ch;
-    i++;
+export function resolveExperimentalConfigForConfigure(
+  config: AftConfig,
+): ConfigureExperimentalOverrides {
+  const overrides: ConfigureExperimentalOverrides = {};
+  if (config.experimental?.bash?.rewrite !== undefined) {
+    overrides.experimental_bash_rewrite = config.experimental.bash.rewrite;
   }
-  // Strip trailing commas before } or ]
-  return result.replace(/,(\s*[}\]])/g, "$1");
+  if (config.experimental?.bash?.compress !== undefined) {
+    overrides.experimental_bash_compress = config.experimental.bash.compress;
+  }
+  if (config.experimental?.bash?.background !== undefined) {
+    overrides.experimental_bash_background = config.experimental.bash.background;
+  }
+  if (config.experimental?.lsp_ty !== undefined) {
+    overrides.experimental_lsp_ty = config.experimental.lsp_ty;
+  }
+  return overrides;
+}
+
+type Logger = {
+  log: (message: string) => void;
+  warn: (message: string) => void;
+};
+
+type MigrationTarget = {
+  oldKey: string;
+  newPath: readonly string[];
+};
+
+const CONFIG_MIGRATIONS: readonly MigrationTarget[] = [
+  { oldKey: "experimental_search_index", newPath: ["search_index"] },
+  { oldKey: "experimental_semantic_search", newPath: ["semantic_search"] },
+  { oldKey: "experimental_lsp_ty", newPath: ["experimental", "lsp_ty"] },
+  { oldKey: "experimental_bash_rewrite", newPath: ["experimental", "bash", "rewrite"] },
+  { oldKey: "experimental_bash_compress", newPath: ["experimental", "bash", "compress"] },
+  { oldKey: "experimental_bash_background", newPath: ["experimental", "bash", "background"] },
+];
+
+function isWritableMigrationError(errorValue: unknown): boolean {
+  const code = (errorValue as { code?: unknown })?.code;
+  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+}
+
+function ensureRecordAtPath(root: Record<string, unknown>, path: readonly string[]) {
+  let current = root;
+  for (const segment of path) {
+    const existing = current[segment];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+      current[segment] = {};
+    }
+    current = current[segment] as Record<string, unknown>;
+  }
+  return current;
+}
+
+function hasPath(root: Record<string, unknown>, path: readonly string[]): boolean {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return false;
+    const record = current as Record<string, unknown>;
+    if (!Object.hasOwn(record, segment)) return false;
+    current = record[segment];
+  }
+  return true;
+}
+
+function setPath(root: Record<string, unknown>, path: readonly string[], value: unknown): void {
+  const parent = ensureRecordAtPath(root, path.slice(0, -1));
+  parent[path[path.length - 1]] = value;
+}
+
+function migrateRawConfig(
+  rawConfig: Record<string, unknown>,
+  configPath: string,
+  logger?: Logger,
+): string[] {
+  const oldKeys: string[] = [];
+  for (const migration of CONFIG_MIGRATIONS) {
+    if (!Object.hasOwn(rawConfig, migration.oldKey)) continue;
+
+    if (hasPath(rawConfig, migration.newPath)) {
+      logger?.warn(
+        `Config migration conflict at ${configPath}: ${migration.oldKey} ignored because ${migration.newPath.join(".")} is already set`,
+      );
+    } else {
+      setPath(rawConfig, migration.newPath, rawConfig[migration.oldKey]);
+    }
+    delete rawConfig[migration.oldKey];
+    oldKeys.push(migration.oldKey);
+  }
+  return oldKeys;
+}
+
+export function migrateAftConfigFile(
+  configPath: string,
+  logger: Logger = { log, warn },
+): { migrated: boolean; oldKeys: string[] } {
+  if (!existsSync(configPath)) {
+    return { migrated: false, oldKeys: [] };
+  }
+
+  let tmpPath: string | null = null;
+  let oldKeys: string[] = [];
+  try {
+    const content = readFileSync(configPath, "utf-8");
+    const rawConfig = parseJsonc<Record<string, unknown>>(content);
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+      return { migrated: false, oldKeys: [] };
+    }
+
+    oldKeys = migrateRawConfig(rawConfig, configPath, logger);
+    if (oldKeys.length === 0) {
+      return { migrated: false, oldKeys: [] };
+    }
+
+    const comments = content.match(/^\s*\/\/.*$/gm) ?? [];
+    const serialized = `${stringifyJsonc(rawConfig, null, 2)}\n`;
+    const preservedComments = comments.filter((comment) => !serialized.includes(comment.trim()));
+    const nextContent =
+      preservedComments.length > 0 ? `${preservedComments.join("\n")}\n${serialized}` : serialized;
+
+    tmpPath = `${configPath}.tmp.${process.pid}`;
+    writeFileSync(tmpPath, nextContent, "utf-8");
+    renameSync(tmpPath, configPath);
+    logger.log(`Migrated config at ${configPath}: removed ${oldKeys.join(", ")}`);
+    return { migrated: true, oldKeys };
+  } catch (err) {
+    if (tmpPath) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    if (isWritableMigrationError(err)) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        `Config migration could not write ${configPath} (${errorMsg}); using migrated config in memory`,
+      );
+      return { migrated: oldKeys.length > 0, oldKeys };
+    }
+    return { migrated: false, oldKeys: [] };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,12 +441,12 @@ function loadConfigFromPath(configPath: string): AftConfig | null {
   try {
     if (!existsSync(configPath)) return null;
     const content = readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(stripJsonc(content)) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const rawConfig = parseJsonc<Record<string, unknown>>(content);
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
       warn(`Config validation error in ${configPath}: root must be an object`);
       return null;
     }
-    const rawConfig = parsed as Record<string, unknown>;
+    migrateRawConfig(rawConfig, configPath, { log, warn });
     const result = AftConfigSchema.safeParse(rawConfig);
 
     if (result.success) {
@@ -418,6 +543,31 @@ function mergeLspConfig(base?: LspConfig, override?: LspConfig): LspConfig | und
   return Object.fromEntries(Object.entries(lsp).filter(([, v]) => v !== undefined)) as LspConfig;
 }
 
+function mergeExperimentalConfig(
+  base?: ExperimentalConfig,
+  override?: ExperimentalConfig,
+): ExperimentalConfig | undefined {
+  const bash: Record<string, unknown> = {
+    ...base?.bash,
+    ...override?.bash,
+  };
+  const experimental: Record<string, unknown> = {
+    ...base,
+    ...override,
+  };
+
+  if (Object.values(bash).some((value) => value !== undefined)) {
+    experimental.bash = bash;
+  } else {
+    delete experimental.bash;
+  }
+  if (Object.values(experimental).every((value) => value === undefined)) return undefined;
+
+  return Object.fromEntries(
+    Object.entries(experimental).filter(([, value]) => value !== undefined),
+  ) as ExperimentalConfig;
+}
+
 function getProjectLspStrippedKeys(lsp?: LspConfig): string[] {
   if (!lsp) return [];
 
@@ -449,9 +599,11 @@ const PROJECT_SAFE_TOP_LEVEL_FIELDS = new Set<keyof AftConfig>([
   // (Pi schema does not currently expose `hoist_builtin_tools`; if added, mark safe.)
   "format_on_edit",
   "validate_on_edit",
-  "experimental_search_index",
-  "experimental_semantic_search",
-  "experimental_lsp_ty",
+  // Experimental flags: project-settable so users can enable globally
+  // and toggle per-project (or vice versa). Project value overrides user value.
+  "search_index",
+  "semantic_search",
+  "experimental",
   // "disabled_tools" handled separately — unioned via array merge.
   // "formatter"/"checker" handled separately — deep-merged.
   // "semantic"/"lsp" handled separately — strict field-level merge.
@@ -485,6 +637,7 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   const checker = { ...base.checker, ...override.checker };
   const semantic = mergeSemanticConfig(base.semantic, override.semantic);
   const lsp = mergeLspConfig(base.lsp, override.lsp);
+  const experimental = mergeExperimentalConfig(base.experimental, override.experimental);
 
   // STRICT ALLOWLIST: only project-safe top-level fields are inherited.
   // See PROJECT_SAFE_TOP_LEVEL_FIELDS above for the full security rationale.
@@ -496,6 +649,7 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
     ...(Object.keys(formatter).length > 0 ? { formatter } : {}),
     ...(Object.keys(checker).length > 0 ? { checker } : {}),
     ...(lsp ? { lsp } : {}),
+    experimental,
     semantic,
     ...(disabledTools.length > 0 ? { disabled_tools: [...new Set(disabledTools)] } : {}),
   };
@@ -522,11 +676,15 @@ function getGlobalPiDir(): string {
  */
 export function loadAftConfig(projectDirectory: string): AftConfig {
   const userBasePath = join(getGlobalPiDir(), "aft");
+  migrateAftConfigFile(`${userBasePath}.jsonc`);
+  migrateAftConfigFile(`${userBasePath}.json`);
   const userDetected = detectConfigFile(userBasePath);
   const userConfigPath =
     userDetected.format !== "none" ? userDetected.path : `${userBasePath}.json`;
 
   const projectBasePath = join(projectDirectory, ".pi", "aft");
+  migrateAftConfigFile(`${projectBasePath}.jsonc`);
+  migrateAftConfigFile(`${projectBasePath}.json`);
   const projectDetected = detectConfigFile(projectBasePath);
   const projectConfigPath =
     projectDetected.format !== "none" ? projectDetected.path : `${projectBasePath}.json`;

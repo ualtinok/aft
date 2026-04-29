@@ -271,6 +271,38 @@ describe("BinaryBridge lifecycle", () => {
     }
   });
 
+  test("per-request transportTimeoutMs override sets the bridge timer", async () => {
+    const fakeBin = join(tmpdir(), `aft-fake-transport-timeout-${Date.now()}.sh`);
+    await writeFile(fakeBin, ["#!/bin/sh", "sleep 30", ""].join("\n"), { mode: 0o755 });
+
+    const originalSetTimeout = globalThis.setTimeout;
+    const delays: unknown[] = [];
+    globalThis.setTimeout = ((
+      handler: Parameters<typeof setTimeout>[0],
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      delays.push(timeout);
+      return originalSetTimeout(handler, Math.min(Number(timeout ?? 0), 1), ...args);
+    }) as typeof setTimeout;
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: 30_000,
+        maxRestarts: 0,
+      });
+
+      const err = await bridge.send("version", {}, { transportTimeoutMs: 60_000 }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("timed out after 60000ms");
+      expect(delays).toContain(60_000);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      await rm(fakeBin).catch(() => {});
+    }
+  });
+
   test("restart counter decays even after max restarts is reached", async () => {
     bridge = new BinaryBridge(BINARY_PATH, PROJECT_CWD, {
       timeoutMs: TEST_TIMEOUT_MS,

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ast_grep_lang::AstGrepLang;
@@ -39,7 +40,7 @@ pub(crate) fn collect_ast_files(
     }
 
     let files = walk_roots(project_root, &roots, lang, globs);
-    let scope_warnings = scope_warnings(project_root, &roots, lang, globs);
+    let scope_warnings = scope_warnings(project_root, &roots, lang, globs, &files);
     let no_files_matched_scope = files.is_empty();
 
     Ok(AstScope {
@@ -80,11 +81,26 @@ fn scope_warnings(
     roots: &[SearchRoot],
     lang: &AstGrepLang,
     globs: &[String],
+    files: &[PathBuf],
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    let has_include_globs = globs.iter().any(|glob| !glob.starts_with('!'));
 
     for root in roots.iter().filter(|root| root.label.is_some()) {
-        if walk_root(project_root, root, lang, &[]).is_empty() {
+        let has_files = if files.iter().any(|file| file.starts_with(&root.path)) {
+            true
+        } else if has_include_globs {
+            // The already-collected list may be empty for this root only because
+            // include globs filtered every language file out. In that ambiguous
+            // case, do one unfiltered walk for the explicit root so we preserve
+            // the existing diagnostic distinction: path has no files vs. glob
+            // matched no files.
+            !walk_root(project_root, root, lang, &[]).is_empty()
+        } else {
+            false
+        };
+
+        if !has_files {
             warnings.push(format!(
                 "{} → no files",
                 root.label.as_deref().expect("explicit root label")
@@ -92,18 +108,16 @@ fn scope_warnings(
         }
     }
 
-    let exclude_globs: Vec<String> = globs
+    let matched_relative_paths: HashSet<String> = files
         .iter()
-        .filter(|glob| glob.starts_with('!'))
-        .cloned()
+        .map(|file| relative_path_for_globs(project_root, roots, file))
         .collect();
 
     for include_glob in globs.iter().filter(|glob| !glob.starts_with('!')) {
-        let mut single_glob_scope = Vec::with_capacity(1 + exclude_globs.len());
-        single_glob_scope.push(include_glob.clone());
-        single_glob_scope.extend(exclude_globs.iter().cloned());
-
-        if walk_roots(project_root, roots, lang, &single_glob_scope).is_empty() {
+        if !matched_relative_paths
+            .iter()
+            .any(|path| glob_matches(include_glob, path))
+        {
             warnings.push(format!("{} → no files", include_glob));
         }
     }
@@ -111,6 +125,37 @@ fn scope_warnings(
     warnings.sort();
     warnings.dedup();
     warnings
+}
+
+fn relative_path_for_globs(project_root: &Path, roots: &[SearchRoot], file: &Path) -> String {
+    let filter_root = roots
+        .iter()
+        .find(|root| file.starts_with(&root.path))
+        .map(|root| {
+            if root.path.starts_with(project_root) {
+                project_root
+            } else {
+                root.path.as_path()
+            }
+        })
+        .unwrap_or(project_root);
+
+    file.strip_prefix(filter_root)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn glob_matches(glob: &str, relative_path: &str) -> bool {
+    let mut builder = ignore::overrides::OverrideBuilder::new("");
+    if builder.add(glob).is_err() {
+        return false;
+    }
+
+    builder
+        .build()
+        .map(|overrides| overrides.matched(relative_path, false).is_whitelist())
+        .unwrap_or(false)
 }
 
 fn walk_roots(
