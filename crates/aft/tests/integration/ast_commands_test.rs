@@ -969,7 +969,6 @@ fn ast_replace_member_access_pattern_completes_in_reasonable_time() {
     assert!(status.success());
 }
 
-
 // ---------------------------------------------------------------------------
 // Anonymous-`$$$`-in-rewrite regression
 // ---------------------------------------------------------------------------
@@ -987,8 +986,7 @@ fn ast_replace_member_access_pattern_completes_in_reasonable_time() {
 
 #[test]
 fn ast_replace_rejects_anonymous_variadic_in_rewrite() {
-    let original =
-        "test('alpha', () => { const v = foo(); expect(v).toBe(1); });\n".to_string();
+    let original = "test('alpha', () => { const v = foo(); expect(v).toBe(1); });\n".to_string();
     let project = setup_project(&[("sample.ts", &original)]);
     let mut aft = AftProcess::spawn();
     configure(&mut aft, project.path());
@@ -1011,9 +1009,7 @@ fn ast_replace_rejects_anonymous_variadic_in_rewrite() {
     );
     assert_eq!(resp["code"], "invalid_rewrite");
 
-    let message = resp["message"]
-        .as_str()
-        .expect("error message string");
+    let message = resp["message"].as_str().expect("error message string");
     // Guidance must point the agent at the named-variadic shape so they
     // can fix the pattern without guessing.
     assert!(
@@ -1024,7 +1020,10 @@ fn ast_replace_rejects_anonymous_variadic_in_rewrite() {
     // Critical safety check: the file must NOT have been written, and
     // must not contain a literal `$$$` from a half-applied rewrite.
     let on_disk = read_file(project.path(), "sample.ts");
-    assert_eq!(on_disk, original, "rejected rewrite must not modify files on disk");
+    assert_eq!(
+        on_disk, original,
+        "rejected rewrite must not modify files on disk"
+    );
     assert!(
         !on_disk.contains("$$$"),
         "file must not carry a literal `$$$` from a rejected rewrite"
@@ -1039,10 +1038,7 @@ fn ast_replace_accepts_named_variadic_in_rewrite() {
     // Counterpart to the rejection test: the documented workaround MUST
     // continue to work. If this regresses, the rejection guard is too
     // aggressive and would break a working pattern.
-    let project = setup_project(&[(
-        "sample.ts",
-        "test('alpha', () => { foo(); bar(); });\n",
-    )]);
+    let project = setup_project(&[("sample.ts", "test('alpha', () => { foo(); bar(); });\n")]);
     let mut aft = AftProcess::spawn();
     configure(&mut aft, project.path());
 
@@ -1058,10 +1054,7 @@ fn ast_replace_accepts_named_variadic_in_rewrite() {
         }),
     );
 
-    assert_eq!(
-        resp["success"], true,
-        "named variadic must work: {resp:?}"
-    );
+    assert_eq!(resp["success"], true, "named variadic must work: {resp:?}");
     assert_eq!(resp["total_replacements"], 1);
 
     let on_disk = read_file(project.path(), "sample.ts");
