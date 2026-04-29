@@ -23,17 +23,21 @@ import {
   shortenPath,
 } from "./render-helpers.js";
 
-const NavigateParams = Type.Object({
-  op: StringEnum(["call_tree", "callers", "trace_to", "impact", "trace_data"] as const, {
-    description: "Navigation operation",
-  }),
-  filePath: Type.String({ description: "Source file containing the symbol" }),
-  symbol: Type.String({ description: "Name of the symbol to analyze" }),
-  depth: Type.Optional(Type.Number({ description: "Max traversal depth" })),
-  expression: Type.Optional(
-    Type.String({ description: "Expression to track (required for trace_data)" }),
-  ),
-});
+function navigateParamsSchema() {
+  return Type.Object({
+    op: StringEnum(["call_tree", "callers", "trace_to", "impact", "trace_data"] as const, {
+      description: "Navigation operation",
+    }),
+    filePath: Type.String({ description: "Source file containing the symbol" }),
+    symbol: Type.String({ description: "Name of the symbol to analyze" }),
+    depth: Type.Optional(Type.Number({ description: "Max traversal depth" })),
+    expression: Type.Optional(
+      Type.String({ description: "Expression to track (required for trace_data)" }),
+    ),
+  });
+}
+
+type NavigateArgs = Static<ReturnType<typeof navigateParamsSchema>>;
 
 function treeLine(depth: number, text: string): string {
   return `${"  ".repeat(depth)}${depth === 0 ? "" : "↳ "}${text}`;
@@ -67,7 +71,7 @@ function renderTracePath(path: Record<string, unknown>, index: number, lines: st
 
 /** Exported for renderer unit tests. */
 export function buildNavigateSections(
-  args: Static<typeof NavigateParams>,
+  args: NavigateArgs,
   payload: unknown,
   theme: Theme,
 ): string[] {
@@ -163,11 +167,7 @@ export function buildNavigateSections(
 }
 
 /** Exported for renderer unit tests. */
-export function renderNavigateCall(
-  args: Static<typeof NavigateParams>,
-  theme: Theme,
-  context: RenderContextLike,
-) {
+export function renderNavigateCall(args: NavigateArgs, theme: Theme, context: RenderContextLike) {
   const summary = [
     theme.fg("accent", args.op),
     accentPath(theme, args.filePath),
@@ -181,7 +181,7 @@ export function renderNavigateCall(
 /** Exported for renderer unit tests. */
 export function renderNavigateResult(
   result: AgentToolResult<unknown>,
-  args: Static<typeof NavigateParams>,
+  args: NavigateArgs,
   theme: Theme,
   context: RenderContextLike,
 ) {
@@ -198,14 +198,8 @@ export function registerNavigateTool(pi: ExtensionAPI, ctx: PluginContext): void
     label: "navigate",
     description:
       "Navigate code structure across files using call graph analysis. All ops require both `filePath` and `symbol`. Use `call_tree` for what a function calls, `callers` for call sites, `trace_to` for entry points, `impact` for blast radius, `trace_data` to follow a value.",
-    parameters: NavigateParams,
-    async execute(
-      _toolCallId: string,
-      params: Static<typeof NavigateParams>,
-      _signal,
-      _onUpdate,
-      extCtx,
-    ) {
+    parameters: navigateParamsSchema(),
+    async execute(_toolCallId: string, params: NavigateArgs, _signal, _onUpdate, extCtx) {
       if (params.op === "trace_data" && !params.expression) {
         throw new Error("op='trace_data' requires an `expression`");
       }

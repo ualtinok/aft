@@ -12,6 +12,7 @@ use aft::lsp::manager::LspManager;
 use aft::lsp::registry::ServerKind;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::RawRequest;
+use lsp_types::FileChangeType;
 use tempfile::tempdir;
 
 use super::helpers::AftProcess;
@@ -45,6 +46,24 @@ fn rust_workspace_with_files(names: &[&str]) -> (tempfile::TempDir, PathBuf, Vec
     for name in names {
         let path = src_dir.join(name);
         fs::write(&path, "fn main() {}\n").expect("write fixture source");
+        files.push(path);
+    }
+
+    (temp_dir, root, files)
+}
+
+fn typescript_workspace_with_files(names: &[&str]) -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+    let temp_dir = tempdir().expect("tempdir");
+    let root = temp_dir.path().join("workspace");
+    let src_dir = root.join("src");
+
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    fs::write(root.join("package.json"), "{\"devDependencies\":{}}\n").expect("write package.json");
+
+    let mut files = Vec::new();
+    for name in names {
+        let path = src_dir.join(name);
+        fs::write(&path, "export const value = 1;\n").expect("write fixture source");
         files.push(path);
     }
 
@@ -86,6 +105,27 @@ fn manager_with_fake_server() -> LspManager {
     manager
 }
 
+fn manager_with_fake_typescript_server() -> LspManager {
+    let mut manager = LspManager::new();
+    manager.override_binary(ServerKind::TypeScript, fake_server_path());
+    manager
+}
+
+fn collect_watched_file_events(manager: &mut LspManager) -> serde_json::Value {
+    let event = collect_event(manager, |event| {
+        matches!(
+            event,
+            LspEvent::Notification { method, .. } if method == "custom/watchedFilesChanged"
+        )
+    })
+    .expect("timed out waiting for watched-file notification");
+
+    match event {
+        LspEvent::Notification { params, .. } => params.expect("watched event params"),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
 fn app_context_with_fake_lsp() -> AppContext {
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
     ctx.lsp()
@@ -113,6 +153,78 @@ fn test_diagnostics_stored_after_did_open() {
     assert_eq!(diagnostics[1].line, 2);
     assert_eq!(diagnostics[1].column, 5);
     assert_eq!(diagnostics[1].severity, DiagnosticSeverity::Warning);
+}
+
+#[test]
+fn watched_files_sent_for_config_edit_alongside_source_edit() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let package_json = root.join("package.json");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let mut manager = manager_with_fake_typescript_server();
+
+    manager
+        .notify_file_changed(source, "export const value = 2;\n", &config)
+        .expect("open ts source");
+    wait_for_publish(&mut manager);
+
+    manager
+        .notify_files_watched_changed(&[(package_json.clone(), FileChangeType::CHANGED)], &config)
+        .expect("notify watched files");
+
+    let params = collect_watched_file_events(&mut manager);
+    let changes = params["changes"].as_array().expect("changes array");
+    assert_eq!(changes.len(), 1);
+    assert!(
+        changes[0]["uri"]
+            .as_str()
+            .expect("uri")
+            .ends_with("/package.json"),
+        "unexpected uri: {params}"
+    );
+    assert_eq!(changes[0]["type"], 2);
+}
+
+#[test]
+fn watched_files_preserve_created_changed_deleted_event_types() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    let package_json = root.join("package.json");
+    let tsconfig = root.join("tsconfig.json");
+    let jsconfig = root.join("jsconfig.json");
+    fs::write(&tsconfig, "{\"compilerOptions\":{}}\n").expect("write tsconfig");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let mut manager = manager_with_fake_typescript_server();
+
+    manager
+        .notify_file_changed(source, "export const value = 2;\n", &config)
+        .expect("open ts source");
+    wait_for_publish(&mut manager);
+
+    manager
+        .notify_files_watched_changed(
+            &[
+                (package_json, FileChangeType::CHANGED),
+                (tsconfig, FileChangeType::CREATED),
+                (jsconfig, FileChangeType::DELETED),
+            ],
+            &config,
+        )
+        .expect("notify watched files");
+
+    let params = collect_watched_file_events(&mut manager);
+    let changes = params["changes"].as_array().expect("changes array");
+    let event_types: Vec<i64> = changes
+        .iter()
+        .map(|change| change["type"].as_i64().expect("type number"))
+        .collect();
+    assert_eq!(event_types, vec![2, 1, 3]);
 }
 
 #[test]
@@ -410,7 +522,6 @@ fn test_empty_publish_is_not_lost() {
 fn test_diagnostic_cache_respects_cap() {
     use aft::lsp::diagnostics::{DiagnosticSeverity, DiagnosticsStore, StoredDiagnostic};
     use aft::lsp::registry::ServerKind;
-    use aft::lsp::roots::ServerKey;
 
     let mut store = DiagnosticsStore::with_capacity(3);
 

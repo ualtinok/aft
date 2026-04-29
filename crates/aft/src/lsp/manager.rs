@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use lsp_types::notification::{DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument};
+use lsp_types::notification::{
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    VersionedTextDocumentIdentifier,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, FileChangeType, FileEvent, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, VersionedTextDocumentIdentifier,
 };
 
 use crate::config::Config;
@@ -480,6 +482,50 @@ impl LspManager {
         content: &str,
     ) -> Result<(), LspError> {
         self.notify_file_changed(file_path, content, &Config::default())
+    }
+
+    /// Notify every active server whose workspace contains at least one changed
+    /// path that watched files changed. This is intentionally workspace-scoped
+    /// rather than extension-scoped: configuration edits such as `package.json`
+    /// or `tsconfig.json` affect a server's project graph even though those
+    /// files may not be documents handled by the server itself.
+    pub fn notify_files_watched_changed(
+        &mut self,
+        paths: &[(PathBuf, FileChangeType)],
+        _config: &Config,
+    ) -> Result<(), LspError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let mut canonical_events = Vec::with_capacity(paths.len());
+        for (path, typ) in paths {
+            let canonical_path = resolve_for_lsp_uri(path);
+            canonical_events.push((canonical_path, *typ));
+        }
+
+        let keys: Vec<ServerKey> = self.clients.keys().cloned().collect();
+        for key in keys {
+            let mut changes = Vec::new();
+            for (path, typ) in &canonical_events {
+                if !path.starts_with(&key.root) {
+                    continue;
+                }
+                changes.push(FileEvent::new(uri_for_path(path)?, *typ));
+            }
+
+            if changes.is_empty() {
+                continue;
+            }
+
+            if let Some(client) = self.clients.get_mut(&key) {
+                client.send_notification::<DidChangeWatchedFiles>(DidChangeWatchedFilesParams {
+                    changes,
+                })?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Close a document in all servers that have it open.
@@ -1220,6 +1266,31 @@ impl Default for LspManager {
 
 fn canonicalize_for_lsp(file_path: &Path) -> Result<PathBuf, LspError> {
     std::fs::canonicalize(file_path).map_err(LspError::from)
+}
+
+fn resolve_for_lsp_uri(file_path: &Path) -> PathBuf {
+    if let Ok(path) = std::fs::canonicalize(file_path) {
+        return path;
+    }
+
+    let mut existing = file_path.to_path_buf();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        missing.push(name.to_owned());
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        existing = parent.to_path_buf();
+    }
+
+    let mut resolved = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for segment in missing.into_iter().rev() {
+        resolved.push(segment);
+    }
+    resolved
 }
 
 fn uri_for_path(path: &Path) -> Result<lsp_types::Uri, LspError> {

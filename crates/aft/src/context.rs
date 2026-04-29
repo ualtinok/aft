@@ -2,6 +2,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 
+use lsp_types::FileChangeType;
 use notify::RecommendedWatcher;
 
 use crate::backup::BackupStore;
@@ -11,6 +12,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
+use crate::lsp::registry::is_config_file_path;
 use crate::protocol::ProgressFrame;
 
 pub type ProgressSender = Box<dyn Fn(ProgressFrame) + Send + Sync>;
@@ -302,6 +304,74 @@ impl AppContext {
         )
     }
 
+    fn notify_watched_config_files(&self, file_paths: &[PathBuf], change_type: FileChangeType) {
+        let config_paths: Vec<(PathBuf, FileChangeType)> = file_paths
+            .iter()
+            .filter(|path| is_config_file_path(path))
+            .cloned()
+            .map(|path| (path, change_type))
+            .collect();
+
+        if config_paths.is_empty() {
+            return;
+        }
+
+        if let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() {
+            let config = self.config();
+            if let Err(e) = lsp.notify_files_watched_changed(&config_paths, &config) {
+                log::warn!("watched-file sync error: {}", e);
+            }
+        }
+    }
+
+    fn multi_file_write_paths(params: &serde_json::Value) -> Option<Vec<PathBuf>> {
+        let paths = params
+            .get("multi_file_write_paths")
+            .and_then(|value| value.as_array())?
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+
+        (!paths.is_empty()).then_some(paths)
+    }
+
+    /// Post-write LSP hook for multi-file edits. When the patch includes
+    /// config-file edits, notify active workspace servers via
+    /// `workspace/didChangeWatchedFiles` before sending the per-document
+    /// didOpen/didChange for the current file.
+    pub fn lsp_post_multi_file_write(
+        &self,
+        file_path: &Path,
+        content: &str,
+        file_paths: &[PathBuf],
+        params: &serde_json::Value,
+    ) -> Option<crate::lsp::manager::PostEditWaitOutcome> {
+        self.notify_watched_config_files(file_paths, FileChangeType::CHANGED);
+
+        let wants_diagnostics = params
+            .get("diagnostics")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !wants_diagnostics {
+            self.lsp_notify_file_changed(file_path, content);
+            return None;
+        }
+
+        let wait_ms = params
+            .get("wait_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3000)
+            .min(10_000);
+
+        Some(self.lsp_notify_and_collect_diagnostics(
+            file_path,
+            content,
+            std::time::Duration::from_millis(wait_ms),
+        ))
+    }
+
     /// Post-write LSP hook: notify server and optionally collect diagnostics.
     ///
     /// This is the single call site for all command handlers after `write_format_validate`.
@@ -330,6 +400,9 @@ impl AppContext {
             .unwrap_or(false);
 
         if !wants_diagnostics {
+            if let Some(file_paths) = Self::multi_file_write_paths(params) {
+                self.notify_watched_config_files(&file_paths, FileChangeType::CHANGED);
+            }
             self.lsp_notify_file_changed(file_path, content);
             return None;
         }
@@ -339,6 +412,10 @@ impl AppContext {
             .and_then(|v| v.as_u64())
             .unwrap_or(3000)
             .min(10_000); // Cap at 10 seconds to prevent hangs from adversarial input
+
+        if let Some(file_paths) = Self::multi_file_write_paths(params) {
+            return self.lsp_post_multi_file_write(file_path, content, &file_paths, params);
+        }
 
         Some(self.lsp_notify_and_collect_diagnostics(
             file_path,

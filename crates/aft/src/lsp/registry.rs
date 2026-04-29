@@ -592,6 +592,26 @@ pub fn servers_for_file(path: &Path, config: &Config) -> Vec<ServerDef> {
         .collect()
 }
 
+/// Returns true when `path` is a project configuration file whose changes can
+/// affect an LSP server's workspace/project graph, even if the edited file
+/// itself is not a source file handled by that server.
+pub fn is_config_file_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        file_name,
+        "package.json"
+            | "tsconfig.json"
+            | "jsconfig.json"
+            | "pyproject.toml"
+            | "Cargo.toml"
+            | "go.mod"
+            | "go.sum"
+    ) || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
+}
+
 fn builtin_server(
     kind: ServerKind,
     name: &str,
@@ -663,7 +683,7 @@ mod tests {
 
     use crate::config::{Config, UserServerDef};
 
-    use super::{resolve_lsp_binary, servers_for_file, ServerKind};
+    use super::{is_config_file_path, resolve_lsp_binary, servers_for_file, ServerKind};
 
     fn matching_kinds(path: &str, config: &Config) -> Vec<ServerKind> {
         servers_for_file(Path::new(path), config)
@@ -681,6 +701,38 @@ mod tests {
             kinds.contains(&ServerKind::TypeScript),
             "expected TypeScript in {kinds:?}",
         );
+    }
+
+    #[test]
+    fn test_is_config_file_path_recognizes_project_graph_configs() {
+        for path in [
+            "/repo/package.json",
+            "/repo/tsconfig.json",
+            "/repo/tsconfig.build.json",
+            "/repo/jsconfig.json",
+            "/repo/pyproject.toml",
+            "/repo/Cargo.toml",
+            "/repo/go.mod",
+            "/repo/go.sum",
+        ] {
+            assert!(
+                is_config_file_path(Path::new(path)),
+                "expected config: {path}"
+            );
+        }
+
+        for path in [
+            "/repo/package-lock.json",
+            "/repo/tsconfig-json",
+            "/repo/tsconfig.build.ts",
+            "/repo/cargo.toml",
+            "/repo/src/package.json.ts",
+        ] {
+            assert!(
+                !is_config_file_path(Path::new(path)),
+                "expected non-config: {path}"
+            );
+        }
     }
 
     #[test]

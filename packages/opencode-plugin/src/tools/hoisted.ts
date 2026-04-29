@@ -1008,6 +1008,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       }
 
       const relPaths = Array.from(affectedAbs).map((abs) => path.relative(context.worktree, abs));
+      const multiFileWritePaths = Array.from(affectedAbs);
 
       await context.ask({
         permission: "edit",
@@ -1078,6 +1079,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
                 create_dirs: true,
                 diagnostics: true,
                 include_diff: true,
+                multi_file_write_paths: multiFileWritePaths,
               });
               const wrDiff = writeResult.diff as
                 | { before?: string; after?: string; additions?: number; deletions?: number }
@@ -1150,6 +1152,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
                 create_dirs: true,
                 diagnostics: true,
                 include_diff: true,
+                multi_file_write_paths: multiFileWritePaths,
               });
 
               // Collect diagnostics from this file

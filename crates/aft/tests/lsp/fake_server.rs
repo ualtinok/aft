@@ -499,6 +499,12 @@ fn main() -> io::Result<()> {
             },
             ServerMessage::Notification { method, params } => match method.as_str() {
                 "initialized" => {}
+                "workspace/didChangeWatchedFiles" => {
+                    write_notification(
+                        &mut writer,
+                        &Notification::new("custom/watchedFilesChanged", params),
+                    )?;
+                }
                 "textDocument/didOpen" => {
                     let uri = document_uri(&params);
                     let version = document_version(&params);
