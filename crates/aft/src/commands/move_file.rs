@@ -46,6 +46,21 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
     };
 
     if !src_path.exists() {
+        // When the source is missing AND the destination already exists, the
+        // most likely cause is that this rename was already done earlier in
+        // the session (or by another process). Surfacing this distinction
+        // saves the agent a round-trip to discover it via `ls` or stat.
+        if dst_path.exists() {
+            return Response::error(
+                &req.id,
+                "file_not_found",
+                format!(
+                    "move_file: source file not found: {}. Destination '{}' already exists \
+                     — was this file already moved earlier? Verify with `read` before retrying.",
+                    file, destination
+                ),
+            );
+        }
         return Response::error(
             &req.id,
             "file_not_found",

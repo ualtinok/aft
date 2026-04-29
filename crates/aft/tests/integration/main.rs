@@ -34,6 +34,7 @@ mod lsp_manager_test;
 mod lsp_rename_test;
 mod markdown_test;
 mod member_test;
+mod move_file_test;
 mod move_symbol_test;
 mod outline_languages_test;
 mod outline_zoom_test;
