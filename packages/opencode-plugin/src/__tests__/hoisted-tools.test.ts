@@ -250,7 +250,12 @@ describe("Hoisted tool execute handlers", () => {
     });
   });
 
-  test("apply_patch restores the checkpoint after a later hunk fails", async () => {
+  /// BUG-6a (per-file commit): when a 2-hunk patch has 1 success and 1
+  /// failure, the successful hunk MUST stay applied. Pre-fix, AFT rolled
+  /// the whole patch back via checkpoint restore + newly-created cleanup,
+  /// throwing away the agent's correct work and forcing them to manually
+  /// split patches. New behavior: each hunk commits independently.
+  test("apply_patch keeps successful hunks when a later hunk fails (per-file commit)", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -281,11 +286,9 @@ describe("Hoisted tool execute handlers", () => {
       }
 
       if (command === "delete_file") {
+        // Cleanup of the failed-add partial. We don't expect any other
+        // delete_file calls — successful hunks must NOT be deleted.
         await rm(params.file as string, { force: true });
-        return { success: true };
-      }
-
-      if (command === "restore_checkpoint") {
         return { success: true };
       }
 
@@ -296,26 +299,47 @@ describe("Hoisted tool execute handlers", () => {
 
     expect(result).toContain("Created created.ts");
     expect(result).toContain("Failed to create broken.ts: Simulated patch failure");
-    // Both hunks are adds (newly-created), so there is no checkpoint — rollback
-    // proceeds purely by deleting the newly-created file.
-    expect(result).toContain("removed 1 newly-created file(s)");
-    // No checkpoint call because both paths were newly-created (checkpointPaths empty).
-    expect(calls.map((call) => call.command)).toEqual(["write", "write", "delete_file"]);
-    expect(existsSync(createdFile)).toBe(false);
+    // New: explicit partial-success summary.
+    expect(result).toContain("Patch partially applied");
+    expect(result).toContain("1 of 2 hunk(s) succeeded");
+    expect(result).toContain("Failed: broken.ts");
+    expect(result).toContain("aft_safety");
+
+    // No "rolled back" wording — we keep successful changes.
+    expect(result).not.toContain("removed 1 newly-created file(s)");
+    expect(result).not.toContain("restored pre-existing files");
+
+    // The successful add MUST still be on disk.
+    expect(existsSync(createdFile)).toBe(true);
+
+    // No checkpoint call because both paths were newly-created
+    // (checkpointPaths empty). The failed-add file is best-effort cleaned
+    // up via delete_file in the catch block — but only because the
+    // simulated write threw AFTER the file was supposedly created. Our
+    // mock's write throws before fs.write happens so the file never
+    // exists; assert it was attempted but tolerate either outcome.
+    expect(calls.some((c) => c.command === "write" && c.params.file === createdFile)).toBe(true);
+    expect(calls.some((c) => c.command === "write" && c.params.file === failedFile)).toBe(true);
+    // Crucially: NO restore_checkpoint and NO delete on createdFile.
+    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(false);
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === createdFile)).toBe(
+      false,
+    );
   });
 
-  test("apply_patch move rollback deletes orphan destination when source delete fails", async () => {
+  /// Per-file commit on a partial move: when the destination write succeeds
+  /// but the source delete fails, the destination stays (it IS the agent's
+  /// requested change), the source stays (we couldn't delete it), and the
+  /// hunk is marked failed in the result. The agent sees the failure and
+  /// can decide whether to retry or accept the duplicate. This is the
+  /// per-file-commit replacement for the older audit #8 atomic rollback.
+  test("apply_patch keeps the move destination when source delete fails (per-file commit)", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
-    // Pre-existing source file that's being moved; the move destination does
-    // not exist before the patch. On partial failure (source delete errors)
-    // the destination must be removed — otherwise the old and new files
-    // co-exist (audit #8 regression).
     const sourceFile = resolve(tmpDir, "src/original.ts");
     const destFile = resolve(tmpDir, "src/renamed.ts");
     await writeFile(sourceFile, "export const x = 1;\n", { flag: "wx" }).catch(async () => {
-      // Parent dir doesn't exist yet — create it and retry.
       const { mkdir } = await import("node:fs/promises");
       await mkdir(resolve(tmpDir as string, "src"), { recursive: true });
       await writeFile(sourceFile, "export const x = 1;\n");
@@ -348,27 +372,98 @@ describe("Hoisted tool execute handlers", () => {
           // Simulate the source delete failing mid-patch.
           throw new Error("Simulated delete_file failure");
         }
-        if (file === destFile) {
-          // Rollback's newly-created cleanup. Actually remove it.
-          await rm(destFile, { force: true });
-          return { success: true };
-        }
       }
-      if (command === "restore_checkpoint") return { success: true };
       throw new Error(`Unexpected command: ${command}`);
     });
 
     const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
 
     expect(destWritten).toBe(true);
-    // The fix must remove the orphan destination.
-    expect(existsSync(destFile)).toBe(false);
-    // And report it in the rollback summary.
-    expect(result).toContain("removed 1 newly-created file(s)");
-    // Source should be restored via checkpoint (we checkpointed it pre-patch).
-    expect(calls.map((c) => c.command)).toContain("restore_checkpoint");
-    // Newly-created destination must have been deleted.
-    expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(true);
+    // Destination MUST stay — it IS the agent's intended new state.
+    expect(existsSync(destFile)).toBe(true);
+    // Failure surface: the result reports the failed hunk (the source delete).
+    expect(result).toContain("Failed to update src/original.ts");
+    // No atomic-rollback wording.
+    expect(result).not.toContain("removed 1 newly-created file(s)");
+    expect(result).not.toContain("restored pre-existing files");
+    // No restore_checkpoint call (per-file commit means no rollback).
+    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(false);
+    // No delete_file on destFile (we keep what succeeded).
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(
+      false,
+    );
+  });
+
+  /// BUG-6a dogfooding repro: the user's exact 3-file complaint. A multi-
+  /// file patch where 2 files patch cleanly and the 3rd hits a fuzzy-match
+  /// drift used to roll back the 2 successes. Now the 2 successes commit
+  /// and only the failed file is reported as failing.
+  test("apply_patch keeps successful files when ONE of three updates fails (user repro)", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const okFile1 = resolve(tmpDir, "cli-program.ts");
+    const okFile2 = resolve(tmpDir, "cli-installer.ts");
+    const driftFile = resolve(tmpDir, "athena-council-guard.ts");
+
+    // Seed all three files with realistic pre-patch content.
+    await writeFile(okFile1, "old line 1\n");
+    await writeFile(okFile2, "old line 2\n");
+    await writeFile(driftFile, "drifted content that won't match\n");
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: cli-program.ts",
+      "@@",
+      "-old line 1",
+      "+new line 1",
+      "*** Update File: cli-installer.ts",
+      "@@",
+      "-old line 2",
+      "+new line 2",
+      "*** Update File: athena-council-guard.ts",
+      "@@",
+      "-expected line that doesn't exist in file",
+      "+something else",
+      "*** End Patch",
+    ].join("\n");
+
+    const { calls, tools } = createMockHoistedHarness(async (command, params) => {
+      if (command === "checkpoint") return { success: true };
+      if (command === "write") {
+        const file = params.file as string;
+        await writeFile(file, params.content as string);
+        return { success: true };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+
+    expect(result).toContain("Updated cli-program.ts");
+    expect(result).toContain("Updated cli-installer.ts");
+    expect(result).toContain("Failed to update athena-council-guard.ts");
+    expect(result).toContain("Patch partially applied");
+    expect(result).toContain("2 of 3 hunk(s) succeeded");
+    expect(result).toContain("aft_safety");
+
+    // The two successful files must reflect the new content on disk.
+    expect((await import("node:fs/promises")).readFile(okFile1, "utf-8")).resolves.toBe(
+      "new line 1\n",
+    );
+    expect((await import("node:fs/promises")).readFile(okFile2, "utf-8")).resolves.toBe(
+      "new line 2\n",
+    );
+    // The drifted file is unchanged (applyUpdateChunks throws BEFORE write).
+    expect((await import("node:fs/promises")).readFile(driftFile, "utf-8")).resolves.toBe(
+      "drifted content that won't match\n",
+    );
+
+    // No restore_checkpoint anywhere — that's the whole fix.
+    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(false);
+    // No delete_file on the successful files — we keep them.
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === okFile1)).toBe(false);
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === okFile2)).toBe(false);
   });
 
   test("read returns binary-file messages without trying to split missing content", async () => {

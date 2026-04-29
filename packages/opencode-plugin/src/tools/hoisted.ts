@@ -1016,21 +1016,22 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         metadata: {},
       });
 
-      // Checkpoint only files that exist pre-patch. Non-existent destinations
-      // are tracked in newlyCreatedAbs and reverted by deletion on rollback.
+      // Pre-patch checkpoint covers files that exist pre-patch (so the
+      // agent can `aft_safety` undo if they want to abort after seeing a
+      // partial result). Newly-created targets are deleted to revert.
+      // Checkpoint failure is non-fatal — agent can still inspect partial
+      // results and proceed.
       const checkpointPaths = Array.from(affectedAbs).filter((abs) => !newlyCreatedAbs.has(abs));
       const checkpointName = `apply_patch_${Date.now()}`;
-      let checkpointCreated = false;
       if (checkpointPaths.length > 0) {
         try {
           await callBridge(ctx, context, "checkpoint", {
             name: checkpointName,
             files: checkpointPaths,
           });
-          checkpointCreated = true;
         } catch {
-          // Checkpoint failure is non-fatal — proceed without rollback
-          // protection (the hunk loop still records perFileDiffs for the UI).
+          // Checkpoint failure: agent loses the easy `aft_safety` undo
+          // path but the patch still attempts each hunk independently.
         }
       }
 
@@ -1041,7 +1042,21 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       // recomputing via TS-side LCS to keep one source of truth (issue: the
       // `apply_patch` UI was reporting +N/-N≈filesize counts because the
       // local count was diverging from the Rust truth).
+      //
+      // PER-FILE COMMIT MODEL (BUG-6a, dogfooding fix): each hunk commits
+      // independently. A failure on one file no longer rolls back the
+      // others. The pre-patch checkpoint is still created so the agent can
+      // use `aft_safety` to revert successful files manually if they want
+      // to abort the whole patch after seeing a partial result.
+      //
+      // Why this changed: an agent submitted a 3-file patch where 2 files
+      // patched cleanly and the 3rd hit a fuzzy-match drift. The old
+      // atomic-rollback discarded the 2 successes, so the agent had to
+      // re-issue the same patch with the failing file removed — exactly
+      // the per-file commit semantics, just done by hand. The ergonomic
+      // fix is to give them per-file commit out of the box.
       const results: string[] = [];
+      const failures: string[] = [];
       const perFileDiffs: Array<{
         filePath: string;
         before: string;
@@ -1049,7 +1064,6 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         additions: number;
         deletions: number;
       }> = [];
-      let patchFailed = false;
 
       for (const hunk of hunks) {
         const filePath = path.resolve(context.directory, hunk.path);
@@ -1080,8 +1094,21 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               });
               results.push(`Created ${hunk.path}`);
             } catch (e) {
-              patchFailed = true;
-              results.push(`Failed to create ${hunk.path}: ${e instanceof Error ? e.message : e}`);
+              const msg = `Failed to create ${hunk.path}: ${e instanceof Error ? e.message : e}`;
+              results.push(msg);
+              failures.push(hunk.path);
+              // The write may have left a partial file on disk for an `add`
+              // hunk. Best-effort cleanup so we don't leave orphan partials.
+              // (Failures here are tolerated: the agent will see the
+              // creation failure in `results` either way.)
+              const filePath = path.resolve(context.directory, hunk.path);
+              if (fs.existsSync(filePath)) {
+                try {
+                  await callBridge(ctx, context, "delete_file", { file: filePath });
+                } catch {
+                  // ignore — surfaced through the parent failure already
+                }
+              }
             }
             break;
           }
@@ -1101,8 +1128,8 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
               });
               results.push(`Deleted ${hunk.path}`);
             } catch (e) {
-              patchFailed = true;
               results.push(`Failed to delete ${hunk.path}: ${e instanceof Error ? e.message : e}`);
+              failures.push(hunk.path);
             }
             break;
           }
@@ -1172,8 +1199,8 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
                 results.push(`Updated ${hunk.path}`);
               }
             } catch (e) {
-              patchFailed = true;
               results.push(`Failed to update ${hunk.path}: ${e instanceof Error ? e.message : e}`);
+              failures.push(hunk.path);
               break;
             }
             break;
@@ -1181,49 +1208,35 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         }
       }
 
-      // On failure, restore checkpoint AND delete files that were newly
-      // created by this patch (adds + move destinations that didn't exist
-      // pre-patch). Checkpoint restore alone only recovers files that
-      // existed before — it cannot undo a newly created file or the
-      // destination side of a partial move (audit #8).
-      if (patchFailed) {
-        const rollbackNotes: string[] = [];
-        if (checkpointCreated) {
-          try {
-            await callBridge(ctx, context, "restore_checkpoint", { name: checkpointName });
-            rollbackNotes.push("restored pre-existing files from checkpoint");
-          } catch {
-            rollbackNotes.push("checkpoint restore FAILED, pre-existing files may be inconsistent");
-          }
-        } else if (checkpointPaths.length > 0) {
-          rollbackNotes.push("no checkpoint was created, pre-existing files may be inconsistent");
+      // PER-FILE COMMIT (BUG-6a): no atomic rollback. The pre-patch
+      // checkpoint stays available so the agent can `aft_safety` revert
+      // successful files manually if they want to abort the whole patch
+      // after seeing a partial outcome.
+      //
+      // Each hunk type self-recovers cleanly on failure:
+      //   - add: the partial file (if any) is deleted in the catch block
+      //          above so we don't leave orphan partials
+      //   - update: applyUpdateChunks throws BEFORE write when fuzzy match
+      //             can't find the lines, so the original file is intact
+      //             on disk. write failures are also pre-commit at the
+      //             bridge level (bridge does its own backup).
+      //   - delete: failed delete leaves the file in place — no cleanup
+      //             needed
+      //
+      // Surface a clear failure summary at the end so the agent can see
+      // which hunks failed and decide whether to retry just those, without
+      // scanning the per-hunk lines.
+      if (failures.length > 0) {
+        const partial = failures.length < hunks.length;
+        const summary = partial
+          ? `Patch partially applied — ${hunks.length - failures.length} of ${hunks.length} hunk(s) succeeded. Failed: ${failures.join(", ")}. Successful changes are kept; use \`aft_safety\` to revert if you want to abort.`
+          : `Patch failed — none of the ${hunks.length} hunk(s) applied: ${failures.join(", ")}.`;
+        results.push(summary);
+        // Suppress the "Success. Updated the following files:" metadata
+        // when nothing succeeded (avoids misleading the UI).
+        if (!partial) {
+          return results.join("\n");
         }
-
-        // Delete any file we newly created. We call delete_file (which
-        // respects validate_path and backs up), and tolerate already-absent
-        // files so partial-create failures don't double-error.
-        let newlyDeleted = 0;
-        for (const createdAbs of newlyCreatedAbs) {
-          if (!fs.existsSync(createdAbs)) continue;
-          try {
-            await callBridge(ctx, context, "delete_file", { file: createdAbs });
-            newlyDeleted++;
-          } catch {
-            rollbackNotes.push(
-              `failed to delete newly-created ${path.relative(context.worktree, createdAbs)}`,
-            );
-          }
-        }
-        if (newlyDeleted > 0) {
-          rollbackNotes.push(`removed ${newlyDeleted} newly-created file(s)`);
-        }
-
-        results.push(
-          rollbackNotes.length > 0
-            ? `Patch failed — ${rollbackNotes.join("; ")}.`
-            : "Patch failed — nothing to roll back.",
-        );
-        return results.join("\n");
       }
 
       // Store metadata for tool.execute.after hook (match opencode built-in format)
