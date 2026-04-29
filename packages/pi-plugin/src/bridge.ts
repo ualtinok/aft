@@ -249,10 +249,24 @@ export class BinaryBridge {
     }
 
     const id = String(this.nextId++);
-    const request =
-      Object.hasOwn(params, "command") || Object.hasOwn(params, "method")
-        ? { id, command, params }
-        : { id, command, ...params };
+    // Wire format: when params contains a key that collides with the protocol
+    // envelope (`command`/`method`), nest params under a `params` key. Reserved
+    // envelope fields (`session_id`, `lsp_hints`) must STILL be promoted to the
+    // top level so RawRequest's dedicated fields deserialize correctly.
+    let request: Record<string, unknown>;
+    if (Object.hasOwn(params, "command") || Object.hasOwn(params, "method")) {
+      const nested: Record<string, unknown> = { ...params };
+      const reserved: Record<string, unknown> = {};
+      for (const key of ["session_id", "lsp_hints"] as const) {
+        if (Object.hasOwn(nested, key)) {
+          reserved[key] = nested[key];
+          delete nested[key];
+        }
+      }
+      request = { id, command, ...reserved, params: nested };
+    } else {
+      request = { id, command, ...params };
+    }
     const line = `${JSON.stringify(request)}\n`;
 
     // Per-op timeout override: tool wrappers can pass longer budgets for
