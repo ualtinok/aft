@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -95,7 +96,7 @@ impl BgTaskRegistry {
             ));
         }
 
-        let task_id = random_id();
+        let task_id = self.generate_unique_task_id()?;
         let output_dir = default_output_dir(storage_dir.as_deref());
         let mut child = shell_command(command)
             .current_dir(&workdir)
@@ -272,6 +273,42 @@ impl BgTaskRegistry {
             .lock()
             .map(|tasks| tasks.values().filter(|task| task.is_running()).count())
             .unwrap_or(0)
+    }
+
+    /// Generate a `bgb-{8hex}` slug that is unique against both the live task
+    /// map and the not-yet-drained completion queue. Re-rolls on collision.
+    /// In practice the first roll always succeeds — this guard exists so
+    /// agents reusing a task_id during a tight retry can never accidentally
+    /// observe a completion belonging to a previous task with the same slug.
+    fn generate_unique_task_id(&self) -> Result<String, String> {
+        // Bound the loop so a degenerate generator (e.g. a stuck system clock
+        // returning identical nanos every call) cannot wedge spawn forever.
+        // 32 attempts at ~268M namespace size makes silent failure
+        // astronomically unlikely; if it ever happens the agent gets a clean
+        // error instead of a hang.
+        for _ in 0..32 {
+            let candidate = random_slug();
+            let tasks = self
+                .inner
+                .tasks
+                .lock()
+                .map_err(|_| "background task registry lock poisoned".to_string())?;
+            if tasks.contains_key(&candidate) {
+                continue;
+            }
+            // Also check pending completions — a task that finished but hasn't
+            // been drained still owns that ID from the agent's perspective.
+            let completions = self
+                .inner
+                .completions
+                .lock()
+                .map_err(|_| "background completions lock poisoned".to_string())?;
+            if completions.iter().any(|c| c.task_id == candidate) {
+                continue;
+            }
+            return Ok(candidate);
+        }
+        Err("failed to allocate unique background task id after 32 attempts".to_string())
     }
 }
 
@@ -498,8 +535,30 @@ fn terminate_process(child: &mut Child) {
         .status();
 }
 
-fn random_id() -> String {
-    format!("{}-{}", std::process::id(), unix_millis_nanos())
+/// Generate a short, agent-friendly bg-bash task slug like `bgb-3f49a42c`.
+///
+/// Format: `bgb-` plus 8 lowercase hex chars (32 bits = ~4 billion namespace).
+/// Birthday-collision risk at the typical session scale (≤1000 active tasks +
+/// drained completions) is well below 1 in a million; the slug is still
+/// re-rolled on collision against both the live task map and the not-yet-
+/// drained completion queue, so duplicates are impossible in practice.
+///
+/// **Why the atomic counter instead of pure time-based entropy:** rapid
+/// successive spawns within the same nanosecond (which happens regularly
+/// on macOS where the realtime clock has microsecond resolution) would
+/// otherwise produce the same slug. The counter guarantees a fresh seed
+/// for each call even when the clock hasn't ticked.
+fn random_slug() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Mix nanos, pid, and counter through a wide multiplier so adjacent
+    // counter values don't produce visually-similar slugs. Truncating to u32
+    // gives the agent a 8-hex-char slug; the rejection loop in
+    // `generate_unique_task_id` covers any residual collisions.
+    let mixed = unix_millis_nanos()
+        ^ (std::process::id() as u128).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ (counter as u128).wrapping_mul(0xBF58476D1CE4E5B9);
+    format!("bgb-{:08x}", (mixed as u32))
 }
 
 fn unix_millis() -> u64 {

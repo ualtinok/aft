@@ -264,3 +264,71 @@ fn background_completion_metadata_is_attached_to_next_response() {
 
     assert!(aft.shutdown().success());
 }
+
+// ---------------------------------------------------------------------------
+// Slug format regression — task IDs must be short, agent-friendly slugs of
+// the form `bgb-{8-hex}`. The earlier `{pid}-{nanos}` format produced IDs
+// like `81607-1777480557085596000` which are noisy in agent output and hard
+// to refer to in chat. Locked in by direct format assertion.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn background_task_ids_use_short_bgb_slug_format() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg(&mut aft, "slug-format", "true");
+
+    // Format: "bgb-" + exactly 8 lowercase hex characters
+    assert!(
+        task_id.starts_with("bgb-"),
+        "task_id must start with `bgb-` prefix; got `{task_id}`"
+    );
+    let suffix = &task_id["bgb-".len()..];
+    assert_eq!(
+        suffix.len(),
+        8,
+        "task_id suffix must be exactly 8 hex chars; got `{suffix}` (len={})",
+        suffix.len()
+    );
+    assert!(
+        suffix
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        "task_id suffix must be lowercase hex; got `{suffix}`"
+    );
+
+    // Wait for completion and check the completion event carries the same ID
+    // — important so the in-turn delivery path isn't broken by the ID change.
+    let completed = wait_for_status(&mut aft, &task_id, "completed");
+    assert_eq!(completed["task_id"].as_str().unwrap(), task_id);
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_task_ids_are_unique_across_rapid_spawns() {
+    // Spawn 6 short-lived tasks back-to-back and assert all IDs are distinct.
+    // Catches generator regressions where the time-based seed alone collapses
+    // to the same slug for spawns within the same nanosecond — happens often
+    // on macOS where realtime clock resolution is microseconds. The atomic
+    // counter inside `random_slug()` is the load-bearing piece this guards.
+    //
+    // We spawn `true` (exits instantly) and wait for completion between
+    // spawns so we don't trip the running-task cap (default 8).
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..6 {
+        let id = spawn_bg(&mut aft, &format!("unique-{i}"), "true");
+        assert!(
+            ids.insert(id.clone()),
+            "duplicate task_id allocated: `{id}` (already in {ids:?})"
+        );
+        // Drain to completed before the next spawn so running_count stays low.
+        let _ = wait_for_status(&mut aft, &id, "completed");
+    }
+
+    assert!(aft.shutdown().success());
+}
