@@ -1,8 +1,29 @@
 //! Integration tests for the `transaction` command: multi-file atomicity and rollback.
 
 use std::fs;
+use std::path::PathBuf;
 
 use super::helpers::AftProcess;
+
+fn fake_server_path() -> PathBuf {
+    option_env!("CARGO_BIN_EXE_fake-lsp-server")
+        .or(option_env!("CARGO_BIN_EXE_fake_lsp_server"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake-lsp-server").map(PathBuf::from))
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake_lsp_server").map(PathBuf::from))
+        .or_else(|| {
+            let mut path = std::env::current_exe().ok()?;
+            path.pop();
+            path.pop();
+            path.push("fake-lsp-server");
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .expect("fake-lsp-server binary path")
+}
 
 // ============================================================================
 // transaction_success_three_files
@@ -275,6 +296,108 @@ fn transaction_edit_match_uses_fuzzy_matching() {
     );
     assert_eq!(resp["files_modified"], 1);
     assert_eq!(fs::read_to_string(&target).unwrap(), "hello rust\n");
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn transaction_edit_match_apply_rejects_ambiguous_fuzzy_match() {
+    let mut aft = AftProcess::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("txn_ambiguous.txt");
+    let original = "    duplicate target   \n\n\tduplicate target\t\n";
+
+    fs::write(&target, original).unwrap();
+
+    let req = serde_json::json!({
+        "id": "txn-ambiguous",
+        "command": "transaction",
+        "operations": [
+            {
+                "file": target.display().to_string(),
+                "command": "edit_match",
+                "match": "duplicate target\n",
+                "replacement": "replacement\n"
+            }
+        ]
+    });
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+
+    assert_eq!(resp["success"], false, "transaction should fail: {resp:?}");
+    assert_eq!(resp["code"], "ambiguous_match");
+    assert_eq!(resp["failed_operation"], 0);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        original,
+        "ambiguous apply must leave file unchanged"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn transaction_returns_inline_lsp_diagnostics_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = root.join("main.rs");
+    let cargo_toml = root.join("Cargo.toml");
+    fs::write(
+        &cargo_toml,
+        "[package]\nname = \"txn-inline-diag\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &file,
+        "fn main() { let value = 1; println!(\"{}\", value); }\n",
+    )
+    .unwrap();
+
+    let fake_server = fake_server_path();
+    let mut aft = AftProcess::spawn_with_env(&[("AFT_LSP_RUST_BINARY", fake_server.as_os_str())]);
+
+    let configure = aft.send(&format!(
+        r#"{{"id":"cfg-txn-inline","command":"configure","project_root":"{}"}}"#,
+        root.display()
+    ));
+    assert_eq!(
+        configure["success"], true,
+        "configure failed: {configure:?}"
+    );
+
+    let req = serde_json::json!({
+        "id": "txn-inline-diag",
+        "command": "transaction",
+        "operations": [
+            {
+                "file": file.display().to_string(),
+                "command": "write",
+                "content": "fn main() { let answer = 1; println!(\"{}\", answer); }\n"
+            }
+        ],
+        "diagnostics": true
+    });
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+
+    assert_eq!(
+        resp["success"], true,
+        "transaction should succeed: {resp:?}"
+    );
+    let diagnostics = resp["lsp_diagnostics"]
+        .as_array()
+        .expect("lsp_diagnostics array");
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected inline diagnostics from fake LSP: {resp:?}"
+    );
+
+    let canonical_file = fs::canonicalize(&file).expect("canonical file");
+    assert_eq!(diagnostics[0]["file"], canonical_file.display().to_string());
+    assert_eq!(diagnostics[0]["severity"], "error");
+    assert_eq!(diagnostics[0]["message"], "test diagnostic error");
+    assert_eq!(diagnostics[1]["severity"], "warning");
 
     let status = aft.shutdown();
     assert!(status.success());

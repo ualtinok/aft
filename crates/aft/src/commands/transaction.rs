@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use crate::context::AppContext;
 use crate::edit;
+use crate::lsp::manager::PostEditWaitOutcome;
 use crate::protocol::{RawRequest, Response};
 
 /// A parsed operation ready for execution.
@@ -36,6 +37,16 @@ struct FileResult {
     syntax_valid: Option<bool>,
     formatted: bool,
     format_skipped_reason: Option<String>,
+}
+
+struct TransactionWriteResult {
+    file_result: FileResult,
+    lsp_outcome: Option<PostEditWaitOutcome>,
+}
+
+struct TransactionOpError {
+    code: &'static str,
+    message: String,
 }
 
 /// Handle a `transaction` request.
@@ -119,19 +130,25 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Apply phase ---
-    let mut results: Vec<FileResult> = Vec::new();
+    let multi_file_write_paths: Vec<String> = parsed
+        .iter()
+        .map(|op| op.file.display().to_string())
+        .collect();
+    let lsp_params = params_with_multi_file_write_paths(&req.params, &multi_file_write_paths);
+    let mut results: Vec<TransactionWriteResult> = Vec::new();
 
     for (i, op) in parsed.iter().enumerate() {
         let new_content = match compute_new_content(op) {
             Ok(c) => c,
-            Err(msg) => {
+            Err(err) => {
                 let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
                 return transaction_error(
                     &req.id,
+                    err.code,
                     i,
                     &snapshotted_files,
                     &new_files,
-                    &msg,
+                    &err.message,
                     &failures,
                 );
             }
@@ -139,26 +156,32 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
 
         match edit::write_format_validate(&op.file, &new_content, &ctx.config(), &req.params) {
             Ok(wr) => {
-                if let Ok(final_content) = std::fs::read_to_string(&op.file) {
-                    ctx.lsp_notify_file_changed(&op.file, &final_content);
-                }
-
+                let lsp_outcome =
+                    std::fs::read_to_string(&op.file)
+                        .ok()
+                        .and_then(|final_content| {
+                            ctx.lsp_post_write(&op.file, &final_content, &lsp_params)
+                        });
                 // Track this file as new if it was created by this operation
                 // (in case earlier ops in the same transaction created it)
                 if !snapshotted_files.contains(&op.file) && !new_files.contains(&op.file) {
                     new_files.push(op.file.clone());
                 }
-                results.push(FileResult {
-                    file: op.file.display().to_string(),
-                    syntax_valid: wr.syntax_valid,
-                    formatted: wr.formatted,
-                    format_skipped_reason: wr.format_skipped_reason,
+                results.push(TransactionWriteResult {
+                    file_result: FileResult {
+                        file: op.file.display().to_string(),
+                        syntax_valid: wr.syntax_valid,
+                        formatted: wr.formatted,
+                        format_skipped_reason: wr.format_skipped_reason,
+                    },
+                    lsp_outcome,
                 });
             }
             Err(e) => {
                 let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
                 return transaction_error(
                     &req.id,
+                    "transaction_failed",
                     i,
                     &snapshotted_files,
                     &new_files,
@@ -171,14 +194,15 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // --- Validate phase: check syntax_valid on all results ---
     for (i, result) in results.iter().enumerate() {
-        if result.syntax_valid == Some(false) {
+        if result.file_result.syntax_valid == Some(false) {
             let failures = rollback(ctx, req.session(), &snapshotted_files, &new_files);
             return transaction_error(
                 &req.id,
+                "transaction_failed",
                 i,
                 &snapshotted_files,
                 &new_files,
-                &format!("syntax error in {}", result.file),
+                &format!("syntax error in {}", result.file_result.file),
                 &failures,
             );
         }
@@ -189,31 +213,108 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     let result_json: Vec<serde_json::Value> = results
         .iter()
         .map(|r| {
+            let file_result = &r.file_result;
             let mut v = serde_json::json!({
-                "file": r.file,
-                "syntax_valid": r.syntax_valid,
-                "formatted": r.formatted,
+                "file": file_result.file,
+                "syntax_valid": file_result.syntax_valid,
+                "formatted": file_result.formatted,
             });
-            if let Some(ref reason) = r.format_skipped_reason {
+            if let Some(ref reason) = file_result.format_skipped_reason {
                 v["format_skipped_reason"] = serde_json::json!(reason);
             }
             v
         })
         .collect();
+    let lsp_outcome = merge_lsp_outcomes(
+        results
+            .iter()
+            .filter_map(|result| result.lsp_outcome.as_ref()),
+    );
 
     log::debug!(
         "[aft] transaction: {} files modified successfully",
         files_modified
     );
 
-    Response::success(
-        &req.id,
-        serde_json::json!({
-            "ok": true,
-            "files_modified": files_modified,
-            "results": result_json,
-        }),
-    )
+    let mut result = serde_json::json!({
+        "ok": true,
+        "files_modified": files_modified,
+        "results": result_json,
+    });
+
+    append_lsp_diagnostics_to_transaction(&mut result, lsp_outcome.as_ref());
+
+    Response::success(&req.id, result)
+}
+
+fn params_with_multi_file_write_paths(
+    params: &serde_json::Value,
+    paths: &[String],
+) -> serde_json::Value {
+    let mut params = params.clone();
+    params["multi_file_write_paths"] = serde_json::json!(paths);
+    params
+}
+
+fn merge_lsp_outcomes<'a>(
+    outcomes: impl Iterator<Item = &'a PostEditWaitOutcome>,
+) -> Option<PostEditWaitOutcome> {
+    let mut merged: Option<PostEditWaitOutcome> = None;
+
+    for outcome in outcomes {
+        let merged = merged.get_or_insert_with(PostEditWaitOutcome::default);
+        merged.diagnostics.extend(outcome.diagnostics.clone());
+        merged
+            .pending_servers
+            .extend(outcome.pending_servers.clone());
+        merged.exited_servers.extend(outcome.exited_servers.clone());
+    }
+
+    merged
+}
+
+fn append_lsp_diagnostics_to_transaction(
+    result: &mut serde_json::Value,
+    outcome: Option<&PostEditWaitOutcome>,
+) {
+    let Some(outcome) = outcome else {
+        return;
+    };
+
+    result["lsp_diagnostics"] = serde_json::json!(outcome
+        .diagnostics
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "file": d.file.display().to_string(),
+                "line": d.line,
+                "column": d.column,
+                "end_line": d.end_line,
+                "end_column": d.end_column,
+                "severity": d.severity.as_str(),
+                "message": d.message,
+                "code": d.code,
+                "source": d.source,
+            })
+        })
+        .collect::<Vec<_>>());
+    result["lsp_complete"] = serde_json::Value::Bool(outcome.complete());
+
+    if !outcome.pending_servers.is_empty() {
+        result["lsp_pending_servers"] = serde_json::json!(outcome
+            .pending_servers
+            .iter()
+            .map(|key| key.kind.id_str().to_string())
+            .collect::<Vec<_>>());
+    }
+
+    if !outcome.exited_servers.is_empty() {
+        result["lsp_exited_servers"] = serde_json::json!(outcome
+            .exited_servers
+            .iter()
+            .map(|key| key.kind.id_str().to_string())
+            .collect::<Vec<_>>());
+    }
 }
 
 fn validate_operation_path(
@@ -282,7 +383,7 @@ fn parse_operation(op: &serde_json::Value, index: usize) -> Result<ParsedOp, Str
 }
 
 /// Compute the new content for a single operation.
-fn compute_new_content(op: &ParsedOp) -> Result<String, String> {
+fn compute_new_content(op: &ParsedOp) -> Result<String, TransactionOpError> {
     match &op.kind {
         OpKind::Write { content } => Ok(content.clone()),
         OpKind::EditMatch {
@@ -290,38 +391,20 @@ fn compute_new_content(op: &ParsedOp) -> Result<String, String> {
             replacement,
         } => {
             let source = if op.file.exists() {
-                std::fs::read_to_string(&op.file)
-                    .map_err(|e| format!("failed to read {}: {}", op.file.display(), e))?
+                std::fs::read_to_string(&op.file).map_err(|e| TransactionOpError {
+                    code: "transaction_failed",
+                    message: format!("failed to read {}: {}", op.file.display(), e),
+                })?
             } else {
                 String::new()
             };
 
-            let fuzzy_matches = crate::fuzzy_match::find_all_fuzzy(&source, match_str);
-
-            if fuzzy_matches.is_empty() {
-                return Err(format!(
-                    "match '{}' not found in {}",
-                    match_str,
-                    op.file.display()
-                ));
-            }
-            if fuzzy_matches.len() > 1 {
-                return Err(format!(
-                    "match '{}' is ambiguous ({} occurrences) in {}",
-                    match_str,
-                    fuzzy_matches.len(),
-                    op.file.display()
-                ));
-            }
-
-            let m = &fuzzy_matches[0];
-            edit::replace_byte_range(
-                &source,
-                m.byte_start,
-                m.byte_start + m.byte_len,
-                replacement,
-            )
-            .map_err(|e| e.to_string())
+            let (byte_start, byte_len) = find_single_fuzzy_match(&source, match_str, op)?;
+            edit::replace_byte_range(&source, byte_start, byte_start + byte_len, replacement)
+                .map_err(|e| TransactionOpError {
+                    code: e.code(),
+                    message: e.to_string(),
+                })
         }
     }
 }
@@ -339,8 +422,8 @@ fn handle_dry_run(req: &RawRequest, ops: &[ParsedOp]) -> Response {
 
         let new_content = match compute_new_content_dry(op, &original) {
             Ok(c) => c,
-            Err(msg) => {
-                return Response::error(&req.id, "invalid_request", msg);
+            Err(err) => {
+                return Response::error(&req.id, err.code, err.message);
             }
         };
 
@@ -363,41 +446,50 @@ fn handle_dry_run(req: &RawRequest, ops: &[ParsedOp]) -> Response {
 }
 
 /// Compute new content for dry-run (uses provided original instead of re-reading).
-fn compute_new_content_dry(op: &ParsedOp, original: &str) -> Result<String, String> {
+fn compute_new_content_dry(op: &ParsedOp, original: &str) -> Result<String, TransactionOpError> {
     match &op.kind {
         OpKind::Write { content } => Ok(content.clone()),
         OpKind::EditMatch {
             match_str,
             replacement,
         } => {
-            let fuzzy_matches = crate::fuzzy_match::find_all_fuzzy(original, match_str);
-
-            if fuzzy_matches.is_empty() {
-                return Err(format!(
-                    "match '{}' not found in {}",
-                    match_str,
-                    op.file.display()
-                ));
-            }
-            if fuzzy_matches.len() > 1 {
-                return Err(format!(
-                    "match '{}' is ambiguous ({} occurrences) in {}",
-                    match_str,
-                    fuzzy_matches.len(),
-                    op.file.display()
-                ));
-            }
-
-            let m = &fuzzy_matches[0];
-            edit::replace_byte_range(
-                original,
-                m.byte_start,
-                m.byte_start + m.byte_len,
-                replacement,
-            )
-            .map_err(|e| e.to_string())
+            let (byte_start, byte_len) = find_single_fuzzy_match(original, match_str, op)?;
+            edit::replace_byte_range(original, byte_start, byte_start + byte_len, replacement)
+                .map_err(|e| TransactionOpError {
+                    code: e.code(),
+                    message: e.to_string(),
+                })
         }
     }
+}
+
+fn find_single_fuzzy_match(
+    source: &str,
+    match_str: &str,
+    op: &ParsedOp,
+) -> Result<(usize, usize), TransactionOpError> {
+    let fuzzy_matches = crate::fuzzy_match::find_all_fuzzy(source, match_str);
+
+    if fuzzy_matches.is_empty() {
+        return Err(TransactionOpError {
+            code: "transaction_failed",
+            message: format!("match '{}' not found in {}", match_str, op.file.display()),
+        });
+    }
+    if fuzzy_matches.len() > 1 {
+        return Err(TransactionOpError {
+            code: "ambiguous_match",
+            message: format!(
+                "match '{}' is ambiguous ({} occurrences) in {}",
+                match_str,
+                fuzzy_matches.len(),
+                op.file.display()
+            ),
+        });
+    }
+
+    let fuzzy_match = &fuzzy_matches[0];
+    Ok((fuzzy_match.byte_start, fuzzy_match.byte_len))
 }
 
 /// Rollback failure information
@@ -461,6 +553,7 @@ fn rollback(
 /// Build the structured error response for a failed transaction.
 fn transaction_error(
     req_id: &str,
+    code: &str,
     failed_index: usize,
     snapshotted: &[PathBuf],
     new_files: &[PathBuf],
@@ -502,5 +595,5 @@ fn transaction_error(
             .collect::<Vec<_>>());
     }
 
-    Response::error_with_data(req_id, "transaction_failed", message, data)
+    Response::error_with_data(req_id, code, message, data)
 }
