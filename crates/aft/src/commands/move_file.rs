@@ -1,5 +1,6 @@
 //! Handler for the `move_file` command: rename/move a file with backup.
 
+use std::fs;
 use std::path::Path;
 
 use crate::context::AppContext;
@@ -111,44 +112,96 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // Move the file
-    let mut source_delete_failed = false;
-    if let Err(e) = std::fs::rename(&src_path, &dst_path) {
-        // rename() can fail across filesystems — fallback to copy+delete
-        match std::fs::copy(&src_path, &dst_path) {
-            Ok(_) => {
-                if let Err(e2) = std::fs::remove_file(&src_path) {
-                    log::warn!(
-                        "[aft] move_file: copied but failed to remove source: {}",
-                        e2
-                    );
-                    source_delete_failed = true;
-                }
-            }
-            Err(_) => {
-                return Response::error(
-                    &req.id,
-                    "io_error",
-                    format!("move_file: failed to move file: {}", e),
-                );
-            }
+    let move_outcome = match move_file_on_disk(&src_path, &dst_path) {
+        MoveOutcome::Moved => MoveOutcome::Moved,
+        MoveOutcome::CopiedSourceDeleteFailed(message) => {
+            log::warn!(
+                "[aft] move_file: copied but failed to remove source: {}",
+                message
+            );
+            MoveOutcome::CopiedSourceDeleteFailed(message)
         }
-    }
+        MoveOutcome::Failed(message) => {
+            return Response::error(
+                &req.id,
+                "io_error",
+                format!("move_file: failed to move file: {}", message),
+            );
+        }
+    };
 
     log::debug!("move_file: {} -> {}", file, destination);
 
-    let mut result = serde_json::json!({
-        "file": file,
-        "destination": destination,
-        "moved": true,
-    });
-
-    if source_delete_failed {
-        result["warning"] = serde_json::json!("source file could not be deleted after copy");
-    }
+    let mut result = move_success_result(file, destination, move_outcome);
 
     if let Some(ref id) = backup_id {
         result["backup_id"] = serde_json::json!(id);
     }
 
     Response::success(&req.id, result)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MoveOutcome {
+    Moved,
+    CopiedSourceDeleteFailed(String),
+    Failed(String),
+}
+
+fn move_file_on_disk(src_path: &Path, dst_path: &Path) -> MoveOutcome {
+    match fs::rename(src_path, dst_path) {
+        Ok(()) => MoveOutcome::Moved,
+        Err(rename_error) => match fs::copy(src_path, dst_path) {
+            Ok(_) => match fs::remove_file(src_path) {
+                Ok(()) => MoveOutcome::Moved,
+                Err(remove_error) => {
+                    MoveOutcome::CopiedSourceDeleteFailed(remove_error.to_string())
+                }
+            },
+            Err(_) => MoveOutcome::Failed(rename_error.to_string()),
+        },
+    }
+}
+
+fn move_success_result(
+    file: &str,
+    destination: &str,
+    move_outcome: MoveOutcome,
+) -> serde_json::Value {
+    let mut result = serde_json::json!({
+        "file": file,
+        "destination": destination,
+        "moved": true,
+    });
+
+    if let MoveOutcome::CopiedSourceDeleteFailed(message) = move_outcome {
+        result["complete"] = serde_json::json!(false);
+        result["source_delete_failed"] = serde_json::json!(true);
+        result["warning"] = serde_json::json!(format!(
+            "destination was written, but source file could not be deleted after copy: {message}. Both paths now exist; retry deleting the source or accept the duplicate."
+        ));
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{move_success_result, MoveOutcome};
+
+    #[test]
+    fn copied_but_source_delete_failed_shape_marks_partial_success() {
+        let result = move_success_result(
+            "src.txt",
+            "dst.txt",
+            MoveOutcome::CopiedSourceDeleteFailed("permission denied".to_string()),
+        );
+
+        assert_eq!(result["moved"], true);
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["source_delete_failed"], true);
+        assert!(result["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("Both paths now exist")));
+    }
 }

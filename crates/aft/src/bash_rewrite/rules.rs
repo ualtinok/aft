@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::bash_rewrite::footer::add_footer;
-use crate::bash_rewrite::parser::{parse, ParsedCommand};
+use crate::bash_rewrite::parser::parse;
 use crate::bash_rewrite::RewriteRule;
 use crate::context::AppContext;
 use crate::protocol::{RawRequest, Response};
@@ -398,9 +398,4 @@ fn ls_request(command: &str) -> Option<Value> {
     }
 
     Some(json!({ "file": path.unwrap_or_else(|| ".".to_string()) }))
-}
-
-#[allow(dead_code)]
-fn _parsed(command: &str) -> Option<ParsedCommand> {
-    parse(command)
 }

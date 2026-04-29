@@ -5,7 +5,7 @@
 //! For symbol-based reading and call-graph annotations, use `zoom` instead.
 
 use std::fs;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::context::AppContext;
@@ -298,16 +298,13 @@ fn handle_streaming_range_read(
         );
     }
 
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            return Response::error(
-                &req.id,
-                "io_error",
-                format!("read: failed to read file: {}", e),
-            );
-        }
-    };
+    if let Err(e) = file.seek(SeekFrom::Start(0)) {
+        return Response::error(
+            &req.id,
+            "io_error",
+            format!("read: failed to read file: {}", e),
+        );
+    }
 
     let requested_end_line = explicit_end_line
         .map(|v| v as u32)

@@ -25,7 +25,7 @@ pub fn dispatch(command: &str, ctx: &AppContext) -> Option<Response> {
             match rule.rewrite(command, ctx) {
                 Ok(response) => return Some(response),
                 Err(message) => {
-                    log::debug!("bash rewrite rule {} declined: {}", rule.name(), message);
+                    log::warn!("bash rewrite rule {} declined: {}", rule.name(), message);
                     return None;
                 }
             }
