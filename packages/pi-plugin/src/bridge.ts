@@ -565,11 +565,20 @@ export class BinaryBridge {
     this.clearRestartResetTimer();
     this.configured = false;
 
+    // Capture the stderr tail for diagnostics. The tail goes to the plugin
+    // log only — it's operator-facing noise (loaded N backups, invalidated K
+    // files, etc.) that the agent can't act on, so we don't put it in the
+    // rejection error. Clear the ring so the next spawn doesn't inherit it.
     const tail = this.formatStderrTail();
     this.stderrTail = [];
+    if (tail) {
+      error(`Bridge restarted after timeout.${tail}`);
+    }
 
     // Reject any other pending requests (the timed-out one was already rejected)
-    this.rejectAllPending(new Error(`[aft-pi] Bridge restarted after timeout${tail}`));
+    this.rejectAllPending(
+      new Error(`[aft-pi] Bridge restarted after timeout (see ${getLogFilePath()})`),
+    );
   }
 
   private handleCrash(cause?: Error): void {
@@ -582,13 +591,19 @@ export class BinaryBridge {
     this.configured = false; // Force reconfigure on next command after restart
 
     // Capture the tail BEFORE spawning the replacement, because the next spawn
-    // clears the ring. Include it in both the pending-request rejection and
-    // the "max restarts reached" log so the underlying failure is visible.
+    // clears the ring. The tail goes to the plugin log only — it's operator
+    // diagnostic output that the agent can't act on. The pending-request
+    // rejection only carries a pointer to the log.
     const tail = this.formatStderrTail();
+    if (tail) {
+      error(
+        `Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""}.${tail}`,
+      );
+    }
 
     this.rejectAllPending(
       new Error(
-        `[aft-pi] Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""}${tail}`,
+        `[aft-pi] Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""} (see ${getLogFilePath()})`,
       ),
     );
 

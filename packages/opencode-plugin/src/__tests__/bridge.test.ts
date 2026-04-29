@@ -194,12 +194,15 @@ describe("BinaryBridge lifecycle", () => {
     expect((bridge as any).configured).toBe(false);
   });
 
-  test("crash error surfaces stderr tail for diagnostics", async () => {
+  test("crash error stays clean for the agent and points to the log", async () => {
     // Fake binary: writes recognizable stderr lines, briefly sleeps so the
-    // bridge has time to queue `configure`, then exits non-zero. The exit
-    // handler then runs handleCrash() which rejects pending requests — and
-    // the rejection must now include the stderr tail so callers see WHY
-    // the child died, not just that it died.
+    // bridge has time to queue `configure`, then exits non-zero.
+    //
+    // Agent-facing rejection contract: the rejection error must NOT carry
+    // stderr tail noise (loaded N backups, invalidated K files, or — as in
+    // this fixture — the actual cause). Operator diagnostics belong in the
+    // plugin log; the agent only needs a pointer to it. Anything else just
+    // burns context on output the agent can't act on.
     const fakeBin = join(tmpdir(), `aft-fake-crash-${Date.now()}.sh`);
     await writeFile(
       fakeBin,
@@ -231,9 +234,14 @@ describe("BinaryBridge lifecycle", () => {
       }
       expect(caught).not.toBeNull();
       const msg = caught?.message ?? "";
-      expect(msg).toContain("fatal: semantic index corrupted");
-      expect(msg).toContain("caused by: bad cache magic");
-      expect(msg).toContain("stderr lines");
+      // Agent gets a concise, actionable error
+      expect(msg).toContain("[aft-plugin] Binary crashed");
+      expect(msg).toContain("(see ");
+      // Agent does NOT get the stderr tail dumped into the rejection
+      expect(msg).not.toContain("fatal: semantic index corrupted");
+      expect(msg).not.toContain("caused by: bad cache magic");
+      expect(msg).not.toContain("--- last");
+      expect(msg).not.toContain("stderr lines");
     } finally {
       await rm(fakeBin).catch(() => {});
     }
@@ -351,23 +359,25 @@ describe("BinaryBridge lifecycle", () => {
     }
   });
 
-  test("stderr tail is bounded (doesn't grow unboundedly)", async () => {
-    // Emit 200 stderr lines before crashing. Only the last 20 should be kept
-    // per BinaryBridge.STDERR_TAIL_MAX — prevents memory leaks when a child
-    // panics in a long loop before its final exit.
+  test("stderr tail ring buffer is bounded (doesn't grow unboundedly)", async () => {
+    // Emit 250 stderr lines into a long-lived bridge — only the last 20 should
+    // be kept per BinaryBridge.STDERR_TAIL_MAX. The tail no longer lives in
+    // agent-facing errors (operator diagnostics belong in aft-plugin.log only),
+    // so we assert directly against the internal ring buffer.
     const fakeBin = join(tmpdir(), `aft-fake-flood-${Date.now()}.sh`);
     await writeFile(
       fakeBin,
       [
         "#!/bin/sh",
         "i=0",
-        "while [ $i -lt 200 ]; do",
+        "while [ $i -lt 250 ]; do",
         '  echo "noise line $i" >&2',
         "  i=$((i + 1))",
         "done",
         'echo "MARKER_LAST" >&2',
-        "sleep 0.3",
-        "exit 1",
+        // Hold the process open so the stderr ring is observable before the
+        // child exits and the spawnProcess() reset clears it.
+        "sleep 5",
         "",
       ].join("\n"),
       { mode: 0o755 },
@@ -379,21 +389,21 @@ describe("BinaryBridge lifecycle", () => {
         maxRestarts: 0,
       });
 
-      let caught: Error | null = null;
-      try {
-        await bridge.send("ping");
-      } catch (e) {
-        caught = e as Error;
-      }
-      const msg = caught?.message ?? "";
-      // The last marker must be present — tail is capturing the end, not the start.
-      expect(msg).toContain("MARKER_LAST");
-      // Early lines should have been evicted (far beyond the 20-line cap).
-      expect(msg).not.toContain("noise line 0\n");
-      expect(msg).not.toContain("noise line 100\n");
-      // The message shouldn't be megabytes long; cap at a generous but fixed
-      // size that reflects ~20 lines * ~30 chars/line + framing.
-      expect(msg.length).toBeLessThan(2_000);
+      // Spawn the process so stderr starts streaming. We don't wait on a
+      // response — the fake binary doesn't speak NDJSON.
+      (bridge as any).spawnProcess();
+
+      // Wait long enough for all 250+1 stderr lines to be flushed and parsed.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      const ring = (bridge as any).stderrTail as string[];
+      // Ring is capped at STDERR_TAIL_MAX (20) regardless of how many lines arrived.
+      expect(ring.length).toBeLessThanOrEqual(20);
+      // Last marker is preserved — the tail captures the END of the stream.
+      expect(ring.some((line) => line.includes("MARKER_LAST"))).toBe(true);
+      // Early lines have been evicted.
+      expect(ring.some((line) => line === "noise line 0")).toBe(false);
+      expect(ring.some((line) => line === "noise line 100")).toBe(false);
     } finally {
       await rm(fakeBin).catch(() => {});
     }
