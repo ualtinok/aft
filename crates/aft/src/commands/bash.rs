@@ -10,6 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::json;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use crate::context::AppContext;
 use crate::protocol::{
     ProgressFrame, ProgressKind, RawRequest, Response, ERROR_PERMISSION_REQUIRED,
@@ -69,10 +72,22 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    let _description = params.description.as_deref();
-
     if params.background {
-        return crate::bash_background::spawn(&req.id, &params.command, ctx);
+        let workdir = params.workdir.clone();
+        let env = (!params.env.is_empty()).then_some(params.env.clone());
+        return crate::bash_background::spawn(
+            &req.id,
+            req.session(),
+            &params.command,
+            workdir,
+            env,
+            params.timeout,
+            ctx,
+        );
+    }
+
+    if let Some(description) = params.description.as_deref() {
+        log::debug!("bash description: {description}");
     }
 
     let workdir = params
@@ -247,6 +262,7 @@ fn shell_command(command: &str) -> Command {
 fn shell_command(command: &str) -> Command {
     let mut cmd = Command::new("/bin/sh");
     cmd.args(["-c", command]);
+    cmd.process_group(0);
     cmd
 }
 
@@ -300,9 +316,9 @@ fn drain_output_events(
 
 #[cfg(unix)]
 fn terminate_process(child: &mut std::process::Child) {
-    let pid = child.id() as i32;
+    let pgid = child.id() as i32;
     unsafe {
-        libc::kill(pid, libc::SIGTERM);
+        libc::killpg(pgid, libc::SIGTERM);
     }
     let grace_started = Instant::now();
     while grace_started.elapsed() < TERMINATE_GRACE {
@@ -312,7 +328,7 @@ fn terminate_process(child: &mut std::process::Child) {
         thread::sleep(Duration::from_millis(50));
     }
     unsafe {
-        libc::kill(pid, libc::SIGKILL);
+        libc::killpg(pgid, libc::SIGKILL);
     }
 }
 

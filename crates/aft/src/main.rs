@@ -64,8 +64,9 @@ fn main() {
                 drain_semantic_index_events(&ctx);
                 drain_watcher_events(&ctx);
                 drain_lsp_events(&ctx);
+                let session_id = req.session().to_string();
                 let mut response = dispatch(req, &ctx);
-                attach_bg_completions(&mut response, &ctx);
+                attach_bg_completions(&mut response, &ctx, &session_id);
                 response
             }
             Err(e) => {
@@ -89,8 +90,10 @@ fn main() {
     log::info!("stdin closed, shutting down");
 }
 
-fn attach_bg_completions(response: &mut Response, ctx: &AppContext) {
-    let completions = ctx.drain_bg_completions();
+fn attach_bg_completions(response: &mut Response, ctx: &AppContext, session_id: &str) {
+    let completions = ctx
+        .bash_background()
+        .drain_completions_for_session(Some(session_id));
     if completions.is_empty() {
         return;
     }

@@ -10,6 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use super::buffer::{default_output_dir, BgBuffer, StreamKind};
 use super::{BgTaskInfo, BgTaskStatus};
 
@@ -19,6 +22,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, Serialize)]
 pub struct BgCompletion {
     pub task_id: String,
+    #[serde(skip_serializing)]
+    pub session_id: String,
     pub status: BgTaskStatus,
     pub exit_code: Option<i32>,
     pub command: String,
@@ -49,6 +54,7 @@ struct RegistryInner {
 struct BgTask {
     task_id: String,
     command: String,
+    session_id: String,
     workdir: PathBuf,
     started_at: u64,
     started: Instant,
@@ -83,7 +89,10 @@ impl BgTaskRegistry {
     pub fn spawn(
         &self,
         command: &str,
+        session_id: String,
         workdir: PathBuf,
+        env: HashMap<String, String>,
+        timeout: Option<Duration>,
         storage_dir: Option<PathBuf>,
         max_running: usize,
     ) -> Result<String, String> {
@@ -100,6 +109,7 @@ impl BgTaskRegistry {
         let output_dir = default_output_dir(storage_dir.as_deref());
         let mut child = shell_command(command)
             .current_dir(&workdir)
+            .envs(&env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -121,6 +131,7 @@ impl BgTaskRegistry {
         let task = Arc::new(BgTask {
             task_id: task_id.clone(),
             command: command.to_string(),
+            session_id,
             workdir,
             started_at: unix_millis(),
             started: Instant::now(),
@@ -144,7 +155,14 @@ impl BgTaskRegistry {
         let inner = self.inner.clone();
         let worker_task = task.clone();
         let handle = thread::spawn(move || {
-            run_task(worker_task, rx, stdout_reader, stderr_reader, inner);
+            run_task(
+                worker_task,
+                rx,
+                stdout_reader,
+                stderr_reader,
+                timeout,
+                inner,
+            );
         });
 
         if let Ok(mut slot) = task.thread_handle.lock() {
@@ -239,11 +257,29 @@ impl BgTaskRegistry {
     }
 
     pub fn drain_completions(&self) -> Vec<BgCompletion> {
+        self.drain_completions_for_session(None)
+    }
+
+    pub fn drain_completions_for_session(&self, session_id: Option<&str>) -> Vec<BgCompletion> {
         let mut completions = match self.inner.completions.lock() {
             Ok(completions) => completions,
             Err(_) => return Vec::new(),
         };
-        completions.drain(..).collect()
+        let Some(session_id) = session_id else {
+            return completions.drain(..).collect();
+        };
+
+        let mut matched = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some(completion) = completions.pop_front() {
+            if completion.session_id == session_id {
+                matched.push(completion);
+            } else {
+                retained.push_back(completion);
+            }
+        }
+        *completions = retained;
+        matched
     }
 
     pub fn shutdown(&self) {
@@ -369,6 +405,7 @@ impl BgTask {
         let state = self.state.lock().expect("background task lock poisoned");
         BgCompletion {
             task_id: self.task_id.clone(),
+            session_id: self.session_id.clone(),
             status: state.status.clone(),
             exit_code: state.exit_code,
             command: self.command.clone(),
@@ -387,6 +424,7 @@ fn run_task(
     rx: mpsc::Receiver<OutputEvent>,
     stdout_reader: thread::JoinHandle<()>,
     stderr_reader: thread::JoinHandle<()>,
+    timeout: Option<Duration>,
     inner: Arc<RegistryInner>,
 ) {
     loop {
@@ -398,6 +436,26 @@ fn run_task(
                 Err(_) => return,
             };
             if state.status != BgTaskStatus::Running {
+                true
+            } else if timeout
+                .map(|timeout| task.started.elapsed() >= timeout)
+                .unwrap_or(false)
+            {
+                if let Some(child) = state.child.as_mut() {
+                    terminate_process(child);
+                    let exit_code = child
+                        .wait()
+                        .ok()
+                        .and_then(|status| status.code())
+                        .or(Some(124));
+                    state.exit_code = exit_code;
+                } else {
+                    state.exit_code = Some(124);
+                }
+                state.status = BgTaskStatus::Failed;
+                state.finished_at = Some(Instant::now());
+                state.child = None;
+                state.child_pid = None;
                 true
             } else if let Some(child) = state.child.as_mut() {
                 match child.try_wait() {
@@ -504,14 +562,15 @@ fn shell_command(command: &str) -> Command {
 fn shell_command(command: &str) -> Command {
     let mut cmd = Command::new("/bin/sh");
     cmd.args(["-c", command]);
+    cmd.process_group(0);
     cmd
 }
 
 #[cfg(unix)]
 fn terminate_process(child: &mut Child) {
-    let pid = child.id() as i32;
+    let pgid = child.id() as i32;
     unsafe {
-        libc::kill(pid, libc::SIGTERM);
+        libc::killpg(pgid, libc::SIGTERM);
     }
     let grace_started = Instant::now();
     while grace_started.elapsed() < TERMINATE_GRACE {
@@ -521,7 +580,7 @@ fn terminate_process(child: &mut Child) {
         thread::sleep(Duration::from_millis(50));
     }
     unsafe {
-        libc::kill(pid, libc::SIGKILL);
+        libc::killpg(pgid, libc::SIGKILL);
     }
 }
 
@@ -539,8 +598,8 @@ fn terminate_process(child: &mut Child) {
 ///
 /// Format: `bgb-` plus 8 lowercase hex chars (32 bits = ~4 billion namespace).
 /// Birthday-collision risk at the typical session scale (≤1000 active tasks +
-/// drained completions) is well below 1 in a million; the slug is still
-/// re-rolled on collision against both the live task map and the not-yet-
+/// drained completions) is ~0.012% (≈1 in 8600); the slug is still re-rolled
+/// on collision against both the live task map and the not-yet-
 /// drained completion queue, so duplicates are impossible in practice.
 ///
 /// **Why the atomic counter instead of pure time-based entropy:** rapid

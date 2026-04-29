@@ -18,6 +18,8 @@ pub struct BgBuffer {
     spill: Option<BufWriter<File>>,
     spilled_bytes: u64,
     rotated: bool,
+    #[cfg(test)]
+    fail_next_reopen: bool,
 }
 
 impl BgBuffer {
@@ -28,6 +30,8 @@ impl BgBuffer {
             spill: None,
             spilled_bytes: 0,
             rotated: false,
+            #[cfg(test)]
+            fail_next_reopen: false,
         }
     }
 
@@ -140,14 +144,41 @@ impl BgBuffer {
         }
         drop(writer);
 
-        if self.retain_spill_tail().is_ok() {
-            self.spilled_bytes = DISK_RETAIN_BYTES;
-            self.rotated = true;
+        if self.retain_spill_tail().is_err() {
+            return;
+        }
+        self.rotated = true;
+
+        match self.reopen_spill_append() {
+            Ok(file) => {
+                self.spilled_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                self.spill = Some(BufWriter::new(file));
+            }
+            Err(_) => {
+                // Keep accounting aligned with the in-memory fallback. If the
+                // append re-open fails, leaving spilled_bytes at the retained
+                // disk size would make the next append truncate the file while
+                // still reporting bytes that are no longer addressable.
+                self.spilled_bytes = 0;
+                if let Ok(mut retained) = fs::read(&self.spill_path) {
+                    if retained.len() > MEMORY_LIMIT_BYTES {
+                        let keep_from = retained.len() - MEMORY_LIMIT_BYTES;
+                        retained.drain(..keep_from);
+                    }
+                    self.memory = retained;
+                }
+            }
+        }
+    }
+
+    fn reopen_spill_append(&mut self) -> io::Result<File> {
+        #[cfg(test)]
+        if self.fail_next_reopen {
+            self.fail_next_reopen = false;
+            return Err(io::Error::other("injected spill reopen failure"));
         }
 
-        if let Ok(file) = OpenOptions::new().append(true).open(&self.spill_path) {
-            self.spill = Some(BufWriter::new(file));
-        }
+        OpenOptions::new().append(true).open(&self.spill_path)
     }
 
     fn retain_spill_tail(&self) -> io::Result<()> {
@@ -200,4 +231,29 @@ pub fn default_output_dir(storage_dir: Option<&Path>) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".cache").join("aft").join("bash-output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_spill_file_reopen_failure_preserves_consistent_fallback_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut buffer = BgBuffer::new("rotate-reopen-fails", dir.path().to_path_buf());
+        buffer.append(StreamKind::Stdout, &vec![b'a'; MEMORY_LIMIT_BYTES + 1]);
+
+        buffer.spilled_bytes = DISK_LIMIT_BYTES;
+        buffer.fail_next_reopen = true;
+        buffer.rotate_spill_file();
+
+        assert!(buffer.spill.is_none());
+        assert_eq!(buffer.spilled_bytes, 0);
+        assert!(buffer.memory.len() <= MEMORY_LIMIT_BYTES);
+        assert!(buffer.rotated);
+
+        buffer.append(StreamKind::Stdout, b"after-failure");
+        assert_eq!(buffer.total_len(), buffer.spilled_bytes);
+        assert!(buffer.spill.is_some());
+    }
 }

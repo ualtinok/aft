@@ -7,7 +7,7 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
     Response::success(
         &req.id,
         json!({
-            "bg_completions": ctx.drain_bg_completions(),
+            "bg_completions": ctx.bash_background().drain_completions_for_session(Some(req.session())),
         }),
     )
 }

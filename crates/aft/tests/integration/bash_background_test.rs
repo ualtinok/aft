@@ -4,6 +4,30 @@ use serde_json::{json, Value};
 
 use super::helpers::AftProcess;
 
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return false;
+    }
+    !String::from_utf8_lossy(&output.stdout).contains('Z')
+}
+
+#[cfg(unix)]
+fn wait_until_process_exits(pid: i32) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        if !process_exists(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn configure_background(aft: &mut AftProcess) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let response = aft.send(
@@ -25,6 +49,20 @@ fn spawn_bg(aft: &mut AftProcess, id: &str, command: &str) -> String {
             "id": id,
             "command": "bash",
             "params": { "command": command, "background": true }
+        })
+        .to_string(),
+    );
+    assert_eq!(response["success"], true, "spawn failed: {response:?}");
+    assert_eq!(response["status"], "running");
+    response["task_id"].as_str().unwrap().to_string()
+}
+
+fn spawn_bg_params(aft: &mut AftProcess, id: &str, params: Value) -> String {
+    let response = aft.send(
+        &json!({
+            "id": id,
+            "command": "bash",
+            "params": params
         })
         .to_string(),
     );
@@ -132,6 +170,44 @@ fn background_kill_running_task() {
 
     let after = status(&mut aft, &task_id);
     assert_eq!(after["status"], "killed");
+
+    assert!(aft.shutdown().success());
+}
+
+#[cfg(unix)]
+#[test]
+fn background_kill_terminates_shell_process_group_grandchild() {
+    let mut aft = AftProcess::spawn();
+    let dir = configure_background(&mut aft);
+    let pid_file = dir.path().join("bg-sleep.pid");
+    let command = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+
+    let task_id = spawn_bg(&mut aft, "spawn-kill-pgroup", &command);
+    let started = Instant::now();
+    while !pid_file.exists() {
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let killed = aft.send(
+        &json!({
+            "id": "kill-bg-pgroup",
+            "command": "bash_kill",
+            "params": { "task_id": task_id }
+        })
+        .to_string(),
+    );
+    assert_eq!(killed["success"], true, "kill failed: {killed:?}");
+    assert_eq!(killed["status"], "killed");
+    assert!(
+        wait_until_process_exits(pid),
+        "grandchild sleep process {pid} survived background kill"
+    );
 
     assert!(aft.shutdown().success());
 }
@@ -261,6 +337,118 @@ fn background_completion_metadata_is_attached_to_next_response() {
         assert!(started.elapsed() < Duration::from_secs(4));
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_completion_delivery_is_scoped_by_session_id() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let spawn = aft.send(
+        &json!({
+            "id": "spawn-session-a",
+            "session_id": "session-a",
+            "command": "bash",
+            "params": { "command": "echo session-a", "background": true }
+        })
+        .to_string(),
+    );
+    assert_eq!(spawn["success"], true, "spawn failed: {spawn:?}");
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+    let _ = wait_for_status(&mut aft, &task_id, "completed");
+
+    let session_b = aft.send(
+        &json!({
+            "id": "ping-session-b",
+            "session_id": "session-b",
+            "command": "ping"
+        })
+        .to_string(),
+    );
+    assert_eq!(session_b["success"], true);
+    assert!(
+        session_b["bg_completions"]
+            .as_array()
+            .is_none_or(|items| items.is_empty()),
+        "session B drained session A completion: {session_b:?}"
+    );
+
+    let session_a = aft.send(
+        &json!({
+            "id": "ping-session-a",
+            "session_id": "session-a",
+            "command": "ping"
+        })
+        .to_string(),
+    );
+    let completions = session_a["bg_completions"].as_array().unwrap();
+    assert!(completions
+        .iter()
+        .any(|completion| completion["task_id"] == task_id));
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_spawn_honors_custom_workdir() {
+    let mut aft = AftProcess::spawn();
+    let dir = configure_background(&mut aft);
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+
+    let task_id = spawn_bg_params(
+        &mut aft,
+        "spawn-bg-workdir",
+        json!({ "command": "pwd", "background": true, "workdir": nested }),
+    );
+    let completed = wait_for_status(&mut aft, &task_id, "completed");
+    let actual =
+        std::fs::canonicalize(completed["output_preview"].as_str().unwrap().trim()).unwrap();
+    let expected = std::fs::canonicalize(&nested).unwrap();
+    assert_eq!(actual, expected);
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_spawn_honors_env_overrides() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg_params(
+        &mut aft,
+        "spawn-bg-env",
+        json!({
+            "command": "printf '%s' \"$AFT_BG_ENV_TEST\"",
+            "background": true,
+            "env": { "AFT_BG_ENV_TEST": "from-bg-env" }
+        }),
+    );
+    let completed = wait_for_status(&mut aft, &task_id, "completed");
+    assert_eq!(completed["output_preview"].as_str().unwrap(), "from-bg-env");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_spawn_honors_timeout() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg_params(
+        &mut aft,
+        "spawn-bg-timeout",
+        json!({ "command": "sleep 5", "background": true, "timeout": 200 }),
+    );
+    let started = Instant::now();
+    let failed = wait_for_status(&mut aft, &task_id, "failed");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "timeout took too long: {failed:?}"
+    );
+    assert_eq!(failed["exit_code"], 124);
 
     assert!(aft.shutdown().success());
 }
