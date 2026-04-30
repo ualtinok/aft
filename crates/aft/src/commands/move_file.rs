@@ -1,7 +1,9 @@
 //! Handler for the `move_file` command: rename/move a file with backup.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use lsp_types::FileChangeType;
 
 use crate::context::AppContext;
 use crate::edit;
@@ -132,6 +134,12 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
 
     log::debug!("move_file: {} -> {}", file, destination);
 
+    if move_outcome == MoveOutcome::Moved {
+        let source_for_lsp = unresolved_existing_path(&src_path, Path::new(file));
+        ctx.lsp_notify_watched_config_file(&source_for_lsp, FileChangeType::DELETED);
+    }
+    ctx.lsp_notify_watched_config_file(&dst_path, FileChangeType::CREATED);
+
     let mut result = move_success_result(file, destination, move_outcome);
 
     if let Some(ref id) = backup_id {
@@ -160,6 +168,14 @@ fn move_file_on_disk(src_path: &Path, dst_path: &Path) -> MoveOutcome {
             },
             Err(_) => MoveOutcome::Failed(rename_error.to_string()),
         },
+    }
+}
+
+fn unresolved_existing_path(resolved_path: &Path, requested_path: &Path) -> PathBuf {
+    if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        resolved_path.to_path_buf()
     }
 }
 

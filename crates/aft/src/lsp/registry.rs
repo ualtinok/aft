@@ -596,6 +596,27 @@ pub fn servers_for_file(path: &Path, config: &Config) -> Vec<ServerDef> {
 /// affect an LSP server's workspace/project graph, even if the edited file
 /// itself is not a source file handled by that server.
 pub fn is_config_file_path(path: &Path) -> bool {
+    const IGNORED_COMPONENTS: &[&str] = &[
+        "node_modules",
+        "target",
+        "vendor",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        "__pycache__",
+    ];
+
+    if path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| IGNORED_COMPONENTS.contains(&name))
+    }) {
+        return false;
+    }
+
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };

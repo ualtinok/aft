@@ -41,6 +41,16 @@ fn create_dir_symlink(src: &Path, dst: &Path) {
     std::os::windows::fs::symlink_dir(src, dst).expect("create symlink");
 }
 
+#[cfg(unix)]
+fn create_file_symlink(src: &Path, dst: &Path) {
+    std::os::unix::fs::symlink(src, dst).expect("create symlink");
+}
+
+#[cfg(windows)]
+fn create_file_symlink(src: &Path, dst: &Path) {
+    std::os::windows::fs::symlink_file(src, dst).expect("create symlink");
+}
+
 #[test]
 fn write_blocks_parent_dir_traversal_outside_project_root() {
     let mut aft = AftProcess::spawn();
@@ -119,6 +129,35 @@ fn write_blocks_symlink_traversal_outside_project_root() {
 
     assert_error_code(&resp, "path_outside_root");
     assert!(!outside.join("newdir/escape.txt").exists());
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn write_blocks_broken_symlink_escape_from_project_root() {
+    let mut aft = AftProcess::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    let outside = dir.path().join("escape-target");
+    fs::create_dir_all(&root).unwrap();
+    create_file_symlink(&outside, &root.join("broken-link"));
+    configure_restricted(&mut aft, &root);
+
+    let attempted = root.join("broken-link");
+    let resp = aft.send(
+        &serde_json::to_string(&serde_json::json!({
+            "id": "write-broken-symlink-traversal",
+            "command": "write",
+            "file": attempted.display().to_string(),
+            "content": "blocked",
+        }))
+        .unwrap(),
+    );
+
+    assert_error_code(&resp, "path_outside_root");
+    assert!(!outside.exists());
 
     let status = aft.shutdown();
     assert!(status.success());

@@ -41,7 +41,7 @@ struct FileResult {
 
 struct TransactionWriteResult {
     file_result: FileResult,
-    lsp_outcome: Option<PostEditWaitOutcome>,
+    file: PathBuf,
 }
 
 struct TransactionOpError {
@@ -156,25 +156,19 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
 
         match edit::write_format_validate(&op.file, &new_content, &ctx.config(), &req.params) {
             Ok(wr) => {
-                let lsp_outcome =
-                    std::fs::read_to_string(&op.file)
-                        .ok()
-                        .and_then(|final_content| {
-                            ctx.lsp_post_write(&op.file, &final_content, &lsp_params)
-                        });
                 // Track this file as new if it was created by this operation
                 // (in case earlier ops in the same transaction created it)
                 if !snapshotted_files.contains(&op.file) && !new_files.contains(&op.file) {
                     new_files.push(op.file.clone());
                 }
                 results.push(TransactionWriteResult {
+                    file: op.file.clone(),
                     file_result: FileResult {
                         file: op.file.display().to_string(),
                         syntax_valid: wr.syntax_valid,
                         formatted: wr.formatted,
                         format_skipped_reason: wr.format_skipped_reason,
                     },
-                    lsp_outcome,
                 });
             }
             Err(e) => {
@@ -209,6 +203,16 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Success ---
+    let mut lsp_outcomes: Vec<PostEditWaitOutcome> = Vec::new();
+    for result in &results {
+        if let Ok(final_content) = std::fs::read_to_string(&result.file) {
+            if let Some(lsp_outcome) = ctx.lsp_post_write(&result.file, &final_content, &lsp_params)
+            {
+                lsp_outcomes.push(lsp_outcome);
+            }
+        }
+    }
+
     let files_modified = results.len();
     let result_json: Vec<serde_json::Value> = results
         .iter()
@@ -225,11 +229,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
             v
         })
         .collect();
-    let lsp_outcome = merge_lsp_outcomes(
-        results
-            .iter()
-            .filter_map(|result| result.lsp_outcome.as_ref()),
-    );
+    let lsp_outcome = merge_lsp_outcomes(lsp_outcomes.iter());
 
     log::debug!(
         "[aft] transaction: {} files modified successfully",

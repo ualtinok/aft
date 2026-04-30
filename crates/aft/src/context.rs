@@ -88,6 +88,62 @@ fn resolve_with_existing_ancestors(path: &Path) -> PathBuf {
     resolved
 }
 
+fn path_error_response(
+    req_id: &str,
+    path: &Path,
+    resolved_root: &Path,
+) -> crate::protocol::Response {
+    crate::protocol::Response::error(
+        req_id,
+        "path_outside_root",
+        format!(
+            "path '{}' is outside the project root '{}'",
+            path.display(),
+            resolved_root.display()
+        ),
+    )
+}
+
+fn reject_escaping_symlink(
+    req_id: &str,
+    original_path: &Path,
+    candidate: &Path,
+    resolved_root: &Path,
+) -> Result<(), crate::protocol::Response> {
+    let mut current = PathBuf::new();
+
+    for component in candidate.components() {
+        current.push(component);
+
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            continue;
+        };
+
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        let target = match std::fs::read_link(&current) {
+            Ok(target) => target,
+            Err(_) => return Err(path_error_response(req_id, original_path, resolved_root)),
+        };
+        let resolved_target = if target.is_absolute() {
+            normalize_path(&target)
+        } else {
+            let parent = current.parent().unwrap_or_else(|| Path::new(""));
+            normalize_path(&parent.join(target))
+        };
+
+        if !resolved_target.starts_with(resolved_root)
+            && !resolved_root.starts_with(&resolved_target)
+        {
+            return Err(path_error_response(req_id, original_path, resolved_root));
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared application context threaded through all command handlers.
 ///
 /// Holds the language provider, backup/checkpoint stores, configuration,
@@ -522,22 +578,23 @@ impl AppContext {
         };
         drop(config);
 
-        // Resolve the path (follow symlinks, normalize ..)
-        let resolved = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| resolve_with_existing_ancestors(&normalize_path(path)));
-
         let resolved_root = std::fs::canonicalize(&root).unwrap_or(root);
 
+        // Resolve the path (follow symlinks, normalize ..). If canonicalization
+        // fails (e.g. path does not exist or traverses a broken symlink), inspect
+        // every existing component with lstat before falling back lexically so a
+        // broken in-root symlink cannot be used to write outside project_root.
+        let resolved = match std::fs::canonicalize(path) {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                let normalized = normalize_path(path);
+                reject_escaping_symlink(req_id, path, &normalized, &resolved_root)?;
+                resolve_with_existing_ancestors(&normalized)
+            }
+        };
+
         if !resolved.starts_with(&resolved_root) {
-            return Err(crate::protocol::Response::error(
-                req_id,
-                "path_outside_root",
-                format!(
-                    "path '{}' is outside the project root '{}'",
-                    path.display(),
-                    resolved_root.display()
-                ),
-            ));
+            return Err(path_error_response(req_id, path, &resolved_root));
         }
 
         Ok(resolved)
