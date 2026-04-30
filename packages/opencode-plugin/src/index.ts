@@ -24,6 +24,8 @@ import {
   discoverRelevantGithubServers,
   runGithubAutoInstall,
 } from "./lsp-github-install.js";
+import { GITHUB_LSP_TABLE } from "./lsp-github-table.js";
+import { NPM_LSP_TABLE } from "./lsp-npm-table.js";
 import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import {
@@ -251,6 +253,9 @@ const plugin: Plugin = async (input) => {
     const lspGraceDays = aftConfig.lsp?.grace_days ?? 7;
     const lspVersions = aftConfig.lsp?.versions ?? {};
     const lspDisabled = new Set(aftConfig.lsp?.disabled ?? []);
+    configOverrides.lsp_auto_install_binaries = [
+      ...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary)),
+    ];
 
     const npmResult = runAutoInstall(input.directory, {
       autoInstall: lspAutoInstall,

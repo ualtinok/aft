@@ -135,6 +135,7 @@ fn configure_warns_for_missing_builtin_and_custom_lsp_binaries() {
             "id": "cfg-missing-lsp",
             "command": "configure",
             "project_root": dir.path(),
+            "lsp_auto_install_binaries": ["bash-language-server"],
             "lsp_servers": [{
                 "id": "tinymist",
                 "extensions": ["typ"],
@@ -166,6 +167,119 @@ fn configure_warns_for_missing_builtin_and_custom_lsp_binaries() {
     let custom = warning_with_kind(&configure, "lsp_binary_missing", "binary", "tinymist")
         .expect("missing custom LSP warning");
     assert_eq!(custom["server"], "tinymist");
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
+fn configure_does_not_warn_for_file_discovered_non_auto_installable_lsp() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Program.cs"), "class Program {}\n").unwrap();
+
+    let path = empty_path();
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-no-roslyn-warning",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_auto_install_binaries": ["typescript-language-server"]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should succeed: {configure:?}"
+    );
+    assert!(
+        warning_with_kind(
+            &configure,
+            "lsp_binary_missing",
+            "binary",
+            "roslyn-language-server"
+        )
+        .is_none(),
+        "should not warn for non-auto-installable file-discovered LSP: {configure:?}"
+    );
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
+fn configure_warns_for_file_discovered_auto_installable_lsp() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.ts"), "const x = 1;\n").unwrap();
+
+    let path = empty_path();
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-typescript-lsp-warning",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_auto_install_binaries": ["typescript-language-server"]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should succeed: {configure:?}"
+    );
+    let warning = warning_with_kind(
+        &configure,
+        "lsp_binary_missing",
+        "binary",
+        "typescript-language-server",
+    )
+    .expect("missing TypeScript LSP warning");
+    assert_eq!(warning["server"], "typescript-language-server");
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
+fn configure_warns_for_custom_lsp_regardless_of_auto_install_set() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let path = empty_path();
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-custom-lsp-warning",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_auto_install_binaries": [],
+            "lsp_servers": [{
+                "id": "custom-thing",
+                "extensions": ["thing"],
+                "binary": "nonexistent-binary",
+                "args": [],
+                "root_markers": [".git"]
+            }]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should succeed: {configure:?}"
+    );
+    let warning = warning_with_kind(
+        &configure,
+        "lsp_binary_missing",
+        "binary",
+        "nonexistent-binary",
+    )
+    .expect("missing custom LSP warning");
+    assert_eq!(warning["server"], "custom-thing");
 
     let shutdown = aft.shutdown();
     assert!(shutdown.success());

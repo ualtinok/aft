@@ -331,6 +331,26 @@ fn parse_disabled_lsp(value: &Value) -> Result<std::collections::HashSet<String>
         .collect()
 }
 
+fn parse_string_set(
+    value: &Value,
+    field: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let Some(entries) = value.as_array() else {
+        return Err(format!("configure: {field} must be an array of strings"));
+    };
+
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            entry
+                .as_str()
+                .map(|value| value.to_string())
+                .ok_or_else(|| format!("configure: {field}[{index}] must be a string"))
+        })
+        .collect()
+}
+
 fn is_custom_server(kind: &ServerKind) -> bool {
     matches!(kind, ServerKind::Custom(_))
 }
@@ -719,6 +739,10 @@ fn detect_missing_lsp_binaries(files: &[PathBuf], config: &crate::config::Config
                 continue;
             }
 
+            if !config.lsp_auto_install_binaries.contains(&server.binary) {
+                continue;
+            }
+
             if !resolved_binaries.contains(&server.binary) {
                 if resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some() {
                     resolved_binaries.insert(server.binary.clone());
@@ -899,6 +923,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().lsp_paths_extra = paths;
+    }
+    if let Some(v) = params.get("lsp_auto_install_binaries") {
+        let binaries = match parse_string_set(v, "lsp_auto_install_binaries") {
+            Ok(binaries) => binaries,
+            Err(error) => return Response::error(&req.id, "invalid_request", error),
+        };
+        ctx.config_mut().lsp_auto_install_binaries = binaries;
     }
     if let Some(v) = params
         .get("search_index_max_file_size")

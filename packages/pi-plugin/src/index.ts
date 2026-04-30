@@ -52,6 +52,8 @@ import {
   discoverRelevantGithubServers,
   runGithubAutoInstall,
 } from "./lsp-github-install.js";
+import { GITHUB_LSP_TABLE } from "./lsp-github-table.js";
+import { NPM_LSP_TABLE } from "./lsp-npm-table.js";
 import {
   type ConfigureWarning,
   deliverConfigureWarnings,
@@ -306,6 +308,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const lspVersions = config.lsp?.versions ?? {};
     const lspDisabled = new Set(config.lsp?.disabled ?? []);
     const projectRoot = process.cwd();
+    configOverrides.lsp_auto_install_binaries = [
+      ...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary)),
+    ];
 
     const npmResult = runAutoInstall(projectRoot, {
       autoInstall: lspAutoInstall,
