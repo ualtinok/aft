@@ -1073,6 +1073,19 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
 
         switch (hunk.type) {
           case "add": {
+            // *** Add File: <path> means CREATE; refuse to overwrite an existing
+            // file. The unified `write` bridge command silently overwrites by
+            // design (it's the back-end for both `write` and `apply_patch`'s
+            // create-or-overwrite flow), so the existence check has to happen
+            // here, in the apply_patch wrapper. Without it, an Add hunk against
+            // a path that already exists would clobber the file's contents and
+            // the agent would see a misleading "Created <path>" success.
+            if (fs.existsSync(filePath)) {
+              const msg = `Failed to create ${hunk.path}: file already exists. Use *** Update File: to modify, or *** Delete File: first if you want to replace it entirely.`;
+              results.push(msg);
+              failures.push(hunk.path);
+              break;
+            }
             try {
               const content = hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`;
               const writeResult = await callBridge(ctx, context, "write", {

@@ -17,9 +17,6 @@ import {
   readTextFile,
 } from "./helpers.js";
 
-const failingTest = ((test as typeof test & { failing?: typeof test }).failing ??
-  test) as typeof test;
-
 const initialBinary = await prepareBinary();
 const maybeDescribe = describe.skipIf(!initialBinary.binaryPath);
 
@@ -164,16 +161,14 @@ maybeDescribe("e2e apply_patch rollback behavior", () => {
     }
   });
 
-  failingTest(
-    "add hunk to existing path should fail without rolling back unrelated successful file",
-    async () => {
-      const { h, tools, sdkCtx } = await toolHarness();
-      await writeFile(h.path("kept.txt"), "before\n", "utf8");
-      await writeFile(h.path("exists.txt"), "already here\n", "utf8");
+  test("add hunk to existing path should fail without rolling back unrelated successful file", async () => {
+    const { h, tools, sdkCtx } = await toolHarness();
+    await writeFile(h.path("kept.txt"), "before\n", "utf8");
+    await writeFile(h.path("exists.txt"), "already here\n", "utf8");
 
-      const output = await tools.apply_patch.execute(
-        {
-          patchText: `*** Begin Patch
+    const output = await tools.apply_patch.execute(
+      {
+        patchText: `*** Begin Patch
 *** Update File: kept.txt
 @@
 -before
@@ -181,15 +176,14 @@ maybeDescribe("e2e apply_patch rollback behavior", () => {
 *** Add File: exists.txt
 +new content
 *** End Patch`,
-        },
-        sdkCtx,
-      );
+      },
+      sdkCtx,
+    );
 
-      expect(output).toContain("Updated kept.txt");
-      expect(output).toContain("Failed to create exists.txt");
-      expect(output).toContain("Patch partially applied");
-      expect(await readTextFile(h.path("kept.txt"))).toBe("after\n");
-      expect(await readTextFile(h.path("exists.txt"))).toBe("already here\n");
-    },
-  );
+    expect(output).toContain("Updated kept.txt");
+    expect(output).toContain("Failed to create exists.txt");
+    expect(output).toContain("Patch partially applied");
+    expect(await readTextFile(h.path("kept.txt"))).toBe("after\n");
+    expect(await readTextFile(h.path("exists.txt"))).toBe("already here\n");
+  });
 });
