@@ -268,19 +268,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // because at this point `config` is the merged user+project view and
   // mergeConfigs alone is not enough.
   //
-  // Default `restrict_to_project_root: true` for plugin-hosted agents.
-  // The Rust CLI default is false (documented — for direct/scripted use),
-  // but when agents call `aft_outline`, `aft_read`, etc. through the plugin
-  // there is no interactive permission prompt for reads, so we must enforce
-  // the project-root boundary by default. Users opt out via user config
-  // ONLY (project config cannot weaken this; see config.ts trust boundary).
+  // Default `restrict_to_project_root: false` for parity with Pi's built-in
+  // tools, which do NOT enforce a project-root boundary at all (Pi's
+  // `resolveToCwd` resolves absolute paths through unchanged). AFT previously
+  // defaulted to `true`, hard-rejecting out-of-root paths that Pi's own
+  // tools would have happily processed. Users who want strict containment
+  // can opt in by setting `restrict_to_project_root: true` in their aft.jsonc
+  // (USER config only; project config cannot weaken this — see trust
+  // boundary in config.ts).
   const configOverrides: Record<string, unknown> = {};
   if (config.format_on_edit !== undefined) configOverrides.format_on_edit = config.format_on_edit;
   if (config.validate_on_edit !== undefined)
     configOverrides.validate_on_edit = config.validate_on_edit;
   if (config.formatter !== undefined) configOverrides.formatter = config.formatter;
   if (config.checker !== undefined) configOverrides.checker = config.checker;
-  configOverrides.restrict_to_project_root = config.restrict_to_project_root ?? true;
+  configOverrides.restrict_to_project_root = config.restrict_to_project_root ?? false;
   if (config.search_index !== undefined) configOverrides.search_index = config.search_index;
   if (config.semantic_search !== undefined)
     configOverrides.semantic_search = config.semantic_search;

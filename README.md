@@ -1113,8 +1113,12 @@ The schema is identical across harnesses. Only file location differs.
   "semantic_search": false,
 
   // Restrict all file operations to the project root directory.
-  // Default: false (most harnesses gate out-of-root access via permission prompts; AFT
-  // defers to the harness's permission UX rather than imposing a hard rejection here)
+  // Default: false. Matches OpenCode's and Pi's native behavior — neither host
+  // hard-rejects out-of-root paths from their built-in tools (OpenCode prompts
+  // the user; Pi just allows). Set to true to enforce a strict project-root
+  // boundary on every AFT tool call. USER-only — strict-allowlist trust
+  // boundary refuses to honor this field from project-level config so a
+  // hostile repository cannot weaken your file boundary.
   "restrict_to_project_root": false,
 
   // OpenCode plugin only. When true, the auto-update hook installs newer

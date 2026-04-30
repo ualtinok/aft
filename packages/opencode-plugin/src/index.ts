@@ -186,13 +186,17 @@ const plugin: Plugin = async (input) => {
     configOverrides.validate_on_edit = aftConfig.validate_on_edit;
   if (aftConfig.formatter !== undefined) configOverrides.formatter = aftConfig.formatter;
   if (aftConfig.checker !== undefined) configOverrides.checker = aftConfig.checker;
-  // Default to restrict_to_project_root: true for plugin-hosted agents.
-  // The Rust CLI default is false (documented — for direct/scripted use), but
-  // when agents call `aft_outline`, `aft_read`, etc. through the plugin there
-  // is no interactive permission prompt for reads, so we must enforce the
-  // project-root boundary by default. Users can opt out by explicitly setting
-  // `restrict_to_project_root: false` in their aft.jsonc.
-  configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root ?? true;
+  // Default to restrict_to_project_root: false for parity with the host's
+  // built-in tools. OpenCode's native `read`/`write`/`edit`/`apply_patch` do
+  // not hard-reject out-of-root paths — they call `assertExternalDirectory`
+  // which prompts the user and continues on approval. AFT previously
+  // defaulted this to `true`, which blocked legitimate cross-project work
+  // that OpenCode's own tools would have allowed (often after one click).
+  // Users who want strict containment can opt in by setting
+  // `restrict_to_project_root: true` in their aft.jsonc.
+  // TODO(v0.19): replicate OpenCode's `ctx.ask({permission:"external_directory"})`
+  // prompt at the plugin layer for full UX parity with native built-ins.
+  configOverrides.restrict_to_project_root = aftConfig.restrict_to_project_root ?? false;
   configOverrides.bash_permissions = true;
   if (aftConfig.search_index !== undefined) configOverrides.search_index = aftConfig.search_index;
   if (aftConfig.semantic_search !== undefined)
