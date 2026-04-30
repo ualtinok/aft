@@ -57,3 +57,8 @@ tests/docker/fixtures/aft-linux-x64
 packages/pi-plugin/src/__tests__/e2e/fixtures/aft-bin
 packages/opencode-plugin/src/__tests__/e2e/fixtures/aft-bin
 .alfonso/
+
+# Local smoke-test fixtures used during dogfooding investigations.
+# Findings get distilled into proper e2e tests under
+# packages/*/src/__tests__/e2e/; the throwaway smoke files don't ship.
+smoke-tests/
