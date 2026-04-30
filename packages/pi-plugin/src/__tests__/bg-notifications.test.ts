@@ -4,9 +4,11 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   __resetBgNotificationStateForTests,
   appendToolResultBgCompletions,
+  cleanupIdleSessionStates,
   formatSystemReminder,
   handleTurnEndBgCompletions,
   resetBgWake,
+  SESSION_BG_STATE_IDLE_TTL_MS,
   sessionBgStates,
   trackBgTask,
 } from "../bg-notifications.js";
@@ -219,6 +221,27 @@ describe("Pi background notifications", () => {
     expect(s2?.[1].type === "text" ? s2[1].text : "").toContain("task-2");
   });
 
+  test("cleanupIdleSessionStates evicts stale task-free sessions", () => {
+    trackBgTask("stale", "task-stale");
+    trackBgTask("fresh", "task-fresh");
+    ingestCompletionForCleanup("stale", "task-stale");
+    ingestCompletionForCleanup("fresh", "task-fresh");
+
+    const now = Date.now();
+    const stale = sessionBgStates.get("stale");
+    const fresh = sessionBgStates.get("fresh");
+    expect(stale).toBeDefined();
+    expect(fresh).toBeDefined();
+    if (!stale || !fresh) throw new Error("expected test states to exist");
+    stale.lastSeenAt = now - SESSION_BG_STATE_IDLE_TTL_MS - 1;
+    fresh.lastSeenAt = now;
+
+    cleanupIdleSessionStates(now);
+
+    expect(sessionBgStates.has("stale")).toBe(false);
+    expect(sessionBgStates.has("fresh")).toBe(true);
+  });
+
   test("drain failure does not break tool_result mutation", async () => {
     trackBgTask("s1", "task-1");
     const { ctx } = harness(() => {
@@ -256,6 +279,12 @@ function harness(
 
 function completion(task_id: string, command: string) {
   return { task_id, status: "completed", exit_code: 0, command };
+}
+
+function ingestCompletionForCleanup(sessionID: string, taskID: string): void {
+  const state = sessionBgStates.get(sessionID);
+  if (!state) throw new Error(`missing state for ${sessionID}`);
+  state.outstandingTaskIds.delete(taskID);
 }
 
 function sleep(ms: number): Promise<void> {

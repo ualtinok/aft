@@ -202,6 +202,10 @@ export class BinaryBridge {
       throw new Error(`[aft-pi] Bridge is shutting down, cannot send "${command}"`);
     }
 
+    if (Object.hasOwn(params, "id")) {
+      throw new Error("params cannot contain reserved key 'id'");
+    }
+
     this.ensureSpawned();
 
     // Auto-configure project root + plugin config on first command, then check version.

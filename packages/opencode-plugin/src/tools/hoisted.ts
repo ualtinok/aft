@@ -1024,12 +1024,14 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       // results and proceed.
       const checkpointPaths = Array.from(affectedAbs).filter((abs) => !newlyCreatedAbs.has(abs));
       const checkpointName = `apply_patch_${Date.now()}`;
+      let checkpointCreated = false;
       if (checkpointPaths.length > 0) {
         try {
           await callBridge(ctx, context, "checkpoint", {
             name: checkpointName,
             files: checkpointPaths,
           });
+          checkpointCreated = true;
         } catch {
           // Checkpoint failure: agent loses the easy `aft_safety` undo
           // path but the patch still attempts each hunk independently.
@@ -1207,21 +1209,36 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
                   }
                 } catch (deleteError) {
                   try {
-                    const rollbackResult = await callBridge(ctx, context, "delete_file", {
-                      file: targetPath,
+                    if (!checkpointCreated) {
+                      throw new Error("pre-patch checkpoint was not created");
+                    }
+                    const rollbackResult = await callBridge(ctx, context, "restore_checkpoint", {
+                      name: checkpointName,
                     });
                     if (rollbackResult.success === false) {
                       throw new Error(
-                        (rollbackResult.message as string | undefined) ?? "rollback delete failed",
+                        (rollbackResult.message as string | undefined) ??
+                          "checkpoint restore failed",
                       );
+                    }
+                    if (newlyCreatedAbs.has(targetPath) && fs.existsSync(targetPath)) {
+                      const cleanupResult = await callBridge(ctx, context, "delete_file", {
+                        file: targetPath,
+                      });
+                      if (cleanupResult.success === false) {
+                        throw new Error(
+                          (cleanupResult.message as string | undefined) ??
+                            "new destination cleanup failed",
+                        );
+                      }
                     }
                   } catch (rollbackError) {
                     throw new Error(
-                      `success: false; code: move_partial_failure; files: [${filePath}, ${targetPath}]; wrote destination ${targetPath}, but failed to delete source ${filePath} (${formatError(deleteError)}) and failed to roll back destination ${targetPath} (${formatError(rollbackError)}). Both copies may exist: ${filePath}, ${targetPath}`,
+                      `success: false; code: move_partial_failure; files: [${filePath}, ${targetPath}]; wrote destination ${targetPath}, but failed to delete source ${filePath} (${formatError(deleteError)}) and failed to restore pre-patch checkpoint ${checkpointName} (${formatError(rollbackError)}). Both copies may exist or destination content may be changed: ${filePath}, ${targetPath}`,
                     );
                   }
                   throw new Error(
-                    `source delete failed after writing move destination; rolled back destination ${targetPath}: ${formatError(deleteError)}`,
+                    `source delete failed after writing move destination; restored pre-patch checkpoint ${checkpointName}: ${formatError(deleteError)}`,
                   );
                 }
                 results.push(`Updated and moved ${hunk.path} → ${hunk.move_path}`);

@@ -19,6 +19,7 @@ type SessionBgState = {
   firstCompletionAt: number | null;
   scheduledFireAt: number | null;
   scheduledCompletionCount: number;
+  lastSeenAt: number;
 };
 
 type TextContent = { type: "text"; text: string; textSignature?: string };
@@ -28,6 +29,8 @@ type SendUserMessageRuntime = { sendUserMessage: (content: string) => void };
 
 export const sessionBgStates: Map<string, SessionBgState> = new Map();
 
+// Lazily evict idle, task-free sessions after 1 hour; no timer is used so the plugin doesn't keep the event loop alive.
+export const SESSION_BG_STATE_IDLE_TTL_MS = 60 * 60 * 1000;
 const DEBOUNCE_STEP_MS = 200;
 const DEBOUNCE_CAP_MS = 1000;
 const DEFAULT_SESSION_ID = "__default__";
@@ -170,6 +173,8 @@ function scheduleWake(state: SessionBgState, sendWake: (reminder: string) => Pro
 }
 
 function stateFor(sessionID: string | undefined): SessionBgState {
+  const now = Date.now();
+  cleanupIdleSessionStates(now);
   const key = sessionID || DEFAULT_SESSION_ID;
   let state = sessionBgStates.get(key);
   if (!state) {
@@ -181,10 +186,23 @@ function stateFor(sessionID: string | undefined): SessionBgState {
       firstCompletionAt: null,
       scheduledFireAt: null,
       scheduledCompletionCount: 0,
+      lastSeenAt: now,
     };
     sessionBgStates.set(key, state);
+  } else {
+    state.lastSeenAt = now;
   }
   return state;
+}
+
+export function cleanupIdleSessionStates(now: number = Date.now()): void {
+  const cutoff = now - SESSION_BG_STATE_IDLE_TTL_MS;
+  for (const [sessionID, state] of sessionBgStates) {
+    if (state.outstandingTaskIds.size > 0) continue;
+    if (state.lastSeenAt >= cutoff) continue;
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    sessionBgStates.delete(sessionID);
+  }
 }
 
 function isBgCompletion(value: unknown): value is BgCompletion {

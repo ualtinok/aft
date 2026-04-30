@@ -104,6 +104,25 @@ describe("Pi BinaryBridge", () => {
       await rm(fakeBin).catch(() => {});
     }
   });
+
+  test("rejects params with reserved id before writing to the bridge", async () => {
+    const fakeBin = join(tmpdir(), `aft-pi-fake-id-collision-${Date.now()}.sh`);
+    await writeFile(fakeBin, ["#!/bin/sh", "sleep 30", ""].join("\n"), { mode: 0o755 });
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: 5_000,
+        maxRestarts: 0,
+      });
+
+      await expect(bridge.send("read", { id: "caller-id", filePath: "x.ts" })).rejects.toThrow(
+        "params cannot contain reserved key 'id'",
+      );
+      expect(bridge.isAlive()).toBe(false);
+    } finally {
+      await rm(fakeBin).catch(() => {});
+    }
+  });
 });
 
 describe("Pi compareSemver", () => {

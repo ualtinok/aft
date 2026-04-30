@@ -1,7 +1,7 @@
 /// <reference path="../bun-test.d.ts" />
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
@@ -327,7 +327,7 @@ describe("Hoisted tool execute handlers", () => {
     );
   });
 
-  test("apply_patch rolls back move destination when source delete fails", async () => {
+  test("apply_patch restores checkpoint when move source delete fails", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -378,6 +378,7 @@ describe("Hoisted tool execute handlers", () => {
           return { success: true };
         }
       }
+      if (command === "restore_checkpoint") return { success: true };
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -387,10 +388,58 @@ describe("Hoisted tool execute handlers", () => {
     expect(existsSync(earlierFile)).toBe(true);
     expect(existsSync(destFile)).toBe(false);
     expect(result).toContain("Failed to update src/original.ts");
-    expect(result).toContain("rolled back destination");
+    expect(result).toContain("restored pre-patch checkpoint");
     expect(result).toContain("Patch partially applied");
-    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(false);
+    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(true);
     expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(true);
+  });
+
+  test("apply_patch restores pre-existing move destination when source delete fails", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const sourceFile = resolve(tmpDir, "src/original.ts");
+    const destFile = resolve(tmpDir, "src/renamed.ts");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(resolve(tmpDir, "src"), { recursive: true });
+    await writeFile(sourceFile, "export const x = 1;\n");
+    await writeFile(destFile, "ORIGINAL\n");
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: src/original.ts",
+      "*** Move to: src/renamed.ts",
+      "@@",
+      "-export const x = 1;",
+      "+export const x = 2;",
+      "*** End Patch",
+    ].join("\n");
+
+    const { calls, tools } = createMockHoistedHarness(async (command, params) => {
+      if (command === "checkpoint") return { success: true };
+      if (command === "write") {
+        await writeFile(params.file as string, params.content as string);
+        return { success: true };
+      }
+      if (command === "delete_file") {
+        if (params.file === sourceFile) throw new Error("source locked");
+        throw new Error(`unexpected delete_file for ${String(params.file)}`);
+      }
+      if (command === "restore_checkpoint") {
+        await writeFile(destFile, "ORIGINAL\n");
+        return { success: true };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+
+    expect(result).toContain("restored pre-patch checkpoint");
+    expect(await readFile(destFile, "utf-8")).toBe("ORIGINAL\n");
+    expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(true);
+    expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(
+      false,
+    );
   });
 
   test("apply_patch reports both copies when move rollback delete also fails", async () => {
@@ -422,8 +471,8 @@ describe("Hoisted tool execute handlers", () => {
       if (command === "delete_file") {
         const file = params.file as string;
         if (file === sourceFile) throw new Error("source locked");
-        if (file === destFile) throw new Error("rollback locked");
       }
+      if (command === "restore_checkpoint") throw new Error("restore locked");
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -434,7 +483,7 @@ describe("Hoisted tool execute handlers", () => {
     expect(result).toContain("move_partial_failure");
     expect(result).toContain(sourceFile);
     expect(result).toContain(destFile);
-    expect(result).toContain("Both copies may exist");
+    expect(result).toContain("Both copies may exist or destination content may be changed");
   });
 
   /// BUG-6a dogfooding repro: the user's exact 3-file complaint. A multi-
