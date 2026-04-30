@@ -1216,6 +1216,15 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     let graph = CallGraph::new(root_path.clone());
     *ctx.callgraph().borrow_mut() = Some(graph);
 
+    if let Some(bg_storage_dir) = ctx.config().storage_dir.clone() {
+        if let Err(error) = ctx
+            .bash_background()
+            .replay_session(&bg_storage_dir, req.session())
+        {
+            log::warn!("[aft] failed to replay background bash tasks: {error}");
+        }
+    }
+
     // Drop old watcher/receiver before creating new ones (re-configure)
     *ctx.watcher().borrow_mut() = None;
     *ctx.watcher_rx().borrow_mut() = None;

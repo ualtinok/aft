@@ -4,22 +4,31 @@
 ///
 /// Termination is graceful-first: SIGTERM + 3-second grace period, then
 /// SIGKILL on Unix. On Windows, `taskkill /T /F` kills the entire process tree.
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const TERMINATE_GRACE: Duration = Duration::from_secs(3);
+pub const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(unix)]
 pub fn terminate_process(child: &mut Child) {
     let pgid = child.id() as i32;
+    terminate_pgid(pgid, Some(child));
+}
+
+#[cfg(unix)]
+pub fn terminate_pgid(pgid: i32, mut child: Option<&mut Child>) {
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
     let grace_started = Instant::now();
     while grace_started.elapsed() < TERMINATE_GRACE {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
+        if let Some(child) = child.as_deref_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
         }
         thread::sleep(Duration::from_millis(50));
     }

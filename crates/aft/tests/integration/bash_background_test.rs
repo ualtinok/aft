@@ -577,7 +577,7 @@ fn background_spawn_honors_timeout() {
         json!({ "command": "sleep 5", "background": true, "timeout": 200 }),
     );
     let started = Instant::now();
-    let failed = wait_for_status(&mut aft, &task_id, "failed");
+    let failed = wait_for_status(&mut aft, &task_id, "timed_out");
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "timeout took too long: {failed:?}"

@@ -4,6 +4,7 @@ mod test_helpers;
 mod helpers;
 
 mod ast_commands_test;
+mod bash_background_persistence_test;
 mod bash_background_test;
 mod bash_compress_extras_test;
 mod bash_compress_test;

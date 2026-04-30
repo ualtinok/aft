@@ -325,7 +325,7 @@ impl BackupStore {
     }
 
     fn session_hash(session: &str) -> String {
-        stable_hash_16(session.as_bytes())
+        hash_session(session)
     }
 
     fn path_hash(key: &Path) -> String {
@@ -712,6 +712,10 @@ impl BackupStore {
             self.disk_index.remove(session);
         }
     }
+}
+
+pub fn hash_session(session: &str) -> String {
+    stable_hash_16(session.as_bytes())
 }
 
 fn canonicalize_key(path: &Path) -> PathBuf {
