@@ -414,9 +414,11 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
             }
         } else {
             // Check for duplicate
-            let already = no_prefix
-                .iter()
-                .any(|o| o.module_path == up.full_path && o.kind == up.kind);
+            let already = no_prefix.iter().any(|o| {
+                o.module_path == up.full_path
+                    && o.kind == up.kind
+                    && (o.default_import.as_deref() == Some("pub")) == up.is_pub
+            });
             if already {
                 removed += 1;
             } else {

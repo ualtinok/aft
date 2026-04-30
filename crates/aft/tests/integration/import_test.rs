@@ -1091,6 +1091,45 @@ fn main() {}
     aft.shutdown();
 }
 
+#[test]
+fn organize_imports_rs_preserves_pub_use_and_private_use_pair() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut aft = AftProcess::spawn();
+    let dir = std::env::temp_dir().join("aft_import_tests");
+    fs::create_dir_all(&dir).unwrap();
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file = dir.join(format!("organize_rs_pub_private_{}.rs", n));
+
+    fs::write(
+        &file,
+        "\
+pub use serde;
+use serde;
+
+fn main() {}
+",
+    )
+    .unwrap();
+
+    let file_str = file.display().to_string();
+    let resp = send_organize_imports(&mut aft, "org-rs-pub-private", &file_str);
+
+    assert_eq!(
+        resp["success"], true,
+        "organize_imports should succeed: {:?}",
+        resp
+    );
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(content.contains("pub use serde;"), "content:\n{content}");
+    assert!(content.contains("use serde;"), "content:\n{content}");
+
+    fs::remove_file(&file).ok();
+    aft.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Regression: TS/JS named-import aliases and per-name type modifiers must
 // survive `organize_imports` round-trips. Reported in dogfooding session

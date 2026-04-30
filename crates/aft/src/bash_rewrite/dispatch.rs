@@ -5,7 +5,7 @@ use crate::bash_rewrite::RewriteRule;
 use crate::context::AppContext;
 use crate::protocol::Response;
 
-pub fn dispatch(command: &str, ctx: &AppContext) -> Option<Response> {
+pub fn dispatch(command: &str, session_id: Option<&str>, ctx: &AppContext) -> Option<Response> {
     if !ctx.config().experimental_bash_rewrite {
         return None;
     }
@@ -22,7 +22,7 @@ pub fn dispatch(command: &str, ctx: &AppContext) -> Option<Response> {
 
     for rule in rules {
         if rule.matches(command) {
-            match rule.rewrite(command, ctx) {
+            match rule.rewrite(command, session_id, ctx) {
                 Ok(response) => return Some(response),
                 Err(message) => {
                     log::warn!("bash rewrite rule {} declined: {}", rule.name(), message);

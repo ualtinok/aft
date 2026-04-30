@@ -164,3 +164,29 @@ fn granted_permission_allows_git_status_short() {
 
     assert!(aft.shutdown().success());
 }
+
+#[test]
+fn background_command_requires_permission_before_spawn() {
+    let root = TempDir::new().unwrap();
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &root);
+
+    let response = aft.send(
+        &serde_json::to_string(&json!({
+            "id": "bg-permission",
+            "method": "bash",
+            "params": {
+                "command": "rm /tmp/aft-background-permission-test.txt",
+                "permissions_requested": true,
+                "background": true,
+            },
+        }))
+        .unwrap(),
+    );
+
+    assert_eq!(response["success"], false, "response: {response:?}");
+    assert_eq!(response["code"], "permission_required");
+    assert!(response.get("task_id").is_none(), "response: {response:?}");
+
+    assert!(aft.shutdown().success());
+}

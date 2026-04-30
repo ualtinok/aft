@@ -9,6 +9,7 @@ use aft::parser::TreeSitterProvider;
 use aft::protocol::RawRequest;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 static TEST_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static LOGGER_INIT: Once = Once::new();
@@ -77,7 +78,19 @@ fn request(command: &str, params: Value) -> RawRequest {
 }
 
 fn rewrite(command: &str, ctx: &AppContext) -> Option<Value> {
-    try_rewrite(command, ctx).map(|response| response.data)
+    try_rewrite(command, None, ctx).map(|response| response.data)
+}
+
+fn rewrite_with_session(command: &str, session_id: &str, ctx: &AppContext) -> Option<Value> {
+    try_rewrite(command, Some(session_id), ctx).map(|response| response.data)
+}
+
+fn stable_hash_16(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn output(data: &Value) -> &str {
@@ -170,6 +183,35 @@ fn rewrites_cat_append_and_echo_append() {
     );
     assert_eq!(fs::read_to_string(notes).unwrap(), "first\nsecond line\n");
     assert!(rewrite("cat > notes.txt", &ctx).is_none());
+}
+
+#[test]
+fn rewrite_append_uses_original_session_for_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    fs::write(&file, "before\n").unwrap();
+    let ctx = context(dir.path(), true);
+    ctx.config_mut().storage_dir = Some(storage.path().to_path_buf());
+    ctx.backup()
+        .borrow_mut()
+        .set_storage_dir(storage.path().to_path_buf(), 168);
+    let session_id = "bash-rewrite-session";
+
+    rewrite_with_session(
+        &format!("echo scoped >> {}", file.display()),
+        session_id,
+        &ctx,
+    )
+    .expect("session rewrite succeeds");
+
+    let session_file = storage
+        .path()
+        .join("backups")
+        .join(stable_hash_16(session_id.as_bytes()))
+        .join("session.json");
+    let marker = fs::read_to_string(session_file).expect("session marker exists");
+    assert!(marker.contains(session_id), "marker: {marker}");
 }
 
 #[test]

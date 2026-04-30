@@ -17,11 +17,16 @@ use crate::protocol::Response;
 pub trait RewriteRule: Send + Sync {
     fn name(&self) -> &'static str;
     fn matches(&self, command: &str) -> bool;
-    fn rewrite(&self, command: &str, ctx: &AppContext) -> Result<Response, String>;
+    fn rewrite(
+        &self,
+        command: &str,
+        session_id: Option<&str>,
+        ctx: &AppContext,
+    ) -> Result<Response, String>;
 }
 
 /// Try to rewrite a bash command into an internal AFT tool call.
 /// Returns Some(response) if rewritten, None if no rule matched.
-pub fn try_rewrite(command: &str, ctx: &AppContext) -> Option<Response> {
-    dispatch::dispatch(command, ctx)
+pub fn try_rewrite(command: &str, session_id: Option<&str>, ctx: &AppContext) -> Option<Response> {
+    dispatch::dispatch(command, session_id, ctx)
 }
