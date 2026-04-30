@@ -60,7 +60,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        run: cargo publish --package agent-file-tools
+        # Allow re-runs of the same tag: treat "already exists" as success.
+        run: cargo publish --package agent-file-tools || { ec=$?; cargo publish --package agent-file-tools --dry-run 2>&1 | grep -q "already exists" && exit 0 || exit $ec; }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
