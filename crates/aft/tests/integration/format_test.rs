@@ -366,7 +366,7 @@ fn validate_full_default_no_errors() {
         && !resp["validation_errors"].is_null()
         && resp["validation_errors"]
             .as_array()
-            .map_or(false, |a| !a.is_empty());
+            .is_some_and(|a| !a.is_empty());
     assert!(
         !has_errors,
         "validation_errors should be absent or empty without validate:full, got: {:?}",
@@ -450,7 +450,7 @@ fn validate_on_edit_off_from_config_skips_checker() {
         && !resp["validation_errors"].is_null()
         && resp["validation_errors"]
             .as_array()
-            .map_or(false, |errors| !errors.is_empty());
+            .is_some_and(|errors| !errors.is_empty());
     assert!(
         !has_errors,
         "validate_on_edit:off should not produce validation_errors: {:?}",

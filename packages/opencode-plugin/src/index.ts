@@ -8,6 +8,7 @@ import {
   appendInTurnBgCompletions,
   extractSessionID,
   handleIdleBgCompletions,
+  handlePushedBgCompletion,
   resetBgWake,
 } from "./bg-notifications.js";
 import {
@@ -399,6 +400,18 @@ const plugin: Plugin = async (input) => {
             projectRoot,
           },
           validWarnings,
+        );
+      },
+      onBashCompletion: (completion, bridge) => {
+        void handlePushedBgCompletion(
+          {
+            ctx,
+            directory: input.directory,
+            sessionID: completion.session_id,
+            client: input.client,
+            isActive: () => bridge.hasPendingRequests(),
+          },
+          completion,
         );
       },
     },

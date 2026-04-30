@@ -171,13 +171,12 @@ fn callgraph_depth_limit_truncates() {
     let children = resp["children"].as_array().expect("children");
     for child in children {
         let grandchildren = child["children"].as_array();
-        match grandchildren {
-            Some(gc) => assert!(
+        if let Some(gc) = grandchildren {
+            assert!(
                 gc.is_empty(),
                 "At depth 1, child '{}' should have no grandchildren",
                 child["name"]
-            ),
-            None => {} // null is fine too
+            );
         }
     }
 
@@ -866,6 +865,7 @@ fn callgraph_impact_symbol_not_found() {
 /// validate is called from:
 /// - utils.ts (processData)
 /// - test_helpers.ts (testValidation)
+///
 /// Should return callers with signatures, entry point flags, and call expressions.
 #[test]
 fn callgraph_impact_multi_caller() {

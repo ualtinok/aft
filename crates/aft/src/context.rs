@@ -1,6 +1,6 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use lsp_types::FileChangeType;
 use notify::RecommendedWatcher;
@@ -13,9 +13,10 @@ use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
 use crate::lsp::registry::is_config_file_path_with_custom;
-use crate::protocol::ProgressFrame;
+use crate::protocol::{ProgressFrame, PushFrame};
 
-pub type ProgressSender = Box<dyn Fn(ProgressFrame) + Send + Sync>;
+pub type ProgressSender = Box<dyn Fn(PushFrame) + Send + Sync>;
+pub type SharedProgressSender = Arc<Mutex<Option<ProgressSender>>>;
 use crate::search_index::SearchIndex;
 use crate::semantic_index::SemanticIndex;
 
@@ -233,12 +234,13 @@ pub struct AppContext {
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
-    progress_sender: RefCell<Option<ProgressSender>>,
+    progress_sender: SharedProgressSender,
     bash_background: BgTaskRegistry,
 }
 
 impl AppContext {
     pub fn new(provider: Box<dyn LanguageProvider>, config: Config) -> Self {
+        let progress_sender = Arc::new(Mutex::new(None));
         AppContext {
             provider,
             backup: RefCell::new(BackupStore::new()),
@@ -254,18 +256,23 @@ impl AppContext {
             watcher: RefCell::new(None),
             watcher_rx: RefCell::new(None),
             lsp_manager: RefCell::new(LspManager::new()),
-            progress_sender: RefCell::new(None),
-            bash_background: BgTaskRegistry::new(),
+            progress_sender: Arc::clone(&progress_sender),
+            bash_background: BgTaskRegistry::new(progress_sender),
         }
     }
 
     pub fn set_progress_sender(&self, sender: Option<ProgressSender>) {
-        *self.progress_sender.borrow_mut() = sender;
+        if let Ok(mut progress_sender) = self.progress_sender.lock() {
+            *progress_sender = sender;
+        }
     }
 
     pub fn emit_progress(&self, frame: ProgressFrame) {
-        if let Some(sender) = self.progress_sender.borrow().as_ref() {
-            sender(frame);
+        let Ok(progress_sender) = self.progress_sender.lock() else {
+            return;
+        };
+        if let Some(sender) = progress_sender.as_ref() {
+            sender(PushFrame::Progress(frame));
         }
     }
 

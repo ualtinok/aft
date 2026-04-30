@@ -554,7 +554,7 @@ mod tests {
 
         let calls = extract_calls_in_range(&source, tree.root_node(), byte_start, byte_end, lang);
         // console.log is the only call, but "log" or "console" aren't known symbols
-        let known_names = vec![
+        let known_names = [
             "helper",
             "compute",
             "orchestrate",

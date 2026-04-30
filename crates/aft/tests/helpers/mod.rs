@@ -1,9 +1,11 @@
+#![allow(dead_code)]
+
 //! Shared test helpers for integration tests.
 //!
 //! Provides `AftProcess` — a handle to a running aft binary with piped I/O —
 //! and `fixture_path` for resolving test fixture files.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -67,6 +69,76 @@ impl AftProcess {
         writeln!(stdin, "{}", request).expect("write to stdin");
         stdin.flush().expect("flush stdin");
 
+        let request_id = serde_json::from_str::<serde_json::Value>(request)
+            .ok()
+            .and_then(|value| value["id"].as_str().map(str::to_string));
+        loop {
+            let value = self.read_json_line();
+            if value.get("type").is_some() && value.get("id").is_none() {
+                continue;
+            }
+            if request_id
+                .as_deref()
+                .is_none_or(|request_id| value["id"] == request_id)
+            {
+                return value;
+            }
+            return value;
+        }
+    }
+
+    /// Read the next JSON line from stdout without writing a request first.
+    pub fn read_next(&mut self) -> serde_json::Value {
+        self.read_json_line()
+    }
+
+    /// Try to read one JSON line from stdout within a short timeout.
+    pub fn try_read_next_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Option<serde_json::Value> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.reader.get_ref().as_raw_fd();
+            let previous_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if previous_flags == -1 {
+                return None;
+            }
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFL, previous_flags | libc::O_NONBLOCK);
+            }
+
+            let started = std::time::Instant::now();
+            let mut line = String::new();
+            let result = loop {
+                match self.reader.read_line(&mut line) {
+                    Ok(0) => break None,
+                    Ok(_) => break Some(serde_json::from_str(line.trim()).expect("parse JSON")),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if started.elapsed() >= timeout {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("read from stdout: {error}"),
+                }
+            };
+
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFL, previous_flags);
+            }
+            result
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            None
+        }
+    }
+
+    fn read_json_line(&mut self) -> serde_json::Value {
         let mut line = String::new();
         self.reader.read_line(&mut line).expect("read from stdout");
         assert!(

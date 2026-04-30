@@ -23,6 +23,7 @@
     "pretest": "cd ../.. && cargo build",
     "test": "bun test",
     "test:e2e": "bun test src/__tests__/e2e/",
+    "lint": "biome check src",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {

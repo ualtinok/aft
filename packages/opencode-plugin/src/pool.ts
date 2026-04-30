@@ -55,6 +55,7 @@ export class BridgePool {
       minVersion: options.minVersion,
       onVersionMismatch: options.onVersionMismatch,
       onConfigureWarnings: options.onConfigureWarnings,
+      onBashCompletion: options.onBashCompletion,
     };
     this.configOverrides = configOverrides;
     // Skip cleanup timer when idle timeout is Infinity (no-op) to avoid wasted cycles

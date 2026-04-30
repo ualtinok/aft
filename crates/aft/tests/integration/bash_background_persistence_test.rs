@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use aft::bash_background::persistence::{session_tasks_dir, write_task, PersistedTask};
 use aft::bash_background::{BgTaskRegistry, BgTaskStatus};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 use super::helpers::AftProcess;
 
@@ -172,7 +173,7 @@ fn pre_spawn_metadata_starting_replays_as_failed() {
     let path = task_file(storage.path(), SESSION, task_id, "json");
     write_task(&path, &metadata).unwrap();
 
-    let registry = BgTaskRegistry::new();
+    let registry = BgTaskRegistry::new(Arc::new(Mutex::new(None)));
     registry.replay_session(storage.path(), SESSION).unwrap();
     let replayed = read_json(storage.path(), SESSION, task_id);
     assert_eq!(replayed["status"], "failed");
@@ -244,6 +245,37 @@ fn completion_durability_replays_undelivered_terminal_task() {
 }
 
 #[test]
+fn persistence_restore_does_not_push_completion_frame() {
+    let project = tempfile::tempdir().unwrap();
+    let storage = spawn_storage_dir("storage");
+    let task_id = {
+        let mut aft = AftProcess::spawn();
+        configure_background(&mut aft, project.path(), storage.path(), SESSION);
+        let task_id = spawn_bg(&mut aft, SESSION, "echo restored", None);
+        let _ = wait_for_status(&mut aft, SESSION, &task_id, "completed");
+        assert!(aft.shutdown().success());
+        task_id
+    };
+
+    let mut aft = AftProcess::spawn();
+    configure_background(&mut aft, project.path(), storage.path(), SESSION);
+
+    assert_eq!(
+        aft.try_read_next_timeout(Duration::from_millis(250)),
+        None,
+        "restore unexpectedly emitted a push frame"
+    );
+
+    let drained = drain(&mut aft, SESSION);
+    assert!(drained["bg_completions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|completion| completion["task_id"] == task_id));
+    assert!(aft.shutdown().success());
+}
+
+#[test]
 fn kill_marker_idempotency_terminal_and_racy_exit() {
     let project = tempfile::tempdir().unwrap();
     let storage = spawn_storage_dir("storage");
@@ -285,7 +317,7 @@ fn disk_read_tail_does_not_truncate_live_file() {
     std::thread::sleep(Duration::from_millis(600));
     let before = fs::metadata(&stdout_path).unwrap().len();
     let snapshot = status(&mut aft, SESSION, &task_id);
-    assert!(snapshot["output_preview"].as_str().unwrap().len() > 0);
+    assert!(!snapshot["output_preview"].as_str().unwrap().is_empty());
     std::thread::sleep(Duration::from_millis(600));
     let after = fs::metadata(&stdout_path).unwrap().len();
     assert!(
@@ -356,7 +388,7 @@ fn replay_stale_running_task_marks_killed_orphaned() {
     )
     .unwrap();
 
-    let registry = BgTaskRegistry::new();
+    let registry = BgTaskRegistry::new(Arc::new(Mutex::new(None)));
     registry.replay_session(storage.path(), SESSION).unwrap();
     let replayed = read_json(storage.path(), SESSION, task_id);
     assert_eq!(replayed["status"], "killed");

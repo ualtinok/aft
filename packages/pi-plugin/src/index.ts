@@ -36,6 +36,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   appendToolResultBgCompletions,
+  handlePushedBgCompletion,
   handleTurnEndBgCompletions,
   resetBgWake,
 } from "./bg-notifications.js";
@@ -394,6 +395,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             projectRoot,
           },
           validWarnings,
+        );
+      },
+      onBashCompletion: (completion, bridge) => {
+        void handlePushedBgCompletion(
+          {
+            ctx,
+            directory: process.cwd(),
+            sessionID: completion.session_id,
+            runtime: pi,
+            isActive: () => bridge.hasPendingRequests(),
+          },
+          completion,
         );
       },
     },

@@ -6,6 +6,7 @@ import {
   appendToolResultBgCompletions,
   cleanupIdleSessionStates,
   formatSystemReminder,
+  handlePushedBgCompletion,
   handleTurnEndBgCompletions,
   resetBgWake,
   SESSION_BG_STATE_IDLE_TTL_MS,
@@ -95,6 +96,48 @@ describe("Pi background notifications", () => {
 
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
     expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0): npm test");
+  });
+
+  test("push completion lands in pending and wakes when idle", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const sendUserMessage = mock(() => {});
+
+    await handlePushedBgCompletion(
+      {
+        ctx,
+        directory: "/tmp/project",
+        sessionID: "s1",
+        runtime: { sendUserMessage },
+      },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0): npm test");
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
+  });
+
+  test("push completion lands in pending without wake when active", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const sendUserMessage = mock(() => {});
+
+    await handlePushedBgCompletion(
+      {
+        ctx,
+        directory: "/tmp/project",
+        sessionID: "s1",
+        runtime: { sendUserMessage },
+        isActive: () => true,
+      },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(0);
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(1);
   });
 
   test("coalesces three idle completions into one notification", async () => {

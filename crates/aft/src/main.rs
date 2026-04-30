@@ -5,7 +5,7 @@ use aft::config::Config;
 use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
-use aft::protocol::{EchoParams, ProgressFrame, RawRequest, Response};
+use aft::protocol::{EchoParams, PushFrame, RawRequest, Response};
 
 fn main() {
     // Handle --version flag before anything else
@@ -31,11 +31,11 @@ fn main() {
     log::info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
-    ctx.set_progress_sender(Some(Box::new(|frame: ProgressFrame| {
+    ctx.set_progress_sender(Some(Box::new(|frame: PushFrame| {
         let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
-        if let Err(e) = write_progress_frame(&mut writer, &frame) {
-            log::error!("stdout progress write error: {}", e);
+        if let Err(e) = write_push_frame(&mut writer, &frame) {
+            log::error!("stdout push frame write error: {}", e);
         }
     })));
 
@@ -252,10 +252,7 @@ fn write_response(response: &Response) -> io::Result<()> {
     Ok(())
 }
 
-fn write_progress_frame(
-    writer: &mut BufWriter<io::StdoutLock>,
-    frame: &ProgressFrame,
-) -> io::Result<()> {
+fn write_push_frame(writer: &mut BufWriter<io::StdoutLock>, frame: &PushFrame) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, frame)?;
     writer.write_all(b"\n")?;
     writer.flush()?;

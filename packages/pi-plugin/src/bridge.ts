@@ -1,6 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import type { BgCompletion } from "./bg-notifications.js";
 import { error, getLogFilePath, log, sessionWarn, warn } from "./logger.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
@@ -118,6 +120,16 @@ export interface BridgeOptions {
   onVersionMismatch?: (binaryVersion: string, minVersion: string) => void;
   /** Called after the first successful configure returns user-visible warnings. */
   onConfigureWarnings?: (context: ConfigureWarningsContext) => void | Promise<void>;
+  /** Called for server-pushed background bash completions. */
+  onBashCompletion?: (
+    completion: BashCompletedPayload,
+    bridge: BinaryBridge,
+  ) => void | Promise<void>;
+}
+
+export interface BashCompletedPayload extends BgCompletion {
+  type: "bash_completed";
+  session_id: string;
 }
 
 export interface BridgeRequestOptions {
@@ -161,6 +173,9 @@ export class BinaryBridge {
   private onConfigureWarnings:
     | ((context: ConfigureWarningsContext) => void | Promise<void>)
     | undefined;
+  private onBashCompletion:
+    | ((completion: BashCompletedPayload, bridge: BinaryBridge) => void | Promise<void>)
+    | undefined;
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -177,6 +192,7 @@ export class BinaryBridge {
     this.minVersion = options?.minVersion;
     this.onVersionMismatch = options?.onVersionMismatch;
     this.onConfigureWarnings = options?.onConfigureWarnings;
+    this.onBashCompletion = options?.onBashCompletion;
   }
 
   /** Number of times the binary has been restarted after a crash. */
@@ -187,6 +203,10 @@ export class BinaryBridge {
   /** Whether the child process is currently alive. */
   isAlive(): boolean {
     return this.process !== null && this.process.exitCode === null && !this.process.killed;
+  }
+
+  hasPendingRequests(): boolean {
+    return this.pending.size > 0;
   }
 
   /**
@@ -568,6 +588,10 @@ export class BinaryBridge {
           }
           continue;
         }
+        if (response.type === "bash_completed") {
+          this.onBashCompletion?.(response as unknown as BashCompletedPayload, this);
+          continue;
+        }
         const id = response.id as string | undefined;
         if (id && this.pending.has(id)) {
           const entry = this.pending.get(id);
@@ -576,6 +600,8 @@ export class BinaryBridge {
           clearTimeout(entry.timer);
           this.scheduleRestartCountReset();
           entry.resolve(response);
+        } else if (typeof response.type === "string") {
+          log(`Ignoring unknown stdout push frame type: ${response.type}`);
         }
       } catch (_err) {
         warn(`Failed to parse stdout line: ${line}`);

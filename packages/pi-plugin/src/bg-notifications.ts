@@ -40,6 +40,7 @@ interface DrainContext {
   ctx: PluginContext;
   directory: string;
   sessionID?: string;
+  isActive?: () => boolean;
 }
 
 export function trackBgTask(sessionID: string | undefined, taskId: string): void {
@@ -68,6 +69,14 @@ export function ingestBgCompletions(
   return accepted;
 }
 
+export async function handlePushedBgCompletion(
+  drainContext: DrainContext & { runtime: SendUserMessageRuntime },
+  completion: unknown,
+): Promise<void> {
+  ingestBgCompletions(drainContext.sessionID, [completion]);
+  await triggerWakeIfPending(drainContext, true);
+}
+
 export async function appendToolResultBgCompletions(
   drainContext: DrainContext,
   content: ContentBlock[],
@@ -89,10 +98,18 @@ export async function appendToolResultBgCompletions(
 export async function handleTurnEndBgCompletions(
   drainContext: DrainContext & { runtime: SendUserMessageRuntime },
 ): Promise<void> {
+  await triggerWakeIfPending(drainContext, false);
+}
+
+async function triggerWakeIfPending(
+  drainContext: DrainContext & { runtime: SendUserMessageRuntime },
+  skipDrain: boolean,
+): Promise<void> {
   const state = stateFor(drainContext.sessionID);
   if (state.wakeFiredThisIdle) return;
+  if (drainContext.isActive?.()) return;
 
-  if (state.outstandingTaskIds.size > 0) {
+  if (!skipDrain && state.outstandingTaskIds.size > 0) {
     await drainCompletions(drainContext);
   }
   if (state.pendingCompletions.length === 0) return;

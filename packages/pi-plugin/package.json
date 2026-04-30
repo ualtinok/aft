@@ -18,6 +18,7 @@
     "build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-ai --external @mariozechner/pi-tui --external @sinclair/typebox --external diff && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "test": "bun test src/__tests__/",
+    "lint": "biome check src",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {

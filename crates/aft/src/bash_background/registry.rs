@@ -8,6 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::context::SharedProgressSender;
+use crate::protocol::{BashCompletedFrame, PushFrame};
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -55,6 +58,7 @@ pub struct BgTaskRegistry {
 pub(crate) struct RegistryInner {
     pub(crate) tasks: Mutex<HashMap<String, Arc<BgTask>>>,
     pub(crate) completions: Mutex<VecDeque<BgCompletion>>,
+    pub(crate) progress_sender: SharedProgressSender,
     watchdog_started: AtomicBool,
     pub(crate) shutdown: AtomicBool,
 }
@@ -75,11 +79,12 @@ pub(crate) struct BgTaskState {
 }
 
 impl BgTaskRegistry {
-    pub fn new() -> Self {
+    pub fn new(progress_sender: SharedProgressSender) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
                 tasks: Mutex::new(HashMap::new()),
                 completions: Mutex::new(VecDeque::new()),
+                progress_sender,
                 watchdog_started: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
             }),
@@ -208,7 +213,7 @@ impl BgTaskRegistry {
                         Some("spawn aborted".to_string()),
                     );
                     let _ = write_task(&paths.json, &metadata);
-                    self.enqueue_completion_if_needed(&metadata);
+                    self.enqueue_completion_if_needed(&metadata, false);
                 }
                 BgTaskStatus::Running => {
                     if self.running_metadata_is_stale(&metadata) {
@@ -221,18 +226,18 @@ impl BgTaskRegistry {
                             let _ = write_kill_marker_if_absent(&paths.exit);
                         }
                         let _ = write_task(&paths.json, &metadata);
-                        self.enqueue_completion_if_needed(&metadata);
+                        self.enqueue_completion_if_needed(&metadata, false);
                     } else if let Ok(Some(marker)) = read_exit_marker(&paths.exit) {
                         metadata = terminal_metadata_from_marker(metadata, marker, None);
                         let _ = write_task(&paths.json, &metadata);
-                        self.enqueue_completion_if_needed(&metadata);
+                        self.enqueue_completion_if_needed(&metadata, false);
                     } else {
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     }
                 }
                 _ if metadata.status.is_terminal() => {
                     self.insert_rehydrated_task(metadata.clone(), paths, true)?;
-                    self.enqueue_completion_if_needed(&metadata);
+                    self.enqueue_completion_if_needed(&metadata, false);
                 }
                 _ => {}
             }
@@ -471,7 +476,7 @@ impl BgTaskRegistry {
             write_task(&task.paths.json, &state.metadata)
                 .map_err(|e| format!("failed to persist killed state: {e}"))?;
             state.buffer.enforce_terminal_cap();
-            self.enqueue_completion_locked(&state.metadata);
+            self.enqueue_completion_locked(&state.metadata, true);
         }
 
         Ok(task.snapshot(5 * 1024))
@@ -500,20 +505,27 @@ impl BgTaskRegistry {
         state.child = None;
         state.detached = true;
         state.buffer.enforce_terminal_cap();
-        self.enqueue_completion_locked(&state.metadata);
+        self.enqueue_completion_locked(&state.metadata, true);
         Ok(())
     }
 
-    fn enqueue_completion_if_needed(&self, metadata: &PersistedTask) {
+    fn enqueue_completion_if_needed(&self, metadata: &PersistedTask, emit_frame: bool) {
         if metadata.status.is_terminal() && !metadata.completion_delivered {
-            self.enqueue_completion_locked(metadata);
+            self.enqueue_completion_locked(metadata, emit_frame);
         }
     }
 
-    fn enqueue_completion_locked(&self, metadata: &PersistedTask) {
+    fn enqueue_completion_locked(&self, metadata: &PersistedTask, emit_frame: bool) {
         if !metadata.status.is_terminal() || metadata.completion_delivered {
             return;
         }
+        let completion = BgCompletion {
+            task_id: metadata.task_id.clone(),
+            session_id: metadata.session_id.clone(),
+            status: metadata.status.clone(),
+            exit_code: metadata.exit_code,
+            command: metadata.command.clone(),
+        };
         if let Ok(mut completions) = self.inner.completions.lock() {
             if completions
                 .iter()
@@ -521,14 +533,34 @@ impl BgTaskRegistry {
             {
                 return;
             }
-            completions.push_back(BgCompletion {
-                task_id: metadata.task_id.clone(),
-                session_id: metadata.session_id.clone(),
-                status: metadata.status.clone(),
-                exit_code: metadata.exit_code,
-                command: metadata.command.clone(),
-            });
+            completions.push_back(completion.clone());
+        } else {
+            return;
         }
+
+        if emit_frame {
+            self.emit_bash_completed(completion);
+        }
+    }
+
+    fn emit_bash_completed(&self, completion: BgCompletion) {
+        let Ok(progress_sender) = self.inner.progress_sender.lock() else {
+            return;
+        };
+        let Some(sender) = progress_sender.as_ref() else {
+            return;
+        };
+        // Bg task transitions are discovered by the watchdog thread, so the
+        // sender is shared behind a Mutex. It still uses the same stdout writer
+        // closure as foreground progress frames, preserving the existing lock/
+        // flush behavior in main.rs.
+        sender(PushFrame::BashCompleted(BashCompletedFrame::new(
+            completion.task_id,
+            completion.session_id,
+            completion.status,
+            completion.exit_code,
+            completion.command,
+        )));
     }
 
     fn task(&self, task_id: &str) -> Option<Arc<BgTask>> {
@@ -605,7 +637,7 @@ impl BgTaskRegistry {
 
 impl Default for BgTaskRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Mutex::new(None)))
     }
 }
 

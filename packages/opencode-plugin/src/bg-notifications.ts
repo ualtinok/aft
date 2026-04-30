@@ -35,6 +35,7 @@ interface DrainContext {
   ctx: PluginContext;
   directory: string;
   sessionID: string;
+  isActive?: () => boolean;
 }
 
 interface OpenCodeClient {
@@ -69,6 +70,14 @@ export function ingestBgCompletions(
   return accepted;
 }
 
+export async function handlePushedBgCompletion(
+  drainContext: DrainContext & { client: unknown },
+  completion: unknown,
+): Promise<void> {
+  ingestBgCompletions(drainContext.sessionID, [completion]);
+  await triggerWakeIfPending(drainContext, true);
+}
+
 export async function appendInTurnBgCompletions(
   drainContext: DrainContext,
   output: { output?: string } | undefined,
@@ -90,10 +99,18 @@ export async function appendInTurnBgCompletions(
 export async function handleIdleBgCompletions(
   drainContext: DrainContext & { client: unknown },
 ): Promise<void> {
+  await triggerWakeIfPending(drainContext, false);
+}
+
+async function triggerWakeIfPending(
+  drainContext: DrainContext & { client: unknown },
+  skipDrain: boolean,
+): Promise<void> {
   const state = stateFor(drainContext.sessionID);
   if (state.wakeFiredThisIdle) return;
+  if (drainContext.isActive?.()) return;
 
-  if (state.outstandingTaskIds.size > 0) {
+  if (!skipDrain && state.outstandingTaskIds.size > 0) {
     await drainCompletions(drainContext);
   }
   if (state.pendingCompletions.length === 0) return;

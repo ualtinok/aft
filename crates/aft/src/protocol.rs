@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::bash_background::BgTaskStatus;
+
 /// v0.18 streaming semantics for hoisted bash.
 ///
 /// Foreground `bash` execution may emit zero or more `progress` frames before
@@ -35,6 +37,24 @@ pub struct PermissionAskFrame {
     pub asks: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BashCompletedFrame {
+    #[serde(rename = "type")]
+    pub frame_type: &'static str,
+    pub task_id: String,
+    pub session_id: String,
+    pub status: BgTaskStatus,
+    pub exit_code: Option<i32>,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum PushFrame {
+    Progress(ProgressFrame),
+    BashCompleted(BashCompletedFrame),
+}
+
 impl PermissionAskFrame {
     pub fn new(request_id: impl Into<String>, asks: serde_json::Value) -> Self {
         Self {
@@ -56,6 +76,25 @@ impl ProgressFrame {
             request_id: request_id.into(),
             kind,
             chunk: chunk.into(),
+        }
+    }
+}
+
+impl BashCompletedFrame {
+    pub fn new(
+        task_id: impl Into<String>,
+        session_id: impl Into<String>,
+        status: BgTaskStatus,
+        exit_code: Option<i32>,
+        command: impl Into<String>,
+    ) -> Self {
+        Self {
+            frame_type: "bash_completed",
+            task_id: task_id.into(),
+            session_id: session_id.into(),
+            status,
+            exit_code,
+            command: command.into(),
         }
     }
 }

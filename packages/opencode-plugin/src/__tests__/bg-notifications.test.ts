@@ -6,6 +6,7 @@ import {
   appendInTurnBgCompletions,
   formatSystemReminder,
   handleIdleBgCompletions,
+  handlePushedBgCompletion,
   ingestBgCompletions,
   resetBgWake,
   SESSION_BG_STATE_IDLE_TTL_MS,
@@ -93,6 +94,50 @@ describe("OpenCode background notifications", () => {
     };
     expect(payload.body.noReply).toBe(false);
     expect(payload.body.parts[0].text).toContain("- task task-1 (exit 0): npm test");
+  });
+
+  test("push completion lands in pending and wakes when idle", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const promptAsync = mock(async () => {});
+
+    await handlePushedBgCompletion(
+      {
+        ctx,
+        directory: "/tmp/project",
+        sessionID: "s1",
+        client: { session: { promptAsync } },
+      },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = (promptAsync.mock.calls[0][0] as { body: { parts: Array<{ text: string }> } }).body
+      .parts[0].text;
+    expect(text).toContain("- task task-1 (exit 0): npm test");
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
+  });
+
+  test("push completion lands in pending without wake when active", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const promptAsync = mock(async () => {});
+
+    await handlePushedBgCompletion(
+      {
+        ctx,
+        directory: "/tmp/project",
+        sessionID: "s1",
+        client: { session: { promptAsync } },
+        isActive: () => true,
+      },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(0);
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(1);
   });
 
   test("coalesces three idle completions into one notification", async () => {

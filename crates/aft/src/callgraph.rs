@@ -2684,12 +2684,7 @@ export function funcB() {
             if node.children.is_empty() {
                 1
             } else {
-                1 + node
-                    .children
-                    .iter()
-                    .map(|c| count_depth(c))
-                    .max()
-                    .unwrap_or(0)
+                1 + node.children.iter().map(count_depth).max().unwrap_or(0)
             }
         }
 

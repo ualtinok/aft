@@ -25,6 +25,38 @@ describe("Pi BinaryBridge", () => {
     }
   });
 
+  test("parses pushed bash_completed frames without request correlation", async () => {
+    const completions: unknown[] = [];
+    bridge = new BinaryBridge("/tmp/aft-does-not-need-to-exist", PROJECT_CWD, {
+      timeoutMs: 5_000,
+      onBashCompletion: (completion) => {
+        completions.push(completion);
+      },
+    });
+
+    (bridge as any).onStdoutData(
+      `${JSON.stringify({
+        type: "bash_completed",
+        task_id: "task-1",
+        session_id: "s1",
+        status: "completed",
+        exit_code: 0,
+        command: "echo done",
+      })}\n`,
+    );
+
+    expect(completions).toEqual([
+      {
+        type: "bash_completed",
+        task_id: "task-1",
+        session_id: "s1",
+        status: "completed",
+        exit_code: 0,
+        command: "echo done",
+      },
+    ]);
+  });
+
   test("per-request timeoutMs override rejects before bridge-wide default", async () => {
     // Fake binary: reads stdin and sleeps forever without responding. We want
     // to prove the per-request override (50ms) fires instead of the bridge

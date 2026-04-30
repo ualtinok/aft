@@ -34,6 +34,38 @@ describe("BinaryBridge lifecycle", () => {
     expect(bridge.isAlive()).toBe(true);
   });
 
+  test("parses pushed bash_completed frames without request correlation", async () => {
+    const completions: unknown[] = [];
+    bridge = new BinaryBridge(BINARY_PATH, PROJECT_CWD, {
+      timeoutMs: TEST_TIMEOUT_MS,
+      onBashCompletion: (completion) => {
+        completions.push(completion);
+      },
+    });
+
+    (bridge as any).onStdoutData(
+      `${JSON.stringify({
+        type: "bash_completed",
+        task_id: "task-1",
+        session_id: "s1",
+        status: "completed",
+        exit_code: 0,
+        command: "echo done",
+      })}\n`,
+    );
+
+    expect(completions).toEqual([
+      {
+        type: "bash_completed",
+        task_id: "task-1",
+        session_id: "s1",
+        status: "completed",
+        exit_code: 0,
+        command: "echo done",
+      },
+    ]);
+  });
+
   test("multiple sequential requests return correct responses (ID correlation)", async () => {
     bridge = new BinaryBridge(BINARY_PATH, PROJECT_CWD, {
       timeoutMs: TEST_TIMEOUT_MS,

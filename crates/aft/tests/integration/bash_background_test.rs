@@ -110,6 +110,20 @@ fn wait_for_status(aft: &mut AftProcess, task_id: &str, expected: &str) -> Value
     }
 }
 
+fn wait_for_bash_completed_frame(aft: &mut AftProcess, task_id: &str) -> Value {
+    let started = Instant::now();
+    loop {
+        let frame = aft.read_next();
+        if frame["type"] == "bash_completed" && frame["task_id"] == task_id {
+            return frame;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "timed out waiting for bash_completed frame for {task_id}; last frame: {frame:?}"
+        );
+    }
+}
+
 #[test]
 fn background_spawn_status_running_and_completion() {
     let mut aft = AftProcess::spawn();
@@ -126,6 +140,22 @@ fn background_spawn_status_running_and_completion() {
     let completed = wait_for_status(&mut aft, &task_id, "completed");
     assert_eq!(completed["exit_code"], 0);
     assert!(completed["duration_ms"].is_u64());
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_completion_push_frame_emits_on_terminal_transition() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg(&mut aft, "spawn-push-frame", "echo push-frame-done");
+    let frame = wait_for_bash_completed_frame(&mut aft, &task_id);
+
+    assert_eq!(frame["session_id"], "__default__");
+    assert_eq!(frame["status"], "completed");
+    assert_eq!(frame["exit_code"], 0);
+    assert_eq!(frame["command"], "echo push-frame-done");
 
     assert!(aft.shutdown().success());
 }

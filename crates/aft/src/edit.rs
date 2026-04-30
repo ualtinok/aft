@@ -3,6 +3,8 @@
 //!
 //! Used by `write`, `edit_symbol`, `edit_match`, and `batch` commands.
 
+#![cfg_attr(test, allow(clippy::items_after_test_module))]
+
 use std::path::Path;
 
 use crate::config::Config;

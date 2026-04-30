@@ -1187,7 +1187,11 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         touch_exe(&extra.join("pyright-langserver"));
 
-        let resolved = resolve_lsp_binary("pyright-langserver", Some(&project), &[extra.clone()]);
+        let resolved = resolve_lsp_binary(
+            "pyright-langserver",
+            Some(&project),
+            std::slice::from_ref(&extra),
+        );
         assert_eq!(
             resolved.as_deref(),
             Some(local_bin.join("pyright-langserver").as_path())
@@ -1218,7 +1222,7 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         touch_exe(&extra.join("gopls"));
 
-        let resolved = resolve_lsp_binary("gopls", Some(&project), &[extra.clone()]);
+        let resolved = resolve_lsp_binary("gopls", Some(&project), std::slice::from_ref(&extra));
         assert_eq!(resolved.as_deref(), Some(extra.join("gopls").as_path()));
     }
 
