@@ -145,7 +145,9 @@ const PLUGIN_VERSION: string = (() => {
  */
 const ANNOUNCEMENT_VERSION = "0.18.0";
 const ANNOUNCEMENT_FEATURES: string[] = [
-  "v0.18.0 highlights\n\nHoisted bash with permission scan — your bash calls now flow through AFT with OpenCode's tree-sitter permission model preserved.\n\nThree new opt-in bash features behind experimental flags (default off):\n• experimental.bash.rewrite — common bash patterns (cat, grep, find, sed, ls) auto-rewrite to AFT tool calls with a footer hint.\n• experimental.bash.compress — RTK-style output compression for git, cargo, npm, bun, pnpm, pytest, tsc + generic ANSI/dedup/truncate fallback.\n• experimental.bash.background — bash({ background: true }) returns task_id; bash_status / bash_kill manage long-running tasks.\n\nConfig schema upgrade — auto-migration on first load:\n• experimental_search_index → top-level search_index (graduated)\n• experimental_semantic_search → top-level semantic_search (graduated)\n• experimental_lsp_ty → experimental.lsp_ty\n• experimental_bash_* → experimental.bash.*\n\nRun aft doctor to verify your config migrated cleanly.",
+  "New experimental features — AFT now optionally hoists bash:\n    - Run bash scripts in the background.\n    - Initial output compression for git, cargo, npm, bun, pnpm, pytest, tsc (more in 0.19).\n    - Rewrite cat/grep/find/sed/ls into AFT counterparts for faster, formatted output.\n  Check GitHub for how to enable.",
+  "Trigram grep/glob and semantic search (aft_search) graduated out of experimental.",
+  "Lots of bugfixes and new end-to-end test coverage.",
 ];
 
 /**
