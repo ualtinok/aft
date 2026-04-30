@@ -573,9 +573,14 @@ export class BinaryBridge {
   }
 
   private handleTimeout(): void {
-    // Kill the hung process and reject remaining pending requests.
-    // Unlike handleCrash, this does NOT auto-restart — the next send() call
-    // will lazy-spawn a fresh process via ensureSpawned().
+    // A single request timed out. Kill the hung process so the bridge can
+    // respawn on the next call — but do NOT reject other pending requests
+    // here (#21). Each pending request has its own timer and will reject
+    // itself if it also times out. Proactively rejecting peers destroys work
+    // that may have been perfectly healthy.
+    //
+    // When the process dies, its stdout closes and the crash handler fires,
+    // which will reject any remaining pending requests through the normal path.
     if (this.process) {
       this.process.kill("SIGKILL");
       this.process = null;
@@ -590,13 +595,12 @@ export class BinaryBridge {
     const tail = this.formatStderrTail();
     this.stderrTail = [];
     if (tail) {
-      error(`Bridge restarted after timeout.${tail}`);
+      error(`Bridge killed after timeout.${tail}`);
+    } else {
+      warn(`Bridge killed after timeout (see ${getLogFilePath()})`);
     }
-
-    // Reject any other pending requests (the timed-out one was already rejected)
-    this.rejectAllPending(
-      new Error(`[aft-pi] Bridge restarted after timeout (see ${getLogFilePath()})`),
-    );
+    // Peer requests are NOT rejected here — they reject through their own
+    // timers or through handleCrash() when the stdout pipe closes.
   }
 
   private handleCrash(cause?: Error): void {

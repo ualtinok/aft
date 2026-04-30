@@ -97,6 +97,11 @@ pub struct LspClient {
     /// `None` until `initialize()` succeeds; conservative defaults thereafter
     /// when the server doesn't advertise diagnosticProvider.
     diagnostic_caps: Option<ServerDiagnosticCapabilities>,
+    /// Whether the server advertised `workspace.didChangeWatchedFiles` support
+    /// during `initialize`. When `false` (or `None` pre-init), we skip sending
+    /// `workspace/didChangeWatchedFiles` notifications to avoid spec violations.
+    /// Intentional default: `false` (conservative — requires server opt-in).
+    supports_watched_files: bool,
 }
 
 impl LspClient {
@@ -228,6 +233,7 @@ impl LspClient {
             pending,
             next_id: AtomicI64::new(1),
             diagnostic_caps: None,
+            supports_watched_files: false,
         })
     }
 
@@ -321,6 +327,29 @@ impl LspClient {
         let caps_value = serde_json::to_value(&result.capabilities).unwrap_or(Value::Null);
         self.diagnostic_caps = Some(parse_diagnostic_capabilities(&caps_value));
 
+        // Capture whether the server supports workspace/didChangeWatchedFiles (#32).
+        //
+        // IMPORTANT: lsp-types 0.97's WorkspaceServerCapabilities struct does NOT
+        // include a `didChangeWatchedFiles` field, so `caps_value` will never have
+        // it after re-serialization. We therefore default to `true` (permissive).
+        //
+        // Per the LSP specification, servers MUST ignore notifications for methods
+        // they don't support, so sending didChangeWatchedFiles unconditionally is
+        // spec-safe. The default-true matches the pre-#32 unconditional behavior
+        // and avoids a regression for servers that do support it (tsserver, rust-
+        // analyzer, pyright all accept it even without explicit advertising).
+        //
+        // If a future lsp-types version exposes the field, the pointer lookup
+        // below will start returning real values and the default won't matter.
+        self.supports_watched_files = caps_value
+            .pointer("/workspace/didChangeWatchedFiles/dynamicRegistration")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true) // permissive default: spec-safe to send if server doesn't say false
+            || caps_value
+                .pointer("/workspace/didChangeWatchedFiles")
+                .map(|v| v.is_object() || v.as_bool() == Some(true))
+                .unwrap_or(true);
+
         self.send_notification::<lsp_types::notification::Initialized>(serde_json::from_value(
             json!({}),
         )?)?;
@@ -333,6 +362,12 @@ impl LspClient {
     /// (all `false`) when the server didn't advertise diagnosticProvider.
     pub fn diagnostic_capabilities(&self) -> Option<&ServerDiagnosticCapabilities> {
         self.diagnostic_caps.as_ref()
+    }
+
+    /// Whether the server supports `workspace/didChangeWatchedFiles`.
+    /// Captured from the `initialize` response. Default `false` (conservative).
+    pub fn supports_watched_files(&self) -> bool {
+        self.supports_watched_files
     }
 
     /// Send a request and wait for the response.

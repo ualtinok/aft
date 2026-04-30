@@ -519,6 +519,17 @@ impl LspManager {
             }
 
             if let Some(client) = self.clients.get_mut(&key) {
+                // Only send if the server advertised this capability (#32).
+                // Sending didChangeWatchedFiles to a server that didn't declare
+                // workspace.didChangeWatchedFiles causes spurious errors on some
+                // servers (e.g. older tsserver builds) and is a spec violation.
+                if !client.supports_watched_files() {
+                    log::debug!(
+                        "[aft-lsp] skipping didChangeWatchedFiles for {:?} (capability not declared)",
+                        key
+                    );
+                    continue;
+                }
                 client.send_notification::<DidChangeWatchedFiles>(DidChangeWatchedFilesParams {
                     changes,
                 })?;

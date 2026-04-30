@@ -12,7 +12,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
-use crate::lsp::registry::is_config_file_path;
+use crate::lsp::registry::is_config_file_path_with_custom;
 use crate::protocol::ProgressFrame;
 
 pub type ProgressSender = Box<dyn Fn(ProgressFrame) + Send + Sync>;
@@ -360,10 +360,21 @@ impl AppContext {
         )
     }
 
+    /// Collect custom server root_markers from user config for use in
+    /// `is_config_file_path_with_custom` checks (#25).
+    fn custom_lsp_root_markers(&self) -> Vec<String> {
+        self.config()
+            .lsp_servers
+            .iter()
+            .flat_map(|s| s.root_markers.iter().cloned())
+            .collect()
+    }
+
     fn notify_watched_config_files(&self, file_paths: &[PathBuf]) {
+        let custom_markers = self.custom_lsp_root_markers();
         let config_paths: Vec<(PathBuf, FileChangeType)> = file_paths
             .iter()
-            .filter(|path| is_config_file_path(path))
+            .filter(|path| is_config_file_path_with_custom(path, &custom_markers))
             .cloned()
             .map(|path| {
                 let change_type = if path.exists() {
@@ -390,22 +401,33 @@ impl AppContext {
         (!paths.is_empty()).then_some(paths)
     }
 
+    /// Parse config-file watched events from `multi_file_write_paths` when the
+    /// array contains object entries `{ "path": "...", "type": "created|changed|deleted" }`.
+    ///
+    /// This handles the OBJECT variant of `multi_file_write_paths`. The STRING
+    /// variant (bare path strings) is handled by `multi_file_write_paths()` and
+    /// `notify_watched_config_files()`. Both variants read the same JSON key but
+    /// with different per-entry schemas — they are NOT redundant.
+    ///
+    /// #18 note: in older code this function also existed alongside `multi_file_write_paths()`
+    /// and was reachable via the `else if` branch when all entries were objects.
+    /// Restoring both is correct.
     fn watched_file_events_from_params(
         params: &serde_json::Value,
+        extra_markers: &[String],
     ) -> Option<Vec<(PathBuf, FileChangeType)>> {
         let events = params
             .get("multi_file_write_paths")
             .and_then(|value| value.as_array())?
             .iter()
             .filter_map(|entry| {
-                let path = entry.as_str().map(PathBuf::from).or_else(|| {
-                    entry
-                        .get("path")
-                        .and_then(|value| value.as_str())
-                        .map(PathBuf::from)
-                })?;
+                // Only handle object entries — string entries go through multi_file_write_paths()
+                let path = entry
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .map(PathBuf::from)?;
 
-                if !is_config_file_path(&path) {
+                if !is_config_file_path_with_custom(&path, extra_markers) {
                     return None;
                 }
 
@@ -453,7 +475,8 @@ impl AppContext {
     }
 
     pub fn lsp_notify_watched_config_file(&self, file_path: &Path, change_type: FileChangeType) {
-        if !is_config_file_path(file_path) {
+        let custom_markers = self.custom_lsp_root_markers();
+        if !is_config_file_path_with_custom(file_path, &custom_markers) {
             return;
         }
 
@@ -523,10 +546,14 @@ impl AppContext {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let custom_markers = self.custom_lsp_root_markers();
+
         if !wants_diagnostics {
             if let Some(file_paths) = Self::multi_file_write_paths(params) {
                 self.notify_watched_config_files(&file_paths);
-            } else if let Some(config_events) = Self::watched_file_events_from_params(params) {
+            } else if let Some(config_events) =
+                Self::watched_file_events_from_params(params, &custom_markers)
+            {
                 self.notify_watched_config_events(&config_events);
             }
             self.lsp_notify_file_changed(file_path, content);
@@ -543,7 +570,8 @@ impl AppContext {
             return self.lsp_post_multi_file_write(file_path, content, &file_paths, params);
         }
 
-        if let Some(config_events) = Self::watched_file_events_from_params(params) {
+        if let Some(config_events) = Self::watched_file_events_from_params(params, &custom_markers)
+        {
             self.notify_watched_config_events(&config_events);
         }
 

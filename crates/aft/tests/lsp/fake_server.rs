@@ -221,6 +221,14 @@ fn main() -> io::Result<()> {
                         "referencesProvider": true,
                         "renameProvider": {
                             "prepareProvider": true
+                        },
+                        // Advertise didChangeWatchedFiles so the capability gate
+                        // in notify_files_watched_changed (#32) allows notifications
+                        // to reach the fake server during integration tests.
+                        "workspace": {
+                            "didChangeWatchedFiles": {
+                                "dynamicRegistration": true
+                            }
                         }
                     });
 
