@@ -279,6 +279,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // boundary in config.ts).
   const configOverrides: Record<string, unknown> = {};
   if (config.format_on_edit !== undefined) configOverrides.format_on_edit = config.format_on_edit;
+  if (config.formatter_timeout_secs !== undefined)
+    configOverrides.formatter_timeout_secs = config.formatter_timeout_secs;
   if (config.validate_on_edit !== undefined)
     configOverrides.validate_on_edit = config.validate_on_edit;
   if (config.formatter !== undefined) configOverrides.formatter = config.formatter;

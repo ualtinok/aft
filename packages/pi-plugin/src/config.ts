@@ -87,6 +87,8 @@ export type ToolSurface = "minimal" | "recommended" | "all";
 
 export interface AftConfig {
   format_on_edit?: boolean;
+  /** Maximum formatter subprocess wallclock seconds. Bounded 1..=600. Default 10. */
+  formatter_timeout_secs?: number;
   validate_on_edit?: "syntax" | "full";
   formatter?: Record<string, Formatter>;
   checker?: Record<string, Checker>;
@@ -204,6 +206,7 @@ const ExperimentalConfigSchema = z.object({
 export const AftConfigSchema = z
   .object({
     format_on_edit: z.boolean().optional(),
+    formatter_timeout_secs: z.number().int().min(1).max(600).optional(),
     validate_on_edit: z.enum(["syntax", "full"]).optional(),
     formatter: z.record(z.string(), FormatterEnum).optional(),
     checker: z.record(z.string(), CheckerEnum).optional(),

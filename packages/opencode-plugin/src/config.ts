@@ -118,6 +118,13 @@ export const AftConfigSchema = z
   .object({
     /** Whether to auto-format files after edits. Default: true. */
     format_on_edit: z.boolean().optional(),
+    /**
+     * Maximum seconds an external formatter is allowed to run before AFT
+     * kills it and reports `format_skipped_reason: "timeout"`. Bounded
+     * 1..=600. Default: 10. Raise for slow formatters (e.g. ruff in large
+     * Python projects); lower for tighter test loops.
+     */
+    formatter_timeout_secs: z.number().int().min(1).max(600).optional(),
     /** Auto-validate after edits: "syntax" (tree-sitter) or "full" (runs type checker). */
     validate_on_edit: z.enum(["syntax", "full"]).optional(),
     /** Per-language formatter overrides. Keys: "typescript", "python", "rust", "go". */

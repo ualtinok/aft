@@ -183,6 +183,8 @@ const plugin: Plugin = async (input) => {
   const configOverrides: Record<string, unknown> = {};
   if (aftConfig.format_on_edit !== undefined)
     configOverrides.format_on_edit = aftConfig.format_on_edit;
+  if (aftConfig.formatter_timeout_secs !== undefined)
+    configOverrides.formatter_timeout_secs = aftConfig.formatter_timeout_secs;
   if (aftConfig.validate_on_edit !== undefined)
     configOverrides.validate_on_edit = aftConfig.validate_on_edit;
   if (aftConfig.formatter !== undefined) configOverrides.formatter = aftConfig.formatter;

@@ -870,6 +870,30 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     {
         ctx.config_mut().restrict_to_project_root = v;
     }
+    // Formatter timeout in seconds (default: 10). Used by `auto_format()`
+    // to bound external formatter subprocesses. Surfacing this through
+    // configure() lets tests deterministically trigger the `"timeout"`
+    // skip reason without a 10-second test wallclock, and lets users
+    // raise the budget for slow formatters in larger projects.
+    //
+    // Validation: must be a positive integer ≤ 600 (10 minutes). Larger
+    // values are clamped down — they almost certainly indicate a config
+    // typo, and we don't want a stuck formatter to hold the bridge for
+    // an hour. Zero is rejected because Command::wait_with_timeout(0)
+    // races on most platforms.
+    if let Some(v) = params.get("formatter_timeout_secs").and_then(|v| v.as_u64()) {
+        if v == 0 || v > 600 {
+            return Response::error(
+                &req.id,
+                "invalid_request",
+                format!(
+                    "configure: formatter_timeout_secs must be in 1..=600, got {}",
+                    v
+                ),
+            );
+        }
+        ctx.config_mut().formatter_timeout_secs = v as u32;
+    }
     // Per-language checker overrides: { "typescript": "tsc", "python": "pyright" }
     if let Some(v) = params.get("checker").and_then(|v| v.as_object()) {
         for (lang, tool) in v {

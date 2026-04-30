@@ -329,7 +329,10 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     });
   });
 
-  test.skip("timeout: hanging formatter shim reports timeout within bounded test budget", async () => {
+  // formatter_timeout_secs is now a configure() param (Rust accepts 1..=600).
+  // Set it to 2 seconds so the hanging shim is killed quickly and the bridge
+  // returns format_skipped_reason="timeout" well within the test budget.
+  test("timeout: hanging formatter shim reports timeout within bounded test budget", async () => {
     const h = await formatHarness(formatterPreset("biome"), [hangingShim()]);
     const started = Date.now();
 
@@ -337,9 +340,12 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
       format_on_edit: true,
       validate_on_edit: "syntax",
       formatter: { typescript: "biome" },
+      formatter_timeout_secs: 2,
     });
 
-    expect(Date.now() - started).toBeLessThanOrEqual(14_000);
+    // Killed at 2s, plus bridge transport overhead. Allow 8s headroom for
+    // CI noise without making the test useless if the killer ever regresses.
+    expect(Date.now() - started).toBeLessThanOrEqual(10_000);
   }, 20_000);
 
   test("error: shim with unrecognized stderr is not misclassified as excluded path", async () => {
