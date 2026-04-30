@@ -2,6 +2,16 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use aft::commands::transaction::handle_transaction;
+use aft::config::Config;
+use aft::context::AppContext;
+use aft::lsp::client::LspEvent;
+use aft::lsp::registry::ServerKind;
+use aft::parser::TreeSitterProvider;
+use aft::protocol::RawRequest;
 
 use super::helpers::AftProcess;
 
@@ -23,6 +33,40 @@ fn fake_server_path() -> PathBuf {
             }
         })
         .expect("fake-lsp-server binary path")
+}
+
+fn collect_watched_file_events_from_ctx_before_deadline(
+    ctx: &AppContext,
+    duration: Duration,
+) -> Option<serde_json::Value> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        for event in ctx.lsp().drain_events() {
+            if let LspEvent::Notification { method, params, .. } = event {
+                if method == "custom/watchedFilesChanged" {
+                    return params;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    None
+}
+
+fn wait_for_publish(ctx: &AppContext) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        for event in ctx.lsp().drain_events() {
+            if matches!(
+                event,
+                LspEvent::Notification { method, .. } if method == "textDocument/publishDiagnostics"
+            ) {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for publishDiagnostics");
 }
 
 // ============================================================================
@@ -69,6 +113,112 @@ fn transaction_success_three_files() {
     let _ = fs::remove_file(&f3);
     let status = aft.shutdown();
     assert!(status.success());
+}
+
+#[test]
+fn transaction_success_batches_config_file_watched_notifications() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("src").join("open.ts");
+    let tsconfig = root.join("tsconfig.json");
+    let package_json = root.join("package.json");
+    let leaf = root.join("src").join("leaf.ts");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "export const open = 1;\n").unwrap();
+    fs::write(&tsconfig, "{\"compilerOptions\":{}}\n").unwrap();
+    fs::write(&package_json, "{\"devDependencies\":{}}\n").unwrap();
+    fs::write(&leaf, "export const leaf = 1;\n").unwrap();
+
+    let config = Config {
+        project_root: Some(root.to_path_buf()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(&source, "export const open = 2;\n");
+    wait_for_publish(&ctx);
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "txn-batched-configs",
+        "command": "transaction",
+        "operations": [
+            {"file": tsconfig.display().to_string(), "command": "write", "content": "{\"compilerOptions\":{\"strict\":true}}\n"},
+            {"file": package_json.display().to_string(), "command": "write", "content": "{\"devDependencies\":{},\"scripts\":{}}\n"},
+            {"file": leaf.display().to_string(), "command": "write", "content": "export const leaf = 2;\n"}
+        ]
+    }))
+    .expect("request parses");
+    let response = handle_transaction(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true, "transaction failed: {json}");
+
+    let params = collect_watched_file_events_from_ctx_before_deadline(&ctx, Duration::from_secs(2))
+        .expect("watched-file notification");
+    let changes = params["changes"].as_array().expect("changes array");
+    assert_eq!(
+        changes.len(),
+        2,
+        "expected one batched notification: {params}"
+    );
+    assert!(changes.iter().any(|change| change["uri"]
+        .as_str()
+        .is_some_and(|uri| uri.ends_with("/tsconfig.json"))));
+    assert!(changes.iter().any(|change| change["uri"]
+        .as_str()
+        .is_some_and(|uri| uri.ends_with("/package.json"))));
+    assert!(
+        collect_watched_file_events_from_ctx_before_deadline(&ctx, Duration::from_millis(250))
+            .is_none(),
+        "expected no second watched-file notification"
+    );
+}
+
+#[test]
+fn transaction_rollback_restores_first_config_and_sends_no_lsp_notification() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("src").join("open.ts");
+    let package_json = root.join("package.json");
+    let outside = dir.path().join("outside").join("tsconfig.json");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, "export const open = 1;\n").unwrap();
+    let original_package = "{\"devDependencies\":{}}\n";
+    fs::write(&package_json, original_package).unwrap();
+
+    let config = Config {
+        project_root: Some(root.to_path_buf()),
+        restrict_to_project_root: true,
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(&source, "export const open = 2;\n");
+    wait_for_publish(&ctx);
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "txn-rollback-no-lsp",
+        "command": "transaction",
+        "operations": [
+            {"file": package_json.display().to_string(), "command": "write", "content": "{\"devDependencies\":{},\"scripts\":{}}\n"},
+            {"file": outside.display().to_string(), "command": "write", "content": "{\"compilerOptions\":{}}\n"}
+        ]
+    }))
+    .expect("request parses");
+    let response = handle_transaction(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], false, "transaction should fail: {json}");
+    assert_eq!(json["code"], "transaction_failed");
+    assert!(json["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("No such file")));
+    assert_eq!(fs::read_to_string(&package_json).unwrap(), original_package);
+    assert!(
+        collect_watched_file_events_from_ctx_before_deadline(&ctx, Duration::from_millis(250))
+            .is_none(),
+        "rollback path must not notify LSP"
+    );
 }
 
 // ============================================================================

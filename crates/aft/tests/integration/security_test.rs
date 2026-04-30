@@ -15,6 +15,27 @@ fn assert_error_code(resp: &serde_json::Value, code: &str) {
     assert_eq!(resp["code"], code, "unexpected error response: {resp:?}");
 }
 
+fn assert_validate_path_outside_root(ctx: &AppContext, path: &Path) {
+    match ctx.validate_path("validate-broken-symlink", path) {
+        Ok(validated) => panic!("validate_path unexpectedly succeeded: {validated:?}"),
+        Err(resp) => assert_eq!(
+            serde_json::to_value(resp).unwrap()["code"],
+            "path_outside_root"
+        ),
+    }
+}
+
+fn restricted_context(root: &Path) -> AppContext {
+    AppContext::new(
+        Box::new(StubProvider),
+        Config {
+            project_root: Some(root.to_path_buf()),
+            restrict_to_project_root: true,
+            ..Config::default()
+        },
+    )
+}
+
 fn configure_restricted(aft: &mut AftProcess, root: &Path) {
     let configure = aft.send(
         &serde_json::to_string(&serde_json::json!({
@@ -161,6 +182,47 @@ fn write_blocks_broken_symlink_escape_from_project_root() {
 
     let status = aft.shutdown();
     assert!(status.success());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn validate_path_rejects_broken_absolute_symlink_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    let outside = dir.path().join("outside").join("foo");
+    fs::create_dir_all(&root).unwrap();
+    create_file_symlink(&outside, &root.join("escape"));
+
+    let ctx = restricted_context(&root);
+    assert_validate_path_outside_root(&ctx, &root.join("escape"));
+    assert!(!outside.exists());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn validate_path_rejects_broken_relative_symlink_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    create_file_symlink(Path::new("../../etc/passwd"), &root.join("escape"));
+
+    let ctx = restricted_context(&root);
+    assert_validate_path_outside_root(&ctx, &root.join("escape"));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn validate_path_rejects_broken_symlink_chain_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    create_file_symlink(Path::new("b"), &root.join("a"));
+    create_file_symlink(&outside, &root.join("b"));
+
+    let ctx = restricted_context(&root);
+    assert_validate_path_outside_root(&ctx, &root.join("a"));
+    assert!(!outside.exists());
 }
 
 #[test]

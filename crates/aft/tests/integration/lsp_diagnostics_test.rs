@@ -8,12 +8,12 @@ use aft::commands::lsp_diagnostics::handle_lsp_diagnostics;
 use aft::commands::move_file::handle_move_file;
 use aft::commands::transaction::handle_transaction;
 use aft::commands::write::handle_write;
-use aft::config::Config;
+use aft::config::{Config, UserServerDef};
 use aft::context::AppContext;
 use aft::lsp::client::LspEvent;
 use aft::lsp::diagnostics::DiagnosticSeverity;
 use aft::lsp::manager::LspManager;
-use aft::lsp::registry::{is_config_file_path, ServerKind};
+use aft::lsp::registry::{is_config_file_path, is_config_file_path_with_custom, ServerKind};
 use aft::parser::TreeSitterProvider;
 use aft::protocol::RawRequest;
 use lsp_types::FileChangeType;
@@ -502,6 +502,99 @@ fn config_file_detection_ignores_vendor_build_segments() {
     assert!(is_config_file_path(&PathBuf::from(
         "my-target/package.json"
     )));
+}
+
+#[test]
+fn config_file_detection_accepts_custom_root_markers_but_excludes_lockfiles() {
+    let custom_markers = vec!["pyrightconfig-custom.json".to_string()];
+
+    assert!(is_config_file_path_with_custom(
+        &PathBuf::from("package.json"),
+        &[]
+    ));
+    assert!(!is_config_file_path_with_custom(
+        &PathBuf::from("pyrightconfig-custom.json"),
+        &[]
+    ));
+    assert!(is_config_file_path_with_custom(
+        &PathBuf::from("pyrightconfig-custom.json"),
+        &custom_markers
+    ));
+    assert!(!is_config_file_path_with_custom(
+        &PathBuf::from("Cargo.lock"),
+        &[]
+    ));
+    assert!(!is_config_file_path_with_custom(
+        &PathBuf::from("package-lock.json"),
+        &[]
+    ));
+}
+
+#[test]
+fn lockfiles_are_not_watched_config_files() {
+    for lockfile in [
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "go.sum",
+        "bun.lock",
+        "bun.lockb",
+    ] {
+        assert!(
+            !is_config_file_path(&PathBuf::from(lockfile)),
+            "{lockfile} must not trigger watched-file notifications"
+        );
+    }
+}
+
+#[test]
+fn custom_lsp_root_marker_edit_notifies_workspace_server() {
+    let temp_dir = tempdir().expect("tempdir");
+    let root = temp_dir.path().join("workspace");
+    let source = root.join("src").join("main.customts");
+    let custom_config = root.join("pyrightconfig-custom.json");
+    fs::create_dir_all(source.parent().expect("source parent")).expect("create src");
+    fs::write(&source, "export const value = 1;\n").expect("write source");
+    fs::write(&custom_config, "{}\n").expect("write custom config");
+
+    let server_id = "custom-ts";
+    let config = Config {
+        project_root: Some(root.clone()),
+        lsp_servers: vec![UserServerDef {
+            id: server_id.to_string(),
+            extensions: vec!["customts".to_string()],
+            binary: "custom-ts-lsp".to_string(),
+            args: Vec::new(),
+            root_markers: vec!["pyrightconfig-custom.json".to_string()],
+            env: Default::default(),
+            initialization_options: None,
+            disabled: false,
+        }],
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    ctx.lsp().override_binary(
+        ServerKind::Custom(std::sync::Arc::from(server_id)),
+        fake_server_path(),
+    );
+
+    ctx.lsp_notify_file_changed(&source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "write-custom-marker",
+        "command": "write",
+        "file": custom_config.display().to_string(),
+        "content": "{\"typeCheckingMode\":\"strict\"}\n"
+    }))
+    .expect("request parses");
+    let response = handle_write(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true, "write failed: {json}");
+
+    let params = collect_watched_file_events_from_ctx(&ctx);
+    assert_eq!(config_change_type(&params, "/pyrightconfig-custom.json"), 2);
 }
 
 #[test]

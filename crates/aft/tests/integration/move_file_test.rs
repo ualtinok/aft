@@ -1,6 +1,17 @@
 //! Integration tests for the `move_file` command, focused on error-message
 //! quality (BUG-7 from the dogfooding triage).
 
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use aft::commands::move_file::handle_move_file;
+use aft::config::Config;
+use aft::context::AppContext;
+use aft::lsp::client::LspEvent;
+use aft::lsp::registry::ServerKind;
+use aft::parser::TreeSitterProvider;
+use aft::protocol::RawRequest;
 use serde_json::json;
 
 use crate::helpers::AftProcess;
@@ -12,6 +23,112 @@ fn configure(aft: &mut AftProcess, root: &std::path::Path) {
 
 fn send(aft: &mut AftProcess, request: serde_json::Value) -> serde_json::Value {
     aft.send(&serde_json::to_string(&request).expect("serialize request"))
+}
+
+fn fake_server_path() -> PathBuf {
+    option_env!("CARGO_BIN_EXE_fake-lsp-server")
+        .or(option_env!("CARGO_BIN_EXE_fake_lsp_server"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake-lsp-server").map(PathBuf::from))
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_fake_lsp_server").map(PathBuf::from))
+        .or_else(|| {
+            let mut path = std::env::current_exe().ok()?;
+            path.pop();
+            path.pop();
+            path.push("fake-lsp-server");
+            Some(path)
+        })
+        .filter(|path| path.exists())
+        .expect("fake-lsp-server binary path not set")
+}
+
+fn collect_watched_file_events(ctx: &AppContext, expected: usize) -> Vec<serde_json::Value> {
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        for event in ctx.lsp().drain_events() {
+            if let LspEvent::Notification { method, params, .. } = event {
+                if method == "custom/watchedFilesChanged" {
+                    collected.push(params.expect("watched event params"));
+                    if collected.len() == expected {
+                        return collected;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !collected.is_empty(),
+        "timed out waiting for watched-file notification"
+    );
+    collected
+}
+
+fn wait_for_publish(ctx: &AppContext) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        for event in ctx.lsp().drain_events() {
+            if matches!(
+                event,
+                LspEvent::Notification { method, .. } if method == "textDocument/publishDiagnostics"
+            ) {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for publishDiagnostics");
+}
+
+#[test]
+fn move_file_config_rename_notifies_deleted_and_created_in_one_event() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let root = tmp.path();
+    let source = root.join("src").join("open.ts");
+    let src_config = root.join("tsconfig.json");
+    let dst_config = root.join("tsconfig.base.json");
+    std::fs::create_dir_all(source.parent().unwrap()).expect("create src");
+    std::fs::write(&source, "export const open = 1;\n").expect("write source");
+    std::fs::write(&src_config, "{\"compilerOptions\":{}}\n").expect("write tsconfig");
+
+    let ctx = AppContext::new(
+        Box::new(TreeSitterProvider::new()),
+        Config {
+            project_root: Some(root.to_path_buf()),
+            ..Config::default()
+        },
+    );
+    ctx.lsp()
+        .override_binary(ServerKind::TypeScript, fake_server_path());
+    ctx.lsp_notify_file_changed(&source, "export const open = 2;\n");
+    wait_for_publish(&ctx);
+
+    let req: RawRequest = serde_json::from_value(json!({
+        "id": "move-tsconfig",
+        "command": "move_file",
+        "file": src_config.display().to_string(),
+        "destination": dst_config.display().to_string(),
+    }))
+    .expect("request parses");
+    let response = handle_move_file(&req, &ctx);
+    let resp = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(resp["success"], true, "move should succeed: {resp:?}");
+
+    let events = collect_watched_file_events(&ctx, 2);
+    let mut changes = Vec::new();
+    for event in events {
+        changes.extend(event["changes"].as_array().expect("changes array").clone());
+    }
+    assert_eq!(changes.len(), 2, "expected deleted+created events");
+    assert!(changes.iter().any(|change| change["uri"]
+        .as_str()
+        .is_some_and(|uri| uri.ends_with("/tsconfig.json"))
+        && change["type"] == 3));
+    assert!(changes.iter().any(|change| change["uri"]
+        .as_str()
+        .is_some_and(|uri| uri.ends_with("/tsconfig.base.json"))
+        && change["type"] == 1));
 }
 
 #[cfg(target_os = "linux")]
