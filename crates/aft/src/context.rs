@@ -104,11 +104,21 @@ fn path_error_response(
     )
 }
 
+/// Walk `candidate` component-by-component. For any component that is a
+/// symlink on disk, iteratively follow the full chain (up to 40 hops) and
+/// reject if any hop's resolved target lies outside `resolved_root`.
+///
+/// This is the fallback path used when `fs::canonicalize` fails (e.g. on
+/// Linux with broken symlink chains pointing to non-existent destinations).
+/// On macOS `canonicalize` also fails for broken symlinks but the returned
+/// `/var/...` tempdir paths diverge from `resolved_root`'s `/private/var/...`
+/// form, so we must accept either form when deciding which symlinks to check.
 fn reject_escaping_symlink(
     req_id: &str,
     original_path: &Path,
     candidate: &Path,
     resolved_root: &Path,
+    raw_root: &Path,
 ) -> Result<(), crate::protocol::Response> {
     let mut current = PathBuf::new();
 
@@ -123,21 +133,75 @@ fn reject_escaping_symlink(
             continue;
         }
 
-        let target = match std::fs::read_link(&current) {
-            Ok(target) => target,
-            Err(_) => return Err(path_error_response(req_id, original_path, resolved_root)),
+        // Only check symlinks that live inside the project root. This skips
+        // OS-level prefix symlinks (macOS /var → /private/var) that are not
+        // inside our project directory and whose "escaping" is harmless.
+        //
+        // We compare against BOTH the canonicalized root (resolved_root, e.g.
+        // /private/var/.../project) AND the raw root (e.g. /var/.../project)
+        // because tempdir() returns raw paths while fs::canonicalize returns
+        // the resolved form — and our `current` may be in either form.
+        let inside_root = current.starts_with(resolved_root) || current.starts_with(raw_root);
+        if !inside_root {
+            continue;
+        }
+
+        iterative_follow_chain(req_id, original_path, &current, resolved_root)?;
+    }
+
+    Ok(())
+}
+
+/// Iteratively follow a symlink chain from `link` and reject if any hop's
+/// resolved target is outside `resolved_root`. Depth-capped at 40 hops.
+fn iterative_follow_chain(
+    req_id: &str,
+    original_path: &Path,
+    start: &Path,
+    resolved_root: &Path,
+) -> Result<(), crate::protocol::Response> {
+    let mut link = start.to_path_buf();
+    let mut depth = 0usize;
+
+    loop {
+        if depth > 40 {
+            return Err(path_error_response(req_id, original_path, resolved_root));
+        }
+
+        let target = match std::fs::read_link(&link) {
+            Ok(t) => t,
+            Err(_) => {
+                // Can't read the link — treat as escaping to be safe.
+                return Err(path_error_response(req_id, original_path, resolved_root));
+            }
         };
+
         let resolved_target = if target.is_absolute() {
             normalize_path(&target)
         } else {
-            let parent = current.parent().unwrap_or_else(|| Path::new(""));
-            normalize_path(&parent.join(target))
+            let parent = link.parent().unwrap_or_else(|| Path::new(""));
+            normalize_path(&parent.join(&target))
         };
 
-        if !resolved_target.starts_with(resolved_root)
-            && !resolved_root.starts_with(&resolved_target)
+        // Check boundary: use canonicalized target when available (handles
+        // macOS /var → /private/var aliasing), fall back to the normalized
+        // path when canonicalize fails (e.g. broken symlink on Linux).
+        let canonical_target =
+            std::fs::canonicalize(&resolved_target).unwrap_or_else(|_| resolved_target.clone());
+
+        if !canonical_target.starts_with(resolved_root)
+            && !resolved_target.starts_with(resolved_root)
         {
             return Err(path_error_response(req_id, original_path, resolved_root));
+        }
+
+        // If the target is itself a symlink, follow the next hop.
+        match std::fs::symlink_metadata(&resolved_target) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                link = resolved_target;
+                depth += 1;
+            }
+            _ => break, // Non-symlink or non-existent target — chain ends here.
         }
     }
 
@@ -606,6 +670,11 @@ impl AppContext {
         };
         drop(config);
 
+        // Keep the raw root for symlink-guard comparisons. On macOS, tempdir()
+        // returns /var/... paths while canonicalize gives /private/var/...; we
+        // need both forms so reject_escaping_symlink can recognise in-root
+        // symlinks regardless of which prefix form `current` happens to have.
+        let raw_root = root.clone();
         let resolved_root = std::fs::canonicalize(&root).unwrap_or(root);
 
         // Resolve the path (follow symlinks, normalize ..). If canonicalization
@@ -616,7 +685,7 @@ impl AppContext {
             Ok(resolved) => resolved,
             Err(_) => {
                 let normalized = normalize_path(path);
-                reject_escaping_symlink(req_id, path, &normalized, &resolved_root)?;
+                reject_escaping_symlink(req_id, path, &normalized, &resolved_root, &raw_root)?;
                 resolve_with_existing_ancestors(&normalized)
             }
         };
