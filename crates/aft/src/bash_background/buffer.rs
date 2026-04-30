@@ -49,14 +49,24 @@ impl BgBuffer {
             return;
         }
 
-        if self.spill.is_none() && self.open_spill().is_err() {
-            self.memory.extend_from_slice(chunk);
-            if self.memory.len() > MEMORY_LIMIT_BYTES {
-                let keep_from = self.memory.len().saturating_sub(MEMORY_LIMIT_BYTES);
-                self.memory.drain(..keep_from);
-                self.rotated = true;
+        if self.spill.is_none() {
+            if let Err(e) = self.open_spill() {
+                // Spill-file creation failed (e.g. disk full, permissions). Fall
+                // back to in-memory ring so output is not lost entirely, but warn
+                // so operators can diagnose the underlying storage issue.
+                log::warn!(
+                    "[aft] bg-bash: failed to open spill file {:?}: {e} — \
+                     falling back to in-memory ring (output may be truncated)",
+                    self.spill_path
+                );
+                self.memory.extend_from_slice(chunk);
+                if self.memory.len() > MEMORY_LIMIT_BYTES {
+                    let keep_from = self.memory.len().saturating_sub(MEMORY_LIMIT_BYTES);
+                    self.memory.drain(..keep_from);
+                    self.rotated = true;
+                }
+                return;
             }
-            return;
         }
 
         self.write_spill_chunk(chunk);

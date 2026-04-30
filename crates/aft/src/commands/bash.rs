@@ -13,13 +13,13 @@ use serde_json::json;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use crate::bash_background::process::terminate_process;
 use crate::context::AppContext;
 use crate::protocol::{
     ProgressFrame, ProgressKind, RawRequest, Response, ERROR_PERMISSION_REQUIRED,
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const TERMINATE_GRACE: Duration = Duration::from_secs(3);
 const INLINE_OUTPUT_LIMIT: usize = 30 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -316,34 +316,6 @@ fn drain_output_events(
     }
 }
 
-#[cfg(unix)]
-fn terminate_process(child: &mut std::process::Child) {
-    let pgid = child.id() as i32;
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
-    let grace_started = Instant::now();
-    while grace_started.elapsed() < TERMINATE_GRACE {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn terminate_process(child: &mut std::process::Child) {
-    let pid = child.id().to_string();
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid, "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
 fn maybe_truncate(
     output: &str,
     ctx: &AppContext,
@@ -448,7 +420,10 @@ mod tests {
         // to be a 4-byte boundary.
         let output: String = "🦀".repeat(20_000);
         let start = inline_output_suffix_start(&output);
-        assert!(output.is_char_boundary(start), "suffix split a multi-byte char");
+        assert!(
+            output.is_char_boundary(start),
+            "suffix split a multi-byte char"
+        );
         // Slicing must succeed without panic.
         let suffix = &output[start..];
         let suffix_bytes = suffix.len();

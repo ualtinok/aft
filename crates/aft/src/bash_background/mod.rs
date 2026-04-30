@@ -1,6 +1,7 @@
 //! Background bash task management. Phase 0 stub; Phase 1 Track D fills in.
 
 pub mod buffer;
+pub mod process;
 pub mod registry;
 
 use crate::context::AppContext;

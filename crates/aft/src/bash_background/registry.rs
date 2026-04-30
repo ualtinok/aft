@@ -14,9 +14,13 @@ use serde::Serialize;
 use std::os::unix::process::CommandExt;
 
 use super::buffer::{default_output_dir, BgBuffer, StreamKind};
+use super::process::terminate_process;
 use super::{BgTaskInfo, BgTaskStatus};
 
-const TERMINATE_GRACE: Duration = Duration::from_secs(3);
+/// Default timeout for background bash tasks: 30 minutes.
+/// Agents can override per-call via the `timeout` parameter (in ms).
+/// A deliberate ceiling prevents zombie tasks from accumulating forever.
+const DEFAULT_BG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +109,10 @@ impl BgTaskRegistry {
                 "background bash task limit exceeded: {running} running (max {max_running})"
             ));
         }
+
+        // Apply the 30-minute ceiling when no explicit timeout is provided.
+        // Agents can pass a longer or shorter value via `timeout` (ms).
+        let timeout = timeout.or(Some(DEFAULT_BG_TIMEOUT));
 
         let task_id = self.generate_unique_task_id()?;
         let output_dir = default_output_dir(storage_dir.as_deref());
@@ -594,34 +602,6 @@ fn shell_command(command: &str) -> Command {
     cmd.args(["-c", command]);
     cmd.process_group(0);
     cmd
-}
-
-#[cfg(unix)]
-fn terminate_process(child: &mut Child) {
-    let pgid = child.id() as i32;
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
-    let grace_started = Instant::now();
-    while grace_started.elapsed() < TERMINATE_GRACE {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn terminate_process(child: &mut Child) {
-    let pid = child.id().to_string();
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid, "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// Generate a short, agent-friendly bg-bash task slug like `bgb-3f49a42c`.
