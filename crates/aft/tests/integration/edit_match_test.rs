@@ -46,7 +46,13 @@ fn edit_match_glob_rolls_back_prior_files_when_later_write_fails() {
 }
 
 #[test]
-fn edit_match_glob_reports_per_file_syntax_failure_and_preserves_other_files() {
+fn edit_match_glob_rolls_back_when_any_file_becomes_syntax_invalid() {
+    // Glob edit_match is atomic w.r.t. syntax: if any file ends up syntax-
+    // invalid after the replacement, the whole batch rolls back to the
+    // pre-edit checkpoint. Previously this code reported per-file
+    // `syntax_valid: false` and left edits applied, which silently broke
+    // the project. The new contract: agent gets a clear `syntax_invalid`
+    // error and the working tree is unchanged.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let a = root.join("a.ts");
@@ -71,18 +77,57 @@ fn edit_match_glob_reports_per_file_syntax_failure_and_preserves_other_files() {
     let resp = aft.send(&req.to_string());
 
     assert_eq!(
-        resp["success"], true,
-        "glob edit should return per-file status: {resp:?}"
+        resp["success"], false,
+        "glob edit must fail when any file becomes syntax-invalid: {resp:?}"
     );
+    assert_eq!(resp["code"], "syntax_invalid", "wrong error code: {resp:?}");
+    let msg = resp["message"].as_str().expect("message");
+    assert!(
+        msg.contains("rolled back"),
+        "error message should mention rollback: {msg}"
+    );
+
+    // All three files must be unchanged from their original contents.
+    assert_eq!(fs::read_to_string(&a).unwrap(), original_a);
+    assert_eq!(fs::read_to_string(&b).unwrap(), original_b);
+    assert_eq!(fs::read_to_string(&c).unwrap(), original_c);
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn edit_match_glob_succeeds_when_all_files_remain_syntax_valid() {
+    // Companion to the rollback test: if the replacement keeps every file
+    // syntax-valid, the batch commits normally and per-file results report
+    // syntax_valid: true. This guards against an over-eager rollback that
+    // would block legitimate batch edits.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let a = root.join("a.ts");
+    let b = root.join("b.ts");
+
+    fs::write(&a, "const a = TARGET;\n").unwrap();
+    fs::write(&b, "const b = TARGET;\n").unwrap();
+
+    let mut aft = AftProcess::spawn();
+    let req = json!({
+        "id": "glob-syntax-clean",
+        "command": "edit_match",
+        "file": format!("{}/*.ts", root.display()),
+        "match": "TARGET",
+        "replacement": "42"
+    });
+    let resp = aft.send(&req.to_string());
+
+    assert_eq!(resp["success"], true, "expected success: {resp:?}");
     let files = resp["files"].as_array().expect("files array");
-    assert_eq!(files.len(), 3);
-    assert!(files.iter().any(|file| file["file"]
-        .as_str()
-        .is_some_and(|name| name.ends_with("/c.ts"))
-        && file["syntax_valid"] == false));
-    assert_eq!(fs::read_to_string(&a).unwrap(), "const a = 1; // {;\n");
-    assert_eq!(fs::read_to_string(&b).unwrap(), "const b = \"{;\";\n");
-    assert_eq!(fs::read_to_string(&c).unwrap(), "const c = {;;\n");
+    assert_eq!(files.len(), 2);
+    for file in files {
+        assert_eq!(file["syntax_valid"], true, "file should be valid: {file:?}");
+    }
+    assert_eq!(fs::read_to_string(&a).unwrap(), "const a = 42;\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "const b = 42;\n");
 
     let status = aft.shutdown();
     assert!(status.success());

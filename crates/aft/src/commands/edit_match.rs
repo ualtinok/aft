@@ -432,6 +432,17 @@ fn handle_glob_edit_match(
     }
 
     // --- Phase 2: Format all changed files (after all writes are done) ---
+    //
+    // Atomicity rule for glob edit_match: if ANY file ends up syntax-invalid
+    // after the replacement+format pass, we restore the entire batch from the
+    // pre-edit checkpoint and return an error. The agent then sees a clear
+    // "no files changed because the replacement would have broken N file(s)"
+    // signal and can revise the replacement instead of being left with a
+    // partially-applied glob and a per-file `syntax_valid: false` they may
+    // miss. Single-file `edit_match` deliberately keeps the per-file syntax
+    // honesty (the agent has full visibility on one file); the multi-file
+    // glob path makes silent partial breakage too easy.
+    let mut syntax_failures: Vec<String> = Vec::new();
     for edit in &pending {
         let file_str = edit.path.display().to_string();
         let formatted = if !dry_run {
@@ -471,6 +482,10 @@ fn handle_glob_edit_match(
             None
         };
 
+        if syntax_valid == Some(false) {
+            syntax_failures.push(file_str.clone());
+        }
+
         if let Ok(final_content) = std::fs::read_to_string(&edit.path) {
             ctx.lsp_notify_file_changed(&edit.path, &final_content);
         }
@@ -481,6 +496,46 @@ fn handle_glob_edit_match(
             "formatted": formatted,
             "syntax_valid": syntax_valid,
         }));
+    }
+
+    // If any file's post-edit content is syntax-invalid, roll the entire
+    // batch back to the pre-edit checkpoint. Don't leave the project in a
+    // partially-broken state across many files at once.
+    if !dry_run && !syntax_failures.is_empty() {
+        if let Some(name) = &checkpoint_name {
+            let paths = pending
+                .iter()
+                .map(|edit| edit.path.clone())
+                .collect::<Vec<_>>();
+            restore_glob_checkpoint(ctx, req.session(), name, &paths);
+            delete_glob_checkpoint(ctx, req.session(), name);
+            // Re-notify LSP so any cached diagnostics for the rolled-back
+            // files reflect the restored content, not the broken edits.
+            for path in &paths {
+                if let Ok(restored) = std::fs::read_to_string(path) {
+                    ctx.lsp_notify_file_changed(path, &restored);
+                }
+            }
+        }
+        let summary = if syntax_failures.len() <= 5 {
+            syntax_failures.join(", ")
+        } else {
+            format!(
+                "{} (+{} more)",
+                syntax_failures[..5].join(", "),
+                syntax_failures.len() - 5
+            )
+        };
+        return Response::error(
+            &req.id,
+            "syntax_invalid",
+            format!(
+                "edit_match (glob): replacement would leave {} of {} file(s) syntax-invalid; rolled back. Affected: {}",
+                syntax_failures.len(),
+                pending.len(),
+                summary
+            ),
+        );
     }
 
     if dry_run {
