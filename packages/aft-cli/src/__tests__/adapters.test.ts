@@ -58,13 +58,60 @@ describe("OpenCodeAdapter configuration", () => {
     expect(adapter.hasPluginEntry()).toBe(true);
   });
 
-  test("hasPluginEntry returns true for local dev path", () => {
+  test("hasPluginEntry returns true for local dev path pointing at our plugin", () => {
+    // Create a fake local plugin checkout with the right package name.
+    const pluginDir = join(tmpHome, "work", "opencode-plugin");
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, "package.json"),
+      JSON.stringify({ name: "@cortexkit/aft-opencode", version: "0.0.0-dev" }),
+    );
     writeFileSync(
       join(configDir, "opencode.jsonc"),
-      '{\n  "plugin": ["/Users/me/work/opencode-plugin"]\n}\n',
+      `{\n  "plugin": [${JSON.stringify(pluginDir)}]\n}\n`,
     );
     const adapter = new OpenCodeAdapter();
     expect(adapter.hasPluginEntry()).toBe(true);
+  });
+
+  test("hasPluginEntry returns true for file:// URL pointing at our plugin", () => {
+    const pluginDir = join(tmpHome, "work", "aft-plugin");
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, "package.json"),
+      JSON.stringify({ name: "@cortexkit/aft-opencode" }),
+    );
+    writeFileSync(join(configDir, "opencode.jsonc"), `{\n  "plugin": ["file://${pluginDir}"]\n}\n`);
+    const adapter = new OpenCodeAdapter();
+    expect(adapter.hasPluginEntry()).toBe(true);
+  });
+
+  test("hasPluginEntry returns false for unrelated third-party plugin path containing 'opencode-plugin'", () => {
+    // Regression test: a user reported that `file:///F:/hackingtool-plugin/opencode-plugin`
+    // in their config caused doctor to report AFT as registered when it wasn't, because the
+    // old substring matcher (`includes("/opencode-plugin")`) accepted any path containing
+    // that string. Verify the new matcher rejects unrelated plugins.
+    const otherPluginDir = join(tmpHome, "hackingtool-plugin", "opencode-plugin");
+    mkdirSync(otherPluginDir, { recursive: true });
+    writeFileSync(
+      join(otherPluginDir, "package.json"),
+      JSON.stringify({ name: "some-third-party-plugin" }),
+    );
+    writeFileSync(
+      join(configDir, "opencode.jsonc"),
+      `{\n  "plugin": ["file://${otherPluginDir}"]\n}\n`,
+    );
+    const adapter = new OpenCodeAdapter();
+    expect(adapter.hasPluginEntry()).toBe(false);
+  });
+
+  test("hasPluginEntry returns false for path that does not exist on disk", () => {
+    writeFileSync(
+      join(configDir, "opencode.jsonc"),
+      '{\n  "plugin": ["/nonexistent/path/to/opencode-plugin"]\n}\n',
+    );
+    const adapter = new OpenCodeAdapter();
+    expect(adapter.hasPluginEntry()).toBe(false);
   });
 
   test("ensurePluginEntry creates config when missing", async () => {
