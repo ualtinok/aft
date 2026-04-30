@@ -1292,10 +1292,21 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
           ? `Patch partially applied — ${hunks.length - failures.length} of ${hunks.length} hunk(s) succeeded. Failed: ${failures.join(", ")}. Successful changes are kept; use \`aft_safety\` to revert if you want to abort.`
           : `Patch failed — none of the ${hunks.length} hunk(s) applied: ${failures.join(", ")}.`;
         results.push(summary);
-        // Suppress the "Success. Updated the following files:" metadata
-        // when nothing succeeded (avoids misleading the UI).
+        // Total-failure case: throw so OpenCode marks the tool call as errored
+        // in the UI (state.status = "error") and the agent's retry loop sees
+        // a real failure. Returning the failure summary as a normal string
+        // makes OpenCode classify the call as completed/successful — the
+        // agent only sees the failure in the output text, and the UI shows
+        // a green check next to a red error message. This matches OpenCode's
+        // native apply_patch which uses Effect.fail() on every error path
+        // (packages/opencode/src/tool/apply_patch.ts).
+        //
+        // Partial successes still return the string: real changes landed on
+        // disk, the agent needs to see exactly which hunks worked, and the
+        // tool genuinely did do work. Treating it as an error would obscure
+        // the partial outcome.
         if (!partial) {
-          return results.join("\n");
+          throw new Error(results.join("\n"));
         }
       }
 

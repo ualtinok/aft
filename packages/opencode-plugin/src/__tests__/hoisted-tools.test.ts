@@ -1,7 +1,7 @@
 /// <reference path="../bun-test.d.ts" />
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
@@ -128,6 +128,13 @@ describe("Hoisted tool execute handlers", () => {
     ).rejects.toThrow("Match not found in file");
   });
 
+  // Still `failingTest`: hoisted apply_patch's add-hunk branch checks
+  // `try/catch` around the bridge call, but the bridge returns `success:
+  // false` responses without throwing — so the catch never runs, the hunk
+  // is treated as Created, and the original error message is silently lost.
+  // Separately tracked from the total-failure-throws fix; needs the add path
+  // to assert response.success === true (or throw) before treating the hunk
+  // as a success.
   failingTest("apply_patch throws the Rust error response when a patch write fails", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
@@ -432,9 +439,16 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
-
-    expect(result).toContain("restored pre-patch checkpoint");
+    // Total-failure (single hunk) now throws so OpenCode classifies the call
+    // as errored. Inspect the thrown error for the rollback messaging.
+    let caught: unknown;
+    try {
+      await tools.apply_patch.execute({ patchText }, sdkCtx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("restored pre-patch checkpoint");
     expect(await readFile(destFile, "utf-8")).toBe("ORIGINAL\n");
     expect(calls.some((c) => c.command === "restore_checkpoint")).toBe(true);
     expect(calls.some((c) => c.command === "delete_file" && c.params.file === destFile)).toBe(
@@ -476,14 +490,23 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+    // Total-failure (single hunk) now throws so OpenCode classifies the call
+    // as errored. Inspect the thrown error for the move-rollback messaging.
+    let caught: unknown;
+    try {
+      await tools.apply_patch.execute({ patchText }, sdkCtx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
 
     expect(existsSync(sourceFile)).toBe(true);
     expect(existsSync(destFile)).toBe(true);
-    expect(result).toContain("move_partial_failure");
-    expect(result).toContain(sourceFile);
-    expect(result).toContain(destFile);
-    expect(result).toContain("Both copies may exist or destination content may be changed");
+    expect(message).toContain("move_partial_failure");
+    expect(message).toContain(sourceFile);
+    expect(message).toContain(destFile);
+    expect(message).toContain("Both copies may exist or destination content may be changed");
   });
 
   /// BUG-6a dogfooding repro: the user's exact 3-file complaint. A multi-
@@ -556,6 +579,49 @@ describe("Hoisted tool execute handlers", () => {
     // No delete_file on the successful files — we keep them.
     expect(calls.some((c) => c.command === "delete_file" && c.params.file === okFile1)).toBe(false);
     expect(calls.some((c) => c.command === "delete_file" && c.params.file === okFile2)).toBe(false);
+  });
+
+  // Regression test for the dogfooded report where a single-file patch hit
+  // a fuzzy-match drift, our code wrote the failure summary to `output`,
+  // and OpenCode's UI rendered the call as `state.status: "completed"` —
+  // green check next to "Patch failed — none of the 1 hunk(s) applied".
+  // Total-failure cases must throw so OpenCode classifies them as errored
+  // (matching native apply_patch which uses Effect.fail for all errors).
+  test("apply_patch throws when ALL hunks fail (so OpenCode marks it errored)", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const driftFile = resolve(tmpDir, "src/hooks/index.ts");
+    await mkdir(resolve(tmpDir, "src/hooks"), { recursive: true });
+    await writeFile(driftFile, "actual content that the patch does not expect\n");
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: src/hooks/index.ts",
+      "@@",
+      '-export { createDelegateTaskRetryHook } from "./delegate-task-retry";',
+      '-export { createJsonErrorRecoveryHook } from "./json-error-recovery";',
+      "*** End Patch",
+    ].join("\n");
+
+    const { tools } = createMockHoistedHarness(async (command) => {
+      if (command === "checkpoint") return { success: true };
+      if (command === "write") return { success: true };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    let caught: unknown;
+    try {
+      await tools.apply_patch.execute({ patchText }, sdkCtx);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toContain("Failed to update src/hooks/index.ts");
+    expect(message).toContain("Patch failed");
+    expect(message).toContain("none of the 1 hunk(s) applied");
   });
 
   test("read returns binary-file messages without trying to split missing content", async () => {

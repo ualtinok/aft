@@ -139,21 +139,32 @@ maybeDescribe("e2e apply_patch rollback behavior", () => {
     await chmod(h.path("locked"), 0o555);
 
     try {
-      const output = await tools.apply_patch.execute(
-        {
-          patchText: `*** Begin Patch
+      // Total-failure (single hunk that fully fails) now throws so OpenCode
+      // marks the tool call as errored in the UI. Capture the thrown error
+      // to verify both the failure summary and the rollback messaging are
+      // preserved in the error message.
+      let caught: unknown;
+      try {
+        await tools.apply_patch.execute(
+          {
+            patchText: `*** Begin Patch
 *** Update File: locked/from.txt
 *** Move to: moved/to.txt
 @@
 -original
 +changed
 *** End Patch`,
-        },
-        sdkCtx,
-      );
-
-      expect(output).toContain("Failed to update locked/from.txt");
-      expect(output).toContain("source delete failed after writing move destination");
+          },
+          sdkCtx,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = (caught as Error).message;
+      expect(message).toContain("Failed to update locked/from.txt");
+      expect(message).toContain("source delete failed after writing move destination");
+      expect(message).toContain("Patch failed");
       expect(await readTextFile(h.path("locked", "from.txt"))).toBe("original\n");
       await expect(readTextFile(h.path("moved", "to.txt"))).rejects.toThrow();
     } finally {
