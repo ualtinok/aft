@@ -43,11 +43,12 @@ function scheduleFlush(): void {
   }
 }
 
-function write(level: string, message: string, data?: unknown): void {
+function write(level: string, message: string, data?: unknown, sessionId?: string): void {
   try {
     const timestamp = new Date().toISOString();
     const serialized = data === undefined ? "" : ` ${JSON.stringify(data)}`;
-    const line = `[${timestamp}] ${level} ${TAG} ${message}${serialized}\n`;
+    const sessionPrefix = sessionId ? ` [${sessionId}]` : "";
+    const line = `[${timestamp}] ${level} ${TAG}${sessionPrefix} ${message}${serialized}\n`;
     if (useStderr) {
       // Write immediately in stderr mode (subprocess tests need it before exit)
       process.stderr.write(line);
@@ -73,6 +74,24 @@ export function warn(message: string, data?: unknown): void {
 
 export function error(message: string, data?: unknown): void {
   write("ERROR", message, data);
+}
+
+/**
+ * Log with a session-id prefix. Use for messages that originate from a
+ * specific OpenCode session (per-request errors, timeouts, crashes during
+ * a session's tool call). Bridge-lifecycle logs (spawn, version, idle) are
+ * project-scoped, not session-scoped — use `log`/`warn`/`error` for those.
+ */
+export function sessionLog(sessionId: string, message: string, data?: unknown): void {
+  write("INFO", message, data, sessionId);
+}
+
+export function sessionWarn(sessionId: string, message: string, data?: unknown): void {
+  write("WARN", message, data, sessionId);
+}
+
+export function sessionError(sessionId: string, message: string, data?: unknown): void {
+  write("ERROR", message, data, sessionId);
 }
 
 export function getLogFilePath(): string {

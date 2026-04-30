@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { error, getLogFilePath, log, warn } from "./logger.js";
+import { error, getLogFilePath, log, sessionWarn, warn } from "./logger.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
@@ -282,12 +282,23 @@ export class BinaryBridge {
     // repos). Defaults to the bridge-wide timeout otherwise.
     const effectiveTimeoutMs = options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
 
+    // Capture session_id (if present) for per-request log prefixing. Bridge-
+    // lifecycle logs (spawn, version, idle) stay session-less; only logs that
+    // describe what happened to THIS specific request should carry the session.
+    const requestSessionId =
+      typeof params.session_id === "string" && params.session_id.length > 0
+        ? params.session_id
+        : undefined;
+
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        warn(
-          `Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms — restarting bridge`,
-        );
+        const timeoutMsg = `Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms — restarting bridge`;
+        if (requestSessionId) {
+          sessionWarn(requestSessionId, timeoutMsg);
+        } else {
+          warn(timeoutMsg);
+        }
         reject(
           new Error(
             `[aft-plugin] Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms`,
