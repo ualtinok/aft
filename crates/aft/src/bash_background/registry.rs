@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -60,6 +60,7 @@ struct BgTask {
     started: Instant,
     state: Mutex<BgTaskState>,
     thread_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    kill_requested: AtomicBool,
 }
 
 struct BgTaskState {
@@ -144,6 +145,7 @@ impl BgTaskRegistry {
                 buffer: BgBuffer::new(&task_id, output_dir),
             }),
             thread_handle: Mutex::new(None),
+            kill_requested: AtomicBool::new(false),
         });
 
         self.inner
@@ -172,8 +174,13 @@ impl BgTaskRegistry {
         Ok(task_id)
     }
 
-    pub fn status(&self, task_id: &str, preview_bytes: usize) -> Option<BgTaskSnapshot> {
-        let task = self.task(task_id)?;
+    pub fn status(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        preview_bytes: usize,
+    ) -> Option<BgTaskSnapshot> {
+        let task = self.task_for_session(task_id, session_id)?;
         Some(task.snapshot(preview_bytes))
     }
 
@@ -190,10 +197,11 @@ impl BgTaskRegistry {
             .collect()
     }
 
-    pub fn kill(&self, task_id: &str) -> Result<BgTaskSnapshot, String> {
+    pub fn kill(&self, task_id: &str, session_id: &str) -> Result<BgTaskSnapshot, String> {
         let task = self
-            .task(task_id)
+            .task_for_session(task_id, session_id)
             .ok_or_else(|| format!("background task not found: {task_id}"))?;
+        task.kill_requested.store(true, Ordering::SeqCst);
 
         {
             let mut state = task
@@ -290,7 +298,9 @@ impl BgTaskRegistry {
             .map(|tasks| tasks.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         for task_id in tasks {
-            let _ = self.kill(&task_id);
+            if let Some(task) = self.task(&task_id) {
+                let _ = self.kill(&task_id, &task.session_id);
+            }
         }
         self.cleanup_finished(Duration::ZERO);
     }
@@ -301,6 +311,11 @@ impl BgTaskRegistry {
             .lock()
             .ok()
             .and_then(|tasks| tasks.get(task_id).cloned())
+    }
+
+    fn task_for_session(&self, task_id: &str, session_id: &str) -> Option<Arc<BgTask>> {
+        self.task(task_id)
+            .filter(|task| task.session_id == session_id)
     }
 
     fn running_count(&self) -> usize {
@@ -356,7 +371,10 @@ impl Default for BgTaskRegistry {
 
 impl BgTask {
     fn snapshot(&self, preview_bytes: usize) -> BgTaskSnapshot {
-        let state = self.state.lock().expect("background task lock poisoned");
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let duration_ms = state
             .finished_at
             .map(|finished_at| finished_at.duration_since(self.started).as_millis() as u64);
@@ -402,7 +420,10 @@ impl BgTask {
     }
 
     fn completion(&self) -> BgCompletion {
-        let state = self.state.lock().expect("background task lock poisoned");
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         BgCompletion {
             task_id: self.task_id.clone(),
             session_id: self.session_id.clone(),
@@ -474,9 +495,16 @@ fn run_task(
                     }
                     Ok(None) => false,
                     Err(_) => {
-                        state.exit_code = Some(-1);
-                        state.status = BgTaskStatus::Failed;
-                        state.finished_at = Some(Instant::now());
+                        if task.kill_requested.load(Ordering::SeqCst) {
+                            if state.status == BgTaskStatus::Running {
+                                state.status = BgTaskStatus::Killed;
+                                state.finished_at = Some(Instant::now());
+                            }
+                        } else {
+                            state.exit_code = Some(-1);
+                            state.status = BgTaskStatus::Failed;
+                            state.finished_at = Some(Instant::now());
+                        }
                         state.child = None;
                         state.child_pid = None;
                         true
@@ -498,9 +526,11 @@ fn run_task(
     let _ = stderr_reader.join();
     drain_output_events(&rx, &task);
 
-    if let Ok(mut completions) = inner.completions.lock() {
-        completions.push_back(task.completion());
-    }
+    inner
+        .completions
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push_back(task.completion());
 }
 
 fn drain_output_events(rx: &mpsc::Receiver<OutputEvent>, task: &BgTask) {

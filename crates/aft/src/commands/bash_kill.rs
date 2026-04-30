@@ -30,7 +30,7 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
         return Response::error(&req.id, "invalid_request", "bash_kill: missing task_id");
     };
 
-    match ctx.bash_background().kill(&task_id) {
+    match ctx.bash_background().kill(&task_id, req.session()) {
         Ok(snapshot) => Response::success(&req.id, json!(snapshot)),
         Err(message) if message.contains("not found") => {
             Response::error(&req.id, "task_not_found", message)

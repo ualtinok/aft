@@ -32,7 +32,10 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
         return Response::error(&req.id, "invalid_request", "bash_status: missing task_id");
     };
 
-    match ctx.bash_background().status(&task_id, PREVIEW_BYTES) {
+    match ctx
+        .bash_background()
+        .status(&task_id, req.session(), PREVIEW_BYTES)
+    {
         Some(snapshot) => Response::success(&req.id, json!(snapshot)),
         None => Response::error(
             &req.id,

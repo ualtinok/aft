@@ -82,6 +82,18 @@ fn status(aft: &mut AftProcess, task_id: &str) -> Value {
     )
 }
 
+fn status_with_session(aft: &mut AftProcess, task_id: &str, session_id: &str) -> Value {
+    aft.send(
+        &json!({
+            "id": format!("status-{session_id}-{task_id}"),
+            "session_id": session_id,
+            "command": "bash_status",
+            "params": { "task_id": task_id }
+        })
+        .to_string(),
+    )
+}
+
 fn wait_for_status(aft: &mut AftProcess, task_id: &str, expected: &str) -> Value {
     let started = Instant::now();
     loop {
@@ -170,6 +182,37 @@ fn background_kill_running_task() {
 
     let after = status(&mut aft, &task_id);
     assert_eq!(after["status"], "killed");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_kill_long_running_task_stays_killed_not_failed() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg(&mut aft, "spawn-kill-race", "sleep 30");
+    let killed = aft.send(
+        &json!({
+            "id": "kill-bg-race",
+            "command": "bash_kill",
+            "params": { "task_id": task_id }
+        })
+        .to_string(),
+    );
+    assert_eq!(killed["success"], true, "kill failed: {killed:?}");
+    assert_eq!(killed["status"], "killed");
+
+    let started = Instant::now();
+    loop {
+        let after = status(&mut aft, &task_id);
+        assert_ne!(after["status"], "failed", "kill was overwritten: {after:?}");
+        if after["status"] == "killed" {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     assert!(aft.shutdown().success());
 }
@@ -316,6 +359,87 @@ fn background_status_unknown_task_returns_task_not_found() {
 }
 
 #[test]
+fn background_status_rejects_cross_session_task_as_not_found() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let spawn = aft.send(
+        &json!({
+            "id": "spawn-owned-status",
+            "session_id": "session-a",
+            "command": "bash",
+            "params": { "command": "sleep 2", "background": true }
+        })
+        .to_string(),
+    );
+    assert_eq!(spawn["success"], true, "spawn failed: {spawn:?}");
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+
+    let rejected = status_with_session(&mut aft, &task_id, "session-b");
+    assert_eq!(
+        rejected["success"], false,
+        "cross-session status leaked: {rejected:?}"
+    );
+    assert_eq!(rejected["code"], "task_not_found");
+
+    let owned = status_with_session(&mut aft, &task_id, "session-a");
+    assert_eq!(owned["success"], true, "owner status failed: {owned:?}");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn background_kill_rejects_cross_session_task_as_not_found() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let spawn = aft.send(
+        &json!({
+            "id": "spawn-owned-kill",
+            "session_id": "session-a",
+            "command": "bash",
+            "params": { "command": "sleep 2", "background": true }
+        })
+        .to_string(),
+    );
+    assert_eq!(spawn["success"], true, "spawn failed: {spawn:?}");
+    let task_id = spawn["task_id"].as_str().unwrap().to_string();
+
+    let rejected = aft.send(
+        &json!({
+            "id": "kill-cross-session",
+            "session_id": "session-b",
+            "command": "bash_kill",
+            "params": { "task_id": task_id }
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        rejected["success"], false,
+        "cross-session kill succeeded: {rejected:?}"
+    );
+    assert_eq!(rejected["code"], "task_not_found");
+
+    let owned = status_with_session(&mut aft, &task_id, "session-a");
+    assert_eq!(owned["success"], true, "owner status failed: {owned:?}");
+    assert_eq!(owned["status"], "running");
+
+    let killed = aft.send(
+        &json!({
+            "id": "kill-owner-session",
+            "session_id": "session-a",
+            "command": "bash_kill",
+            "params": { "task_id": task_id }
+        })
+        .to_string(),
+    );
+    assert_eq!(killed["success"], true, "owner kill failed: {killed:?}");
+    assert_eq!(killed["status"], "killed");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
 fn background_completion_metadata_is_attached_to_next_response() {
     let mut aft = AftProcess::spawn();
     let _dir = configure_background(&mut aft);
@@ -357,33 +481,43 @@ fn background_completion_delivery_is_scoped_by_session_id() {
     );
     assert_eq!(spawn["success"], true, "spawn failed: {spawn:?}");
     let task_id = spawn["task_id"].as_str().unwrap().to_string();
-    let _ = wait_for_status(&mut aft, &task_id, "completed");
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(1) {
+        let session_b = aft.send(
+            &json!({
+                "id": "ping-session-b",
+                "session_id": "session-b",
+                "command": "ping"
+            })
+            .to_string(),
+        );
+        assert_eq!(session_b["success"], true);
+        assert!(
+            session_b["bg_completions"]
+                .as_array()
+                .is_none_or(|items| items.is_empty()),
+            "session B drained session A completion: {session_b:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
-    let session_b = aft.send(
-        &json!({
-            "id": "ping-session-b",
-            "session_id": "session-b",
-            "command": "ping"
-        })
-        .to_string(),
-    );
-    assert_eq!(session_b["success"], true);
-    assert!(
-        session_b["bg_completions"]
-            .as_array()
-            .is_none_or(|items| items.is_empty()),
-        "session B drained session A completion: {session_b:?}"
-    );
-
-    let session_a = aft.send(
-        &json!({
-            "id": "ping-session-a",
-            "session_id": "session-a",
-            "command": "ping"
-        })
-        .to_string(),
-    );
-    let completions = session_a["bg_completions"].as_array().unwrap();
+    let started = Instant::now();
+    let completions = loop {
+        let session_a = aft.send(
+            &json!({
+                "id": "ping-session-a",
+                "session_id": "session-a",
+                "command": "ping"
+            })
+            .to_string(),
+        );
+        assert_eq!(session_a["success"], true);
+        if let Some(completions) = session_a["bg_completions"].as_array() {
+            break completions.clone();
+        }
+        assert!(started.elapsed() < Duration::from_secs(4));
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(completions
         .iter()
         .any(|completion| completion["task_id"] == task_id));

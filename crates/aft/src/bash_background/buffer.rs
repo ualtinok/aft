@@ -20,6 +20,8 @@ pub struct BgBuffer {
     rotated: bool,
     #[cfg(test)]
     fail_next_reopen: bool,
+    #[cfg(test)]
+    fail_next_retain: bool,
 }
 
 impl BgBuffer {
@@ -32,6 +34,8 @@ impl BgBuffer {
             rotated: false,
             #[cfg(test)]
             fail_next_reopen: false,
+            #[cfg(test)]
+            fail_next_retain: false,
         }
     }
 
@@ -89,9 +93,7 @@ impl BgBuffer {
     }
 
     pub fn cleanup(&self) {
-        if self.spill.is_some() {
-            let _ = fs::remove_file(&self.spill_path);
-        }
+        let _ = fs::remove_file(&self.spill_path);
     }
 
     fn open_spill(&mut self) -> io::Result<()> {
@@ -100,13 +102,16 @@ impl BgBuffer {
         }
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
-            .truncate(true)
+            .append(true)
             .open(&self.spill_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(&self.memory)?;
         writer.flush()?;
-        self.spilled_bytes = self.memory.len() as u64;
+        self.spilled_bytes = writer
+            .get_ref()
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(self.memory.len() as u64);
         self.memory.clear();
         self.spill = Some(writer);
         Ok(())
@@ -145,6 +150,10 @@ impl BgBuffer {
         drop(writer);
 
         if self.retain_spill_tail().is_err() {
+            self.spilled_bytes = 0;
+            self.rotated = true;
+            self.memory.clear();
+            let _ = fs::remove_file(&self.spill_path);
             return;
         }
         self.rotated = true;
@@ -167,6 +176,7 @@ impl BgBuffer {
                     }
                     self.memory = retained;
                 }
+                let _ = fs::remove_file(&self.spill_path);
             }
         }
     }
@@ -182,6 +192,11 @@ impl BgBuffer {
     }
 
     fn retain_spill_tail(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_next_retain {
+            return Err(io::Error::other("injected spill retain failure"));
+        }
+
         let mut file = File::open(&self.spill_path)?;
         let len = file.metadata()?.len();
         let keep = len.min(DISK_RETAIN_BYTES);
@@ -242,6 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut buffer = BgBuffer::new("rotate-reopen-fails", dir.path().to_path_buf());
         buffer.append(StreamKind::Stdout, &vec![b'a'; MEMORY_LIMIT_BYTES + 1]);
+        let spill_path = buffer.spill_path.clone();
 
         buffer.spilled_bytes = DISK_LIMIT_BYTES;
         buffer.fail_next_reopen = true;
@@ -251,9 +267,46 @@ mod tests {
         assert_eq!(buffer.spilled_bytes, 0);
         assert!(buffer.memory.len() <= MEMORY_LIMIT_BYTES);
         assert!(buffer.rotated);
+        assert!(!spill_path.exists());
 
         buffer.append(StreamKind::Stdout, b"after-failure");
-        assert_eq!(buffer.total_len(), buffer.spilled_bytes);
-        assert!(buffer.spill.is_some());
+        assert!(buffer.total_len() > 0);
+        assert!(buffer.read_tail(64).0.contains("after-failure"));
+    }
+
+    #[test]
+    fn rotate_spill_file_retain_failure_deletes_orphan_and_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut buffer = BgBuffer::new("rotate-retain-fails", dir.path().to_path_buf());
+        buffer.append(StreamKind::Stdout, &vec![b'a'; MEMORY_LIMIT_BYTES + 1]);
+        let spill_path = buffer.spill_path.clone();
+        assert!(spill_path.exists());
+
+        buffer.spilled_bytes = DISK_LIMIT_BYTES;
+        buffer.fail_next_retain = true;
+        buffer.rotate_spill_file();
+
+        assert!(buffer.spill.is_none());
+        assert_eq!(buffer.spilled_bytes, 0);
+        assert!(buffer.rotated);
+        assert!(!spill_path.exists());
+
+        buffer.append(StreamKind::Stdout, b"after-retain-failure");
+        assert!(buffer.read_tail(64).0.contains("after-retain-failure"));
+    }
+
+    #[test]
+    fn open_spill_appends_without_truncating_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut buffer = BgBuffer::new("existing-spill", dir.path().to_path_buf());
+        let spill_path = buffer.spill_path.clone();
+        fs::create_dir_all(dir.path()).expect("create output dir");
+        fs::write(&spill_path, b"preexisting-").expect("seed spill file");
+
+        buffer.append(StreamKind::Stdout, &vec![b'n'; MEMORY_LIMIT_BYTES + 1]);
+        let contents = fs::read(&spill_path).expect("read spill file");
+
+        assert!(contents.starts_with(b"preexisting-"));
+        assert!(contents.len() > MEMORY_LIMIT_BYTES);
     }
 }
