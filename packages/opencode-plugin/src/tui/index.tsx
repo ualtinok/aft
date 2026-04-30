@@ -2,8 +2,10 @@
 // @ts-nocheck
 
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui";
+import packageJson from "../../package.json";
 import { AftRpcClient } from "../shared/rpc-client";
 import { coerceAftStatus, formatStatusDialogMessage } from "../shared/status";
+import { createAftSidebarSlot } from "./sidebar";
 
 // The TUI talks to the server plugin via AftRpcClient. The client reads the
 // JSON port file written by AftRpcServer ({ port, token }) and includes that
@@ -190,6 +192,17 @@ async function showStartupNotifications(api: TuiPluginApi): Promise<void> {
 }
 
 const tui: TuiPlugin = async (api) => {
+  // Sidebar slot: live status of search index, semantic index, and disk
+  // usage. See ./sidebar.tsx for the panel itself. Registered before the
+  // command palette entry so the sidebar is available immediately when the
+  // user opens their first session.
+  try {
+    api.slots.register(createAftSidebarSlot(api, packageJson.version));
+  } catch {
+    // Older OpenCode TUI hosts may not implement api.slots; fall through
+    // and keep the slash command working.
+  }
+
   api.command.register(() => [
     {
       title: "AFT: Status",

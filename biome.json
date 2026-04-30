@@ -65,6 +65,19 @@
           }
         }
       }
+    },
+    {
+      "includes": ["**/tui/**/*.tsx"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
     }
   ]
 }
