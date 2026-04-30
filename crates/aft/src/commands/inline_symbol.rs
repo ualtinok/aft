@@ -299,6 +299,16 @@ pub fn handle_inline_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     let substitution_count = param_to_arg.len();
 
     // --- Build replacement text ---
+    //
+    // Indentation contract: `replacement_text` is built with `replacement_indent`
+    // ALREADY prepended to each line. To avoid the indent being doubled, we
+    // expand `replacement_node` backwards over leading whitespace to the start
+    // of its line so the replacement OVERWRITES the original indent rather than
+    // inserting AFTER it.
+    //
+    // Without this, a 2-space-indented `const result = helper(5);` produced
+    // `    const result = 5 * 2;` (4-space) because the original `  ` remained
+    // before the replacement's `  const ...`.
     let replacement_indent = get_line_indent(&source, call_site_line as usize);
     let replacement_text = build_inline_replacement(
         &substituted_body,
@@ -308,10 +318,21 @@ pub fn handle_inline_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
         assignment_var.as_deref(),
     );
 
+    // Expand replacement start backwards over horizontal whitespace to start
+    // of line. Stop at start-of-file or newline.
+    let replace_start = {
+        let bytes = source.as_bytes();
+        let mut s = replacement_node.start_byte();
+        while s > 0 && matches!(bytes[s - 1], b' ' | b'\t') {
+            s -= 1;
+        }
+        s
+    };
+
     // --- Compute new file content ---
     let new_source = match edit::replace_byte_range(
         &source,
-        replacement_node.start_byte(),
+        replace_start,
         replacement_node.end_byte(),
         &replacement_text,
     ) {

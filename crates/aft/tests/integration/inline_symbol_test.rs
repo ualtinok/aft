@@ -254,3 +254,43 @@ fn inline_symbol_scope_conflict() {
 
     aft.shutdown();
 }
+
+/// Inline preserves the original line indentation. Without the leading-
+/// whitespace expansion fix, the replacement text's indent prefix would be
+/// inserted AFTER the original indent on the line, doubling it (e.g. a
+/// 2-space-indented line became 4-space-indented).
+#[test]
+fn inline_symbol_preserves_call_site_indent() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("indent.ts");
+    std::fs::write(
+        &file,
+        "function helper(x: number): number {\n  return x * 2;\n}\n\nexport function main() {\n  const result = helper(5);\n  console.log(result);\n}\n",
+    )
+    .expect("write fixture");
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &tmp.path().display().to_string());
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"inline_symbol","file":"{}","symbol":"helper","call_site_line":6}}"#,
+        file.display()
+    ));
+    assert_eq!(resp["success"], true, "inline should succeed: {:?}", resp);
+
+    let content = std::fs::read_to_string(&file).expect("read file");
+    // The replacement line must keep its original 2-space indent. If the
+    // bug regressed, this would be 4 spaces.
+    assert!(
+        content.contains("\n  const result = 5 * 2;\n"),
+        "expected 2-space indent on inlined line, got:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("    const result"),
+        "indent should not be doubled, got:\n{}",
+        content
+    );
+
+    aft.shutdown();
+}

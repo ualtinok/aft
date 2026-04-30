@@ -557,3 +557,128 @@ fn move_symbol_project_too_large() {
 
     aft.shutdown();
 }
+
+/// Move of an exported symbol does not leave the `export` keyword behind.
+///
+/// Regression: when moving `export function greet`, the byte range of
+/// `function_declaration` excludes the wrapping `export_statement`, so
+/// `remove_symbol_from_source` only removed `function greet(...) {...}` and
+/// left a stray `export` that then attached to the next sibling declaration.
+/// `find_export_keyword_start` extends the deletion range backwards to cover
+/// the `export` keyword and trailing whitespace.
+#[test]
+fn move_symbol_does_not_leak_export_keyword() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let source = tmp.path().join("sample.ts");
+    let dest = tmp.path().join("helper.ts");
+
+    std::fs::write(
+        &source,
+        "export function greet(user: string) {\n  return `Hello, ${user}!`;\n}\n\nfunction other(): number {\n  return 1;\n}\n",
+    )
+    .expect("write source");
+
+    let mut aft = AftProcess::spawn();
+    let root = tmp.path().display().to_string();
+    let resp = aft.send(&format!(
+        r#"{{"id":"cfg","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+    assert_eq!(resp["success"], true);
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"move_symbol","file":"{}","symbol":"greet","destination":"{}"}}"#,
+        source.display(),
+        dest.display()
+    ));
+    assert_eq!(resp["success"], true, "move should succeed: {:?}", resp);
+
+    let after_source = std::fs::read_to_string(&source).expect("read source");
+    let after_dest = std::fs::read_to_string(&dest).expect("read dest");
+
+    // Source: `other` should still NOT be exported. If the bug regressed,
+    // `export ` would be left attached to `function other`.
+    assert!(
+        !after_source.contains("export function other"),
+        "export keyword leaked onto the next declaration:\n{}",
+        after_source
+    );
+    assert!(
+        after_source.contains("function other(): number {"),
+        "`other` should be present and unmodified:\n{}",
+        after_source
+    );
+    assert!(
+        !after_source.contains("greet"),
+        "`greet` should be removed from source:\n{}",
+        after_source
+    );
+
+    // Destination: `greet` should be exported (single export, not duplicated).
+    assert!(
+        after_dest.contains("export function greet"),
+        "destination should have `export function greet`:\n{}",
+        after_dest
+    );
+    assert!(
+        !after_dest.contains("export export"),
+        "destination should not have duplicate export:\n{}",
+        after_dest
+    );
+
+    aft.shutdown();
+}
+
+/// Extract preserves the `export` keyword on the enclosing function.
+///
+/// Regression: insertion point was `function_declaration.start_byte()`, which
+/// is AFTER the `export` keyword. The extracted function got inserted between
+/// `export ` and `function`, silently transferring the `export` from the
+/// original function to the new extracted one.
+#[test]
+fn extract_function_preserves_enclosing_export_keyword() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("sample.ts");
+
+    std::fs::write(
+        &file,
+        "export function process(items: string[]) {\n  try {\n    const items2 = items.map(i => i.toLowerCase());\n    const message = `count: ${items2.length}`;\n    console.log(message);\n    return message;\n  } catch (e) {\n    throw new Error(`Failed: ${e}`);\n  }\n}\n",
+    )
+    .expect("write fixture");
+
+    let mut aft = AftProcess::spawn();
+    let root = tmp.path().display().to_string();
+    let resp = aft.send(&format!(
+        r#"{{"id":"cfg","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+    assert_eq!(resp["success"], true);
+
+    // Extract just the items.map(...) line.
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"extract_function","file":"{}","start_line":3,"end_line":4,"name":"makeItems"}}"#,
+        file.display()
+    ));
+    assert_eq!(resp["success"], true, "extract should succeed: {:?}", resp);
+
+    let after = std::fs::read_to_string(&file).expect("read file");
+    // `process` must still be exported after extraction.
+    assert!(
+        after.contains("export function process"),
+        "process should still be exported:\n{}",
+        after
+    );
+    // The extracted function `makeItems` must NOT be exported.
+    assert!(
+        !after.contains("export function makeItems"),
+        "extracted function should not be exported:\n{}",
+        after
+    );
+    assert!(
+        after.contains("function makeItems("),
+        "extracted function should be present:\n{}",
+        after
+    );
+
+    aft.shutdown();
+}

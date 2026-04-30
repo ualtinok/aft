@@ -267,8 +267,27 @@ pub fn handle_extract_function(req: &RawRequest, ctx: &AppContext) -> Response {
     // --- Compute new file content ---
     // Insert the extracted function before the enclosing function (or at the range position
     // if there's no enclosing function).
+    //
+    // For TS/JS, when the enclosing function is wrapped in `export` (or
+    // `export default`), the parser reports the function_declaration as
+    // a child of an export_statement. If we use fn_node.start_byte() as
+    // the insertion point, the `export` keyword stays attached to the
+    // start of the file content, and the extracted function gets inserted
+    // BETWEEN `export ` and `function`, producing:
+    //   `export function newFn(...) {} \n\n function originalFn(...) {}`
+    // The export keyword silently jumps from the original function to the
+    // extracted one. Fix: if the parent is an export_statement, insert
+    // before the export_statement instead.
     let insert_pos = if let Some(fn_node) = enclosing_fn {
-        fn_node.start_byte()
+        let mut anchor = fn_node;
+        if matches!(lang, LangId::TypeScript | LangId::Tsx | LangId::JavaScript) {
+            if let Some(parent) = fn_node.parent() {
+                if parent.kind() == "export_statement" {
+                    anchor = parent;
+                }
+            }
+        }
+        anchor.start_byte()
     } else {
         start_byte
     };

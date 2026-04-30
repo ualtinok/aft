@@ -218,13 +218,40 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     };
 
     // --- Extract symbol text from source ---
-    let start_byte = edit::line_col_to_byte(
+    let raw_start_byte = edit::line_col_to_byte(
         &source_content,
         target.range.start_line,
         target.range.start_col,
     );
     let end_byte =
         edit::line_col_to_byte(&source_content, target.range.end_line, target.range.end_col);
+
+    // For TS/JS, the parser reports the symbol range starting at the inner
+    // declaration (e.g. `function greet(...)`) not the wrapping `export
+    // statement`. If we use raw_start_byte directly, two bugs follow:
+    //   1. The destination loses its `export` keyword (we'd then re-add it
+    //      via `prepare_exported_symbol`, which DOES work for the destination).
+    //   2. The source removal leaves the trailing `export ` behind, which
+    //      then attaches to the next declaration when blank-line cleanup
+    //      collapses the gap. Repro: moving `greet` out of
+    //         `export function greet(...) {}\n\nfunction other(): number {}\n`
+    //      produced `export function other(): number {}` in the source.
+    //
+    // Fix: when target.exported is true, expand start_byte backwards to
+    // include the `export` keyword (and `default` if present). We walk over
+    // whitespace then look for the literal token, which is robust because the
+    // parser already told us this declaration IS exported — there must be an
+    // `export` keyword somewhere immediately before it.
+    let lang = detect_language(source_path);
+    let start_byte = if target.exported
+        && matches!(
+            lang,
+            Some(LangId::TypeScript) | Some(LangId::Tsx) | Some(LangId::JavaScript)
+        ) {
+        find_export_keyword_start(&source_content, raw_start_byte).unwrap_or(raw_start_byte)
+    } else {
+        raw_start_byte
+    };
 
     let symbol_text = match source_content.get(start_byte..end_byte) {
         Some(symbol_text) => symbol_text,
@@ -240,7 +267,9 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    // Prepare the text to add to destination: ensure it has export prefix
+    // Prepare the text to add to destination: ensure it has export prefix.
+    // When start_byte was extended above, the symbol_text already includes
+    // `export`; prepare_exported_symbol's idempotency check leaves it alone.
     let dest_symbol_text = prepare_exported_symbol(symbol_text);
 
     // Prepare source with symbol removed
@@ -300,8 +329,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
         .filter(|p| p != source_path && p != dest_path)
         .collect();
 
-    // Detect language for import rewriting
-    let lang = detect_language(source_path);
+    // `lang` already detected above for the export-keyword extension.
 
     // --- Compute consumer rewrites ---
     let mut consumer_rewrites: Vec<(PathBuf, String, String)> = Vec::new(); // (path, original, new)
@@ -644,6 +672,75 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     parts.iter().collect()
+}
+
+/// For TS/JS exported declarations, walk backwards from `decl_start` to find
+/// the start of the `export` (or `export default`) keyword that the parser
+/// reported as wrapping this declaration. Returns the byte offset of the `e`
+/// in `export`, or `None` if no plausible export keyword is found within a
+/// reasonable lookback (in which case the caller falls back to decl_start).
+///
+/// Why text-level: the symbol resolver already gave us `target.exported = true`
+/// based on AST analysis (it walked export_statement parents). At this point
+/// we trust that an `export` keyword exists immediately before the declaration
+/// — we just need to locate its byte position to extend the cut range.
+///
+/// Handles:
+///   - `export function f() {}`           — single keyword
+///   - `export default function f() {}`   — `default` between export and decl
+///   - `export\n  default\n  function f` — newlines/whitespace between tokens
+///
+/// Does NOT handle (returns None, falls back to decl_start):
+///   - `export { foo } from '...'`        — re-exports (parser shouldn't mark
+///     these as `exported: true` for the inner symbol anyway)
+///   - Any case where lookback exceeds 200 bytes without finding `export`
+fn find_export_keyword_start(source: &str, decl_start: usize) -> Option<usize> {
+    if decl_start == 0 {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    // Bound the lookback to keep this O(1) in practice. 200 bytes is enough
+    // for `export default async function /* comment */` style headers without
+    // scanning unrelated code on pathological inputs.
+    let window_start = decl_start.saturating_sub(200);
+
+    // Scan the window for the LAST `export` token whose start lands on a
+    // word boundary (i.e. preceded by start-of-file, whitespace, or a
+    // newline) and whose match is followed by whitespace or `default`.
+    // Iterate from window.len()-6 down to 0 so we have room for the 6-byte
+    // "export" match starting at i.
+    let window = &bytes[window_start..decl_start];
+    if window.len() < 6 {
+        return None;
+    }
+    let mut i = window.len() - 6 + 1; // +1 because we decrement on entry
+    while i > 0 {
+        i -= 1;
+        if window[i] == b'e' {
+            // Try to match "export" starting here
+            if window.get(i..i + 6) == Some(b"export") {
+                // Word-boundary check on the LEFT (no identifier char before)
+                let left_ok = i == 0
+                    || !matches!(window[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$');
+                // Word-boundary check on the RIGHT (whitespace/newline)
+                let right_ok = window
+                    .get(i + 6)
+                    .is_some_and(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
+                if left_ok && right_ok {
+                    let abs = window_start + i;
+                    // Verify there's only whitespace and/or `default` between
+                    // the keyword end and decl_start. If something else lives
+                    // there, this isn't the export keyword wrapping our decl.
+                    let between = &bytes[abs + 6..decl_start];
+                    let s = std::str::from_utf8(between).ok()?.trim();
+                    if s.is_empty() || s == "default" {
+                        return Some(abs);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Prepare the symbol text for the destination file.
@@ -1153,5 +1250,66 @@ mod tests {
             result,
             "export function bar() {}\n\nexport function foo() {}\n"
         );
+    }
+
+    // --- find_export_keyword_start ----------------------------------------
+
+    #[test]
+    fn find_export_keyword_simple_export() {
+        // `export function greet(...)` — decl_start=7 (start of "function")
+        let source = "export function greet() {}\n";
+        assert_eq!(find_export_keyword_start(source, 7), Some(0));
+    }
+
+    #[test]
+    fn find_export_keyword_export_default() {
+        // `export default function f(...)` — decl_start=15 (start of "function")
+        let source = "export default function f() {}\n";
+        assert_eq!(find_export_keyword_start(source, 15), Some(0));
+    }
+
+    #[test]
+    fn find_export_keyword_with_jsdoc_above() {
+        // The JSDoc lives on prior lines; `export` is still the immediate
+        // predecessor of `function`. Decl_start lands on `f` of `function`.
+        let source = "/** doc */\nexport function f() {}\n";
+        let decl_start = source.find("function").unwrap();
+        assert_eq!(find_export_keyword_start(source, decl_start), Some(11));
+    }
+
+    #[test]
+    fn find_export_keyword_no_export() {
+        // Plain `function f()` — no preceding export keyword. Helper must
+        // return None so the caller falls back to the raw decl_start.
+        let source = "function f() {}\n";
+        assert_eq!(find_export_keyword_start(source, 0), None);
+    }
+
+    #[test]
+    fn find_export_keyword_unrelated_word_before() {
+        // A `report` token that ENDS with the bytes "ort" but doesn't start
+        // with `export` should not be matched. Decl_start lands after "report ".
+        let source = "let report = 1;\nfunction f() {}\n";
+        let decl_start = source.find("function").unwrap();
+        // Walking backwards we'd see " " then "report ;1 = troper " etc. No
+        // "export" token, so None.
+        assert_eq!(find_export_keyword_start(source, decl_start), None);
+    }
+
+    #[test]
+    fn find_export_keyword_does_not_match_substring() {
+        // `_export` (with leading underscore) is part of a different
+        // identifier; it must NOT match because the left word boundary
+        // check sees `_` before `e`.
+        let source = "let _export = 1;\nfunction f() {}\n";
+        let decl_start = source.find("function").unwrap();
+        assert_eq!(find_export_keyword_start(source, decl_start), None);
+    }
+
+    #[test]
+    fn find_export_keyword_at_zero_decl_start() {
+        // Edge case: caller passed 0 (decl is at start of file). No export
+        // can be before position 0. Return None.
+        assert_eq!(find_export_keyword_start("function f() {}", 0), None);
     }
 }
