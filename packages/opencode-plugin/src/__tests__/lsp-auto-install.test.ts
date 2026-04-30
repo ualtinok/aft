@@ -126,6 +126,7 @@ describe("runAutoInstall", () => {
     expect(tsSkipped).toBeUndefined();
     // Install should have started.
     expect(result.installsStarted).toBeGreaterThan(0);
+    expect(result.installingBinaries).toContain("typescript-language-server");
   });
 
   test("project-relevance: package.json root marker wins without walking", async () => {

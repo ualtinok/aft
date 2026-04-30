@@ -238,6 +238,7 @@ describe("runGithubAutoInstall", () => {
       },
       fakeFetch,
     );
+    expect(result.installingBinaries).toContain("clangd");
     await result.installsComplete;
     expect(result.installsStarted).toBe(0);
     const clangdSkip = result.skipped.find((s) => s.id === "clangd");

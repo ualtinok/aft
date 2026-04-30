@@ -286,6 +286,44 @@ fn configure_warns_for_custom_lsp_regardless_of_auto_install_set() {
 }
 
 #[test]
+fn configure_suppresses_missing_lsp_warning_for_inflight_install() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.ts"), "const x = 1;\n").unwrap();
+
+    let path = empty_path();
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-typescript-lsp-inflight",
+            "command": "configure",
+            "project_root": dir.path(),
+            "lsp_auto_install_binaries": ["typescript-language-server"],
+            "lsp_inflight_installs": ["typescript-language-server"]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should succeed: {configure:?}"
+    );
+    assert!(
+        warning_with_kind(
+            &configure,
+            "lsp_binary_missing",
+            "binary",
+            "typescript-language-server",
+        )
+        .is_none(),
+        "should not warn while TypeScript LSP install is in flight: {configure:?}"
+    );
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
 fn configure_accepts_custom_lsp_servers() {
     let dir = tempfile::tempdir().unwrap();
     let mut aft = AftProcess::spawn();

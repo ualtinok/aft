@@ -944,6 +944,8 @@ async function ensureGithubInstalled(
 export interface GithubAutoInstallResult {
   cachedBinDirs: string[];
   installsStarted: number;
+  /** Binary names whose installs are actively in flight at return time. */
+  installingBinaries: string[];
   skipped: Array<{ id: string; reason: string }>;
   /**
    * Promise that resolves when every backgrounded GitHub install settles.
@@ -996,6 +998,7 @@ export function runGithubAutoInstall(
   const cachedBinDirs: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
   const installPromises: Promise<void>[] = [];
+  const installingBinaries: string[] = [];
   let installsStarted = 0;
 
   const host = detectHostPlatform();
@@ -1014,6 +1017,7 @@ export function runGithubAutoInstall(
     return {
       cachedBinDirs,
       installsStarted: 0,
+      installingBinaries: [],
       skipped,
       installsComplete: Promise.resolve(),
     };
@@ -1040,6 +1044,7 @@ export function runGithubAutoInstall(
     }
 
     installsStarted += 1;
+    installingBinaries.push(spec.binary);
     const controller = new AbortController();
     const promise = ensureGithubInstalled(
       spec,
@@ -1067,6 +1072,7 @@ export function runGithubAutoInstall(
 
   return {
     cachedBinDirs,
+    installingBinaries,
     get installsStarted() {
       return installsStarted;
     },

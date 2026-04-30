@@ -743,6 +743,10 @@ fn detect_missing_lsp_binaries(files: &[PathBuf], config: &crate::config::Config
                 continue;
             }
 
+            if config.lsp_inflight_installs.contains(&server.binary) {
+                continue;
+            }
+
             if !resolved_binaries.contains(&server.binary) {
                 if resolve_lsp_binary(&server.binary, project_root, extra_paths).is_some() {
                     resolved_binaries.insert(server.binary.clone());
@@ -764,6 +768,10 @@ fn detect_missing_lsp_binaries(files: &[PathBuf], config: &crate::config::Config
 
     for server in &config.lsp_servers {
         if server.disabled || !seen.insert((server.id.clone(), server.binary.clone())) {
+            continue;
+        }
+
+        if config.lsp_inflight_installs.contains(&server.binary) {
             continue;
         }
 
@@ -930,6 +938,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             Err(error) => return Response::error(&req.id, "invalid_request", error),
         };
         ctx.config_mut().lsp_auto_install_binaries = binaries;
+    }
+    if let Some(v) = params.get("lsp_inflight_installs") {
+        let binaries = match parse_string_set(v, "lsp_inflight_installs") {
+            Ok(binaries) => binaries,
+            Err(error) => return Response::error(&req.id, "invalid_request", error),
+        };
+        ctx.config_mut().lsp_inflight_installs = binaries;
     }
     if let Some(v) = params
         .get("search_index_max_file_size")

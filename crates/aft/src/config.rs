@@ -147,6 +147,12 @@ pub struct Config {
     /// when their binary is in this set. User-configured `lsp_servers` keep
     /// warning unconditionally.
     pub lsp_auto_install_binaries: HashSet<String>,
+    /// Binary names with plugin-managed auto-installs currently in flight.
+    ///
+    /// Missing-binary warnings are suppressed while the install is actively
+    /// running; install failure reporting is handled by the plugin after the
+    /// background work settles.
+    pub lsp_inflight_installs: HashSet<String>,
     /// Persistent storage directory for indexes (trigram, semantic).
     /// Set by the plugin to the XDG-compliant path (e.g. ~/.local/share/opencode/storage/plugin/aft/).
     /// Falls back to ~/.cache/aft/ if not set.
@@ -193,6 +199,7 @@ impl Default for Config {
             disabled_lsp: HashSet::new(),
             lsp_paths_extra: Vec::new(),
             lsp_auto_install_binaries: HashSet::new(),
+            lsp_inflight_installs: HashSet::new(),
             storage_dir: None,
             diagnostic_cache_size: 5000,
         }

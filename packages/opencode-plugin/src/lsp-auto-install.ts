@@ -66,6 +66,8 @@ export interface AutoInstallResult {
   cachedBinDirs: string[];
   /** Number of background installs kicked off. */
   installsStarted: number;
+  /** Binary names whose installs are actively in flight at return time. */
+  installingBinaries: string[];
   /**
    * Servers that were disabled or skipped at decision time (synchronous).
    *
@@ -471,6 +473,7 @@ export function runAutoInstall(
   const cachedBinDirs: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
   const installPromises: Promise<void>[] = [];
+  const installingBinaries: string[] = [];
   let installsStarted = 0;
   let projectExtensions: Set<string> | null = null;
   const getProjectExtensions = () => {
@@ -510,6 +513,7 @@ export function runAutoInstall(
     //
     // Tests await `installsComplete` to assert outcomes.
     installsStarted += 1;
+    installingBinaries.push(spec.binary);
     const controller = new AbortController();
     const promise = ensureServerInstalled(spec, config, fetchImpl, controller.signal).then(
       (outcome) => {
@@ -530,6 +534,7 @@ export function runAutoInstall(
 
   return {
     cachedBinDirs,
+    installingBinaries,
     get installsStarted() {
       return installsStarted;
     },

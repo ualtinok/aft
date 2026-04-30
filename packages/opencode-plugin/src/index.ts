@@ -278,6 +278,12 @@ const plugin: Plugin = async (input) => {
     if (mergedBinDirs.length > 0) {
       configOverrides.lsp_paths_extra = mergedBinDirs;
     }
+    const lspInflightInstalls = [
+      ...new Set([...npmResult.installingBinaries, ...ghResult.installingBinaries]),
+    ];
+    if (lspInflightInstalls.length > 0) {
+      configOverrides.lsp_inflight_installs = lspInflightInstalls;
+    }
     if (npmResult.installsStarted > 0 || ghResult.installsStarted > 0) {
       log(
         `[lsp] auto-install: ${npmResult.installsStarted} npm + ${ghResult.installsStarted} github install(s) running in background`,
