@@ -133,4 +133,68 @@ describe("deliverConfigureWarnings", () => {
 
     expect(messages).toHaveLength(2);
   });
+
+  test("lsp_binary_missing warnings dedup across project roots", async () => {
+    const storageDir = createStorageDir();
+    const { client, messages } = createClient();
+    const warning = baseWarning({
+      kind: "lsp_binary_missing",
+      language: undefined,
+      tool: undefined,
+      server: "typescript-language-server",
+      binary: "typescript-language-server",
+      hint: "Install `typescript-language-server`.",
+    });
+
+    await deliverConfigureWarnings(
+      {
+        client,
+        sessionId: "session-1",
+        storageDir,
+        pluginVersion: "1.0.0",
+        projectRoot: "/repo-a",
+      },
+      [warning],
+    );
+    await deliverConfigureWarnings(
+      {
+        client,
+        sessionId: "session-1",
+        storageDir,
+        pluginVersion: "1.0.0",
+        projectRoot: "/repo-b",
+      },
+      [warning],
+    );
+
+    expect(messages).toHaveLength(1);
+  });
+
+  test("formatter warnings remain project-scoped", async () => {
+    const storageDir = createStorageDir();
+    const { client, messages } = createClient();
+
+    await deliverConfigureWarnings(
+      {
+        client,
+        sessionId: "session-1",
+        storageDir,
+        pluginVersion: "1.0.0",
+        projectRoot: "/repo-a",
+      },
+      [baseWarning()],
+    );
+    await deliverConfigureWarnings(
+      {
+        client,
+        sessionId: "session-1",
+        storageDir,
+        pluginVersion: "1.0.0",
+        projectRoot: "/repo-b",
+      },
+      [baseWarning()],
+    );
+
+    expect(messages).toHaveLength(2);
+  });
 });

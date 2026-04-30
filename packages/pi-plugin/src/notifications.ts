@@ -76,8 +76,9 @@ function writeWarnedTools(storageDir: string, warned: Record<string, string>): v
 }
 
 function warningKey(warning: ConfigureWarning, projectRoot?: string): string {
+  const scope = warning.kind === "lsp_binary_missing" ? "_" : (projectRoot ?? "_");
   return [
-    projectRoot ?? "_",
+    scope,
     warning.kind,
     warning.language ?? warning.server ?? "_",
     warning.tool ?? warning.binary ?? "_",
