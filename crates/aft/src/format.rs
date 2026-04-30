@@ -954,14 +954,52 @@ fn has_pyproject_tool(project_root: Option<&Path>, tool_name: &str) -> bool {
     }
 }
 
+/// Detect whether a non-zero formatter exit was caused by the formatter
+/// intentionally excluding the path (per its own config) rather than an
+/// actual formatter or input error.
+///
+/// The patterns below come from real stderr output observed during
+/// dogfooding. They're intentionally substring-based and case-insensitive
+/// so minor formatter version differences in wording don't bypass the
+/// check. Each pattern corresponds to a specific formatter's exclusion
+/// signal:
+/// - biome: `"No files were processed in the specified paths."`,
+///   `"ignored by the configuration"`
+/// - prettier: `"No files matching the pattern were found"`
+/// - ruff: `"No Python files found under the given path(s)"`
+///
+/// rustfmt and gofmt/goimports rarely scope-restrict and have no known
+/// stable marker, so they're not detected here. They'll fall through to
+/// the generic `"error"` reason — acceptable because they almost never
+/// emit a path-exclusion exit in practice.
+fn formatter_excluded_path(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("no files were processed")
+        || s.contains("ignored by the configuration")
+        || s.contains("no files matching the pattern")
+        || s.contains("no python files found")
+}
+
 /// Auto-format a file using the detected formatter for its language.
 ///
 /// Returns `(formatted, skip_reason)`:
 /// - `(true, None)` — file was successfully formatted
 /// - `(false, Some(reason))` — formatting was skipped, reason explains why
 ///
-/// Skip reasons: `"unsupported_language"`, `"no_formatter_configured"`,
-/// `"formatter_not_installed"`, `"timeout"`, `"error"`
+/// Skip reasons:
+/// - `"unsupported_language"` — language has no formatter support in AFT
+/// - `"no_formatter_configured"` — `format_on_edit=false` or no formatter
+///   detected for the language in the project
+/// - `"formatter_not_installed"` — configured formatter binary missing on
+///   PATH and not in project's `node_modules/.bin`
+/// - `"formatter_excluded_path"` — formatter ran but refused to process this
+///   path because the project formatter config (e.g. biome.json `files.includes`,
+///   prettier `.prettierignore`) excludes it. NOT an error in AFT or the user's
+///   formatter — the user told the formatter not to touch this path. Agents
+///   should treat this as informational.
+/// - `"timeout"` — formatter exceeded `formatter_timeout_secs`
+/// - `"error"` — formatter exited non-zero with an unrecognized error
+///   (likely a real bug in the user's input or the formatter itself)
 pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
     // Check if formatting is disabled via plugin config
     if !config.format_on_edit {
@@ -1032,10 +1070,29 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
             (false, Some("formatter_not_installed".to_string()))
         }
         Err(FormatError::Failed { stderr, .. }) => {
-            log::debug!(
-                "[aft] format: {} (skipped: error: {})",
+            // Distinguish "formatter intentionally ignored this path" from
+            // "formatter actually errored". Many formatters scope themselves
+            // to a project subtree (biome.json `files.includes`, prettier
+            // `.prettierignore`, ruff `[tool.ruff]` config) and exit non-zero
+            // when invoked on a path outside that scope. From AFT's perspective
+            // that's not an error — the user told the formatter not to touch
+            // this path. But the previous code returned a generic `"error"`
+            // skip reason and logged at `debug` (silent under default
+            // RUST_LOG=info), so the agent had no signal that the file
+            // landed unformatted. Detect the common stderr fingerprints and
+            // return a distinct, surfaced skip reason.
+            if formatter_excluded_path(&stderr) {
+                log::info!(
+                    "format: {} (skipped: formatter_excluded_path; stderr: {})",
+                    path.display(),
+                    stderr.lines().next().unwrap_or("").trim()
+                );
+                return (false, Some("formatter_excluded_path".to_string()));
+            }
+            log::warn!(
+                "format: {} (skipped: error: {})",
                 path.display(),
-                stderr.lines().next().unwrap_or("unknown")
+                stderr.lines().next().unwrap_or("unknown").trim()
             );
             (false, Some("error".to_string()))
         }
@@ -1730,6 +1787,58 @@ mod tests {
             !content.contains("fn    main"),
             "expected rustfmt to fix spacing"
         );
+    }
+
+    #[test]
+    fn formatter_excluded_path_detects_biome_messages() {
+        // Real biome 1.x output when invoked on a path outside files.includes.
+        let stderr = "format ━━━━━━━━━━━━━━━━━\n\n  × No files were processed in the specified paths.\n\n  i Check your biome.json or biome.jsonc to ensure the paths are not ignored by the configuration.\n";
+        assert!(
+            formatter_excluded_path(stderr),
+            "expected biome exclusion stderr to be detected"
+        );
+    }
+
+    #[test]
+    fn formatter_excluded_path_detects_prettier_messages() {
+        // Real prettier output when given a glob/path that resolves to nothing
+        // it's allowed to format (after .prettierignore filtering).
+        let stderr = "[error] No files matching the pattern were found: \"src/scratch.ts\".\n";
+        assert!(
+            formatter_excluded_path(stderr),
+            "expected prettier exclusion stderr to be detected"
+        );
+    }
+
+    #[test]
+    fn formatter_excluded_path_detects_ruff_messages() {
+        // Real ruff output when invoked outside its [tool.ruff] scope.
+        let stderr = "warning: No Python files found under the given path(s).\n";
+        assert!(
+            formatter_excluded_path(stderr),
+            "expected ruff exclusion stderr to be detected"
+        );
+    }
+
+    #[test]
+    fn formatter_excluded_path_is_case_insensitive() {
+        assert!(formatter_excluded_path("NO FILES WERE PROCESSED"));
+        assert!(formatter_excluded_path("Ignored By The Configuration"));
+    }
+
+    #[test]
+    fn formatter_excluded_path_rejects_real_errors() {
+        // Counter-cases: actual formatter errors must NOT be treated as
+        // exclusion. This guards against the detection being too greedy.
+        assert!(!formatter_excluded_path(""));
+        assert!(!formatter_excluded_path("syntax error: unexpected token"));
+        assert!(!formatter_excluded_path("formatter crashed: out of memory"));
+        assert!(!formatter_excluded_path(
+            "permission denied: /readonly/file"
+        ));
+        assert!(!formatter_excluded_path(
+            "biome internal error: please report"
+        ));
     }
 
     #[test]

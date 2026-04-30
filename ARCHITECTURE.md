@@ -143,7 +143,7 @@
     - `no_files_matched_scope: bool` (search tools) — distinguishes "the path/glob you gave me resolved to zero files" from "I searched N files and found nothing"
 
 3. **Side-effect skip codes** — when the main work succeeded but a non-essential side step was skipped (e.g. post-write formatting), use a `<step>_skipped_reason` field so the agent gets specific feedback without treating the whole call as a failure. Approved values:
-    - `format_skipped_reason`: `"unsupported_language"` | `"no_formatter_configured"` | `"formatter_not_installed"` | `"timeout"` | `"error"`
+    - `format_skipped_reason`: `"unsupported_language"` | `"no_formatter_configured"` | `"formatter_not_installed"` | `"formatter_excluded_path"` | `"timeout"` | `"error"`
     - `validate_skipped_reason`: `"unsupported_language"` | `"no_checker_configured"` | `"checker_not_installed"` | `"timeout"` | `"error"`
 
 **Anti-patterns this convention exists to prevent:**
