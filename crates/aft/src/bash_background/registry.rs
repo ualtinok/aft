@@ -16,6 +16,7 @@ use super::persistence::{
     create_capture_file, read_exit_marker, read_task, session_tasks_dir, task_paths, unix_millis,
     update_task, write_kill_marker_if_absent, write_task, ExitMarker, PersistedTask, TaskPaths,
 };
+#[cfg(unix)]
 use super::process::terminate_pgid;
 use super::{BgTaskInfo, BgTaskStatus};
 
@@ -444,6 +445,7 @@ impl BgTaskRegistry {
             write_task(&task.paths.json, &state.metadata)
                 .map_err(|e| format!("failed to persist killing state: {e}"))?;
 
+            #[cfg(unix)]
             if let Some(pgid) = state.metadata.pgid {
                 terminate_pgid(pgid, state.child.as_mut());
             }
