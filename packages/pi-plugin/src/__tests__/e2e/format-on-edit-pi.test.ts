@@ -166,7 +166,12 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
     const result = await h.callTool("write", { filePath: "src/write.ts", content: TS_INPUT });
 
     expect(await readFile(h.path("src/write.ts"), "utf8")).toContain("export function foo");
-    expect(detailsOf(result).formatted).toBeUndefined();
+    // Pi wrapper now surfaces the formatter outcome through details.formatted
+    // (fixed in v0.18.3). Successful formatting reports formatted=true with no
+    // skip reason. Worker's original assertion expected `undefined` because
+    // the wrapper used to drop these fields entirely.
+    expect(detailsOf(result).formatted).toBe(true);
+    expect(detailsOf(result).formatSkippedReason).toBeUndefined();
     expect(h.text(result)).not.toContain("Auto-formatted.");
   });
 
@@ -181,7 +186,8 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
     });
 
     expect(await readFile(h.path("src/edit.ts"), "utf8")).toContain("export function foo");
-    expect(detailsOf(result).formatted).toBeUndefined();
+    expect(detailsOf(result).formatted).toBe(true);
+    expect(detailsOf(result).formatSkippedReason).toBeUndefined();
   });
 
   test("Pi formatter_excluded_path propagates through raw Rust response", async () => {
@@ -258,7 +264,7 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
     );
   });
 
-  test("Pi response shape parity: Rust has fields, Pi wrapper details currently omit them", async () => {
+  test("Pi response shape parity: Rust formatted/format_skipped_reason flow through to wrapper details", async () => {
     const h = await formatHarness(NO_FORMATTER_PRESET);
     const raw = await h.bridge.send("write", {
       file: h.path("src/raw.ts"),
@@ -270,8 +276,35 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
 
     expect(raw.formatted).toBe(false);
     expect(raw.format_skipped_reason).toBe("no_formatter_configured");
-    expect(wrappedDetails.formatted).toBeUndefined();
-    expect(wrappedDetails.format_skipped_reason).toBeUndefined();
+    // Pi wrapper now exposes the same fields (in camelCase to match Pi
+    // conventions). Fixed in v0.18.3 — see packages/pi-plugin/src/tools/
+    // hoisted.ts::buildMutationResult.
+    expect(wrappedDetails.formatted).toBe(false);
+    expect(wrappedDetails.formatSkippedReason).toBe("no_formatter_configured");
+    // Benign skip reasons stay silent in agent text — agent has no actionable
+    // remediation when the language has no configured formatter.
     expect(h.text(wrapped)).not.toContain("Auto-formatted.");
+    expect(h.text(wrapped)).not.toContain("Note: formatter");
+  });
+
+  test("Pi response shape parity: actionable skip reasons surface a one-line note in agent text", async () => {
+    // formatter_not_installed (non-benign) verifies the note path. Configure
+    // explicit formatter=prettier with NO prettier on the harness's PATH /
+    // node_modules. Rust recognizes the explicit name (so it doesn't fall
+    // back to no_formatter_configured) and returns formatter_not_installed
+    // when spawn fails. "prettier" works for this because the test fixture
+    // has no node_modules/.bin/prettier and the harness shouldn't have one
+    // on PATH either; if a future test environment installs prettier, this
+    // test should be updated to use a different recognized-but-uninstalled
+    // formatter name.
+    const h = await formatHarness(formatterPreset("prettier"));
+    const wrapped = await h.callTool("write", {
+      filePath: "src/with-note.ts",
+      content: TS_INPUT,
+    });
+    const wrappedDetails = detailsOf(wrapped);
+    expect(wrappedDetails.formatted).toBe(false);
+    expect(wrappedDetails.formatSkippedReason).toBe("formatter_not_installed");
+    expect(h.text(wrapped)).toContain("formatter binary not installed");
   });
 });

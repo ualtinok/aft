@@ -109,6 +109,22 @@ interface FileMutationDetails {
    * surface this explicitly rather than silently showing a summary.
    */
   truncated?: boolean;
+  /**
+   * Whether AFT's auto-formatter ran on the post-write content. Mirrors the
+   * `data.formatted` field from the Rust write/edit response. When true,
+   * the file content on disk is what the formatter produced; when false,
+   * `formatSkippedReason` explains why.
+   */
+  formatted?: boolean;
+  /**
+   * Reason the formatter was skipped, when `formatted=false`. One of the
+   * documented values from `crates/aft/src/format.rs::auto_format`:
+   * `"unsupported_language"`, `"no_formatter_configured"`,
+   * `"formatter_not_installed"`, `"formatter_excluded_path"`, `"timeout"`,
+   * `"error"`. Pi agents read this to decide whether to retry, fix config,
+   * or accept the unformatted result.
+   */
+  formatSkippedReason?: string;
 }
 
 export function registerHoistedTools(
@@ -323,6 +339,13 @@ export function buildMutationResult(
   const replacements = response.replacements as number | undefined;
   const diagnostics = response.lsp_diagnostics as unknown[] | undefined;
   const truncated = diffObj?.truncated === true;
+  // Format outcome — Rust writes return `formatted: bool` and, when
+  // skipped, `format_skipped_reason: "<reason>"`. Forward both into
+  // `details` so Pi agents can act on them (retry with different config,
+  // accept the unformatted result, etc). The OpenCode plugin surfaces
+  // these the same way; this is the Pi parity fix.
+  const formatted = response.formatted as boolean | undefined;
+  const formatSkippedReason = response.format_skipped_reason as string | undefined;
 
   // Generate the Pi-style line-numbered diff when Rust gave us before/after
   // and the diff wasn't truncated. Truncated diffs carry `additions`/`deletions`
@@ -337,13 +360,13 @@ export function buildMutationResult(
     typeof diffObj.before === "string" &&
     typeof diffObj.after === "string"
   ) {
-    const formatted = formatDiffForPi(diffObj.before, diffObj.after);
-    diffText = formatted.diff;
-    firstChangedLine = formatted.firstChangedLine;
+    const piDiff = formatDiffForPi(diffObj.before, diffObj.after);
+    diffText = piDiff.diff;
+    firstChangedLine = piDiff.firstChangedLine;
   }
 
   // Agent-facing text: summary header + diff (if present) + truncation
-  // notice + diagnostics.
+  // notice + format-skip notice (non-benign reasons only) + diagnostics.
   const summaryHeader =
     replacements !== undefined
       ? `Edited ${filePath} (+${additions}/-${deletions}, ${replacements} replacement${replacements === 1 ? "" : "s"})`
@@ -353,6 +376,14 @@ export function buildMutationResult(
   if (truncated) {
     text += "\n\n(diff truncated \u2014 file too large to include before/after content)";
   }
+  // Surface non-benign format-skip reasons in agent-facing text. Benign
+  // reasons (no formatter configured for the language, language unsupported)
+  // are silent because the agent can't act on them. The actionable reasons
+  // — formatter binary missing, formatter timed out, formatter crashed,
+  // formatter excluded the path via project config — get a one-line note
+  // pointing at the right remediation.
+  const skipNote = formatSkipReasonNote(formatSkippedReason);
+  if (skipNote) text += `\n\n${skipNote}`;
   if (diagnostics && diagnostics.length > 0) {
     text += `\n\nLSP diagnostics:\n${formatDiagnosticsText(diagnostics)}`;
   }
@@ -367,8 +398,31 @@ export function buildMutationResult(
       replacements,
       diagnostics,
       truncated: truncated || undefined,
+      formatted,
+      formatSkippedReason,
     },
   };
+}
+
+/**
+ * Build a one-line agent-facing note for a non-benign format skip reason.
+ * Returns undefined for benign reasons (no message worth surfacing) so the
+ * caller can skip emitting a section header.
+ */
+function formatSkipReasonNote(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case "formatter_not_installed":
+      return "Note: formatter binary not installed; file written unformatted.";
+    case "timeout":
+      return "Note: formatter timed out; file written unformatted. Raise formatter_timeout_secs or check the formatter for hangs.";
+    case "formatter_excluded_path":
+      return "Note: formatter is configured to ignore this path (e.g. biome.json files.includes, .prettierignore). File written unformatted.";
+    case "error":
+      return "Note: formatter exited with an unrecognized error; file written unformatted.";
+    default:
+      // unsupported_language, no_formatter_configured, undefined → silent
+      return undefined;
+  }
 }
 
 function formatDiagnosticsText(diagnostics: unknown[]): string {
