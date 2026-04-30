@@ -203,10 +203,37 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     // --- Success ---
+    //
+    // Send the batched `workspace/didChangeWatchedFiles` notification exactly
+    // once for the transaction. `lsp_post_write` reads `multi_file_write_paths`
+    // from params on EVERY call; if we passed `lsp_params` (which carries the
+    // full path list) into all N per-file invocations, every server would
+    // receive N identical batched notifications instead of 1. That broke the
+    // `transaction_success_batches_config_file_watched_notifications` test
+    // intermittently under parallel load: the test's first `drain_events`
+    // returned one notification, then the trailing duplicates landed in the
+    // `is_none()` window 250 ms later and failed the assertion.
+    //
+    // Strategy: stripped_params has `multi_file_write_paths` removed. The
+    // first per-file call still gets the full lsp_params (so the batched
+    // notification fires once), and every subsequent call uses
+    // stripped_params (so they only fire per-document didChange — no extra
+    // batched notifications).
+    let mut stripped_params = lsp_params.clone();
+    if let Some(obj) = stripped_params.as_object_mut() {
+        obj.remove("multi_file_write_paths");
+    }
+
     let mut lsp_outcomes: Vec<PostEditWaitOutcome> = Vec::new();
-    for result in &results {
+    for (idx, result) in results.iter().enumerate() {
         if let Ok(final_content) = std::fs::read_to_string(&result.file) {
-            if let Some(lsp_outcome) = ctx.lsp_post_write(&result.file, &final_content, &lsp_params)
+            let params_for_call = if idx == 0 {
+                &lsp_params
+            } else {
+                &stripped_params
+            };
+            if let Some(lsp_outcome) =
+                ctx.lsp_post_write(&result.file, &final_content, params_for_call)
             {
                 lsp_outcomes.push(lsp_outcome);
             }
