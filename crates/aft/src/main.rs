@@ -325,16 +325,16 @@ fn drain_watcher_events(ctx: &AppContext) {
                 }
                 for path in event.paths {
                     // Skip internal directories that generate frequent non-source events.
-                    let path_str = path.to_string_lossy();
-                    if path_str.contains("/.git/")
-                        || path_str.contains("\\.git\\")
-                        || path_str.contains("/.opencode/")
-                        || path_str.contains("\\.opencode\\")
-                        || path_str.contains("/node_modules/")
-                        || path_str.contains("\\node_modules\\")
-                        || path_str.contains("/target/")
-                        || path_str.contains("\\target\\")
-                    {
+                    // Use path components for exact name matching so `.gitproject/` is
+                    // not filtered by the `.git` rule.
+                    use std::path::Component;
+                    let skip = path.components().any(|c| {
+                        matches!(c, Component::Normal(name) if matches!(
+                            name.to_str().unwrap_or(""),
+                            ".git" | "node_modules" | "target" | ".opencode"
+                        ))
+                    });
+                    if skip {
                         continue;
                     }
                     paths.insert(path);
