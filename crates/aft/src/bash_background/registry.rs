@@ -75,6 +75,7 @@ pub struct BgTaskSnapshot {
     pub output_preview: String,
     pub output_truncated: bool,
     pub output_path: Option<String>,
+    pub stderr_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -754,6 +755,7 @@ impl BgTask {
                 .buffer
                 .output_path()
                 .map(|path| path.display().to_string()),
+            stderr_path: Some(state.buffer.stderr_path().display().to_string()),
         }
     }
 

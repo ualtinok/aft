@@ -80,9 +80,12 @@ impl BgBuffer {
         }
     }
 
+    /// Path to the stdout spill file (alias of `stdout_path` for backward compat).
     pub fn output_path(&self) -> Option<PathBuf> {
         Some(self.stdout_path.clone())
     }
+
+    // stderr_path() already exists above returning &Path — no duplicate needed.
 
     pub fn enforce_terminal_cap(&mut self) {
         if truncate_front(&self.stdout_path, DISK_LIMIT_BYTES).unwrap_or(false) {
