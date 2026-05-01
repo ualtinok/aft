@@ -1,6 +1,7 @@
 use crate::config::{SemanticBackend, SemanticBackendConfig};
 use crate::parser::{detect_language, extract_symbols_from_tree, grammar_for};
 use crate::symbols::{Symbol, SymbolKind};
+use crate::{slog_info, slog_warn};
 
 use fastembed::{EmbeddingModel as FastembedEmbeddingModel, InitOptions, TextEmbedding};
 use rayon::prelude::*;
@@ -1025,29 +1026,29 @@ impl SemanticIndex {
         // Don't persist empty indexes — they would be loaded on next startup
         // and prevent a fresh build that might find files.
         if self.entries.is_empty() {
-            log::info!("[aft] skipping semantic index persistence (0 entries)");
+            slog_info!("skipping semantic index persistence (0 entries)");
             return;
         }
         let dir = storage_dir.join("semantic").join(project_key);
         if let Err(e) = fs::create_dir_all(&dir) {
-            log::warn!("[aft] failed to create semantic cache dir: {}", e);
+            slog_warn!("failed to create semantic cache dir: {}", e);
             return;
         }
         let data_path = dir.join("semantic.bin");
         let tmp_path = dir.join("semantic.bin.tmp");
         let bytes = self.to_bytes();
         if let Err(e) = fs::write(&tmp_path, &bytes) {
-            log::warn!("[aft] failed to write semantic index: {}", e);
+            slog_warn!("failed to write semantic index: {}", e);
             let _ = fs::remove_file(&tmp_path);
             return;
         }
         if let Err(e) = fs::rename(&tmp_path, &data_path) {
-            log::warn!("[aft] failed to rename semantic index: {}", e);
+            slog_warn!("failed to rename semantic index: {}", e);
             let _ = fs::remove_file(&tmp_path);
             return;
         }
-        log::info!(
-            "[aft] semantic index persisted: {} entries, {:.1} KB",
+        slog_info!(
+            "semantic index persisted: {} entries, {:.1} KB",
             self.entries.len(),
             bytes.len() as f64 / 1024.0
         );
@@ -1065,8 +1066,8 @@ impl SemanticIndex {
             .join("semantic.bin");
         let file_len = usize::try_from(fs::metadata(&data_path).ok()?.len()).ok()?;
         if file_len < HEADER_BYTES_V1 {
-            log::warn!(
-                "[aft] corrupt semantic index (too small: {} bytes), removing",
+            slog_warn!(
+                "corrupt semantic index (too small: {} bytes), removing",
                 file_len
             );
             let _ = fs::remove_file(&data_path);
@@ -1076,8 +1077,8 @@ impl SemanticIndex {
         let bytes = fs::read(&data_path).ok()?;
         let version = bytes[0];
         if version != SEMANTIC_INDEX_VERSION_V4 {
-            log::info!(
-                "[aft] cached semantic index version {} is older than {}, rebuilding",
+            slog_info!(
+                "cached semantic index version {} is older than {}, rebuilding",
                 version,
                 SEMANTIC_INDEX_VERSION_V4
             );
@@ -1087,7 +1088,7 @@ impl SemanticIndex {
         match Self::from_bytes(&bytes) {
             Ok(index) => {
                 if index.entries.is_empty() {
-                    log::info!("[aft] cached semantic index is empty, will rebuild");
+                    slog_info!("cached semantic index is empty, will rebuild");
                     let _ = fs::remove_file(&data_path);
                     return None;
                 }
@@ -1097,19 +1098,19 @@ impl SemanticIndex {
                         .map(|fingerprint| fingerprint.matches_expected(expected))
                         .unwrap_or(false);
                     if !matches {
-                        log::info!("[aft] cached semantic index fingerprint mismatch, rebuilding");
+                        slog_info!("cached semantic index fingerprint mismatch, rebuilding");
                         let _ = fs::remove_file(&data_path);
                         return None;
                     }
                 }
-                log::info!(
-                    "[aft] loaded semantic index from disk: {} entries",
+                slog_info!(
+                    "loaded semantic index from disk: {} entries",
                     index.entries.len()
                 );
                 Some(index)
             }
             Err(e) => {
-                log::warn!("[aft] corrupt semantic index, rebuilding: {}", e);
+                slog_warn!("corrupt semantic index, rebuilding: {}", e);
                 let _ = fs::remove_file(&data_path);
                 None
             }

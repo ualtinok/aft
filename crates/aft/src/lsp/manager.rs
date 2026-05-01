@@ -19,6 +19,7 @@ use crate::lsp::document::DocumentStore;
 use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerDef, ServerKind};
 use crate::lsp::roots::{find_workspace_root, ServerKey};
 use crate::lsp::LspError;
+use crate::slog_error;
 
 /// Outcome of attempting to ensure a server is running for a single matching
 /// `ServerDef`. Returned per matching server so the caller can report exactly
@@ -246,7 +247,7 @@ impl LspManager {
                         self.documents.entry(key.clone()).or_default();
                     }
                     Err(err) => {
-                        log::error!("failed to spawn {}: {}", def.name, err);
+                        slog_error!("failed to spawn {}: {}", def.name, err);
                         let result = classify_spawn_error(&def.binary, &err);
                         outcomes.attempts.push(ServerAttempt {
                             server_id,
@@ -1091,7 +1092,7 @@ impl LspManager {
     pub fn shutdown_all(&mut self) {
         for (key, mut client) in self.clients.drain() {
             if let Err(err) = client.shutdown() {
-                log::error!("error shutting down {:?}: {}", key, err);
+                slog_error!("error shutting down {:?}: {}", key, err);
             }
         }
         self.documents.clear();

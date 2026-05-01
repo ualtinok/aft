@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::callgraph::CallGraph;
 use crate::config::{SemanticBackend, SemanticBackendConfig, UserServerDef};
 use crate::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
+use crate::log_ctx;
 use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerKind};
 use crate::parser::{detect_language, LangId};
 use crate::protocol::{RawRequest, Response};
@@ -18,6 +19,7 @@ use crate::search_index::{
     build_path_filters, current_git_head, resolve_cache_dir, walk_project_files, SearchIndex,
 };
 use crate::semantic_index::SemanticIndex;
+use crate::{slog_info, slog_warn};
 
 fn normalize_absolute_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -881,7 +883,10 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     // typo, and we don't want a stuck formatter to hold the bridge for
     // an hour. Zero is rejected because Command::wait_with_timeout(0)
     // races on most platforms.
-    if let Some(v) = params.get("formatter_timeout_secs").and_then(|v| v.as_u64()) {
+    if let Some(v) = params
+        .get("formatter_timeout_secs")
+        .and_then(|v| v.as_u64())
+    {
         if v == 0 || v > 600 {
             return Response::error(
                 &req.id,
@@ -1047,8 +1052,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     let source_file_count = source_files.len();
     let exceeds = source_file_count > ctx.config().max_callgraph_files;
     if exceeds {
-        log::warn!(
-            "[aft] project has >{} source files (max_callgraph_files={}). Call-graph operations (callers, trace_to, trace_data, impact) will be disabled. Open a specific subdirectory for call-graph features.",
+        slog_warn!(
+            "project has >{} source files (max_callgraph_files={}). Call-graph operations (callers, trace_to, trace_data, impact) will be disabled. Open a specific subdirectory for call-graph features.",
             ctx.config().max_callgraph_files,
             ctx.config().max_callgraph_files
         );
@@ -1070,13 +1075,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     // If reconfigure rate becomes a real problem, switch to a single
     // generation-counter + cancellation-token pattern.
     if search_build_in_progress {
-        log::warn!(
-            "[aft] configure called while search index build is still in progress; previous build will continue detached"
+        slog_warn!(
+            "configure called while search index build is still in progress; previous build will continue detached"
         );
     }
     if semantic_build_in_progress {
-        log::warn!(
-            "[aft] configure called while semantic index build is still in progress; previous build will continue detached"
+        slog_warn!(
+            "configure called while semantic index build is still in progress; previous build will continue detached"
         );
     }
 
@@ -1110,7 +1115,9 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         *ctx.search_index_rx().borrow_mut() = Some(rx);
 
         let root_clone = root_path.clone();
+        let session_id_for_bg = log_ctx::current_session();
         thread::spawn(move || {
+            log_ctx::set_session(session_id_for_bg);
             let index = SearchIndex::rebuild_or_refresh(
                 &root_clone,
                 search_index_max_file_size,
@@ -1129,10 +1136,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                     }
                 }
             }
-            log::info!(
-                "[aft] pre-warmed symbol cache: {} files",
-                symbol_cache.len()
-            );
+            slog_info!("pre-warmed symbol cache: {} files", symbol_cache.len());
 
             let _ = tx.send((index, symbol_cache));
         });
@@ -1156,7 +1160,9 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let semantic_project_key = crate::search_index::project_cache_key(&root_path);
         let semantic_config = semantic_config.clone();
         let tx_progress = tx.clone();
+        let session_id_for_bg2 = log_ctx::current_session();
         thread::spawn(move || {
+            log_ctx::set_session(session_id_for_bg2);
             let build_result =
                 catch_unwind(AssertUnwindSafe(|| -> Result<SemanticIndex, String> {
                     let _ = tx_progress.send(SemanticIndexEvent::Progress {
@@ -1187,10 +1193,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                                 return Ok(cached);
                             }
 
-                            log::info!(
-                                "[aft] semantic index: {} stale files, rebuilding",
-                                stale_count
-                            );
+                            slog_info!("semantic index: {} stale files, rebuilding", stale_count);
                         }
                     }
 
@@ -1208,8 +1211,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                     // on constrained systems when indexing tens of thousands of files.
                     const MAX_SEMANTIC_FILES: usize = 10_000;
                     if files.len() > MAX_SEMANTIC_FILES {
-                        log::warn!(
-                            "[aft] skipping semantic index: {} files exceeds limit of {}. \
+                        slog_warn!(
+                            "skipping semantic index: {} files exceeds limit of {}. \
                              Open a specific project directory instead of a large root.",
                             files.len(),
                             MAX_SEMANTIC_FILES
@@ -1246,8 +1249,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                     )?;
                     let mut index = index;
                     index.set_fingerprint(fingerprint);
-                    log::info!(
-                        "[aft] built semantic index: {} files, {} entries",
+                    slog_info!(
+                        "built semantic index: {} files, {} entries",
                         files.len(),
                         index.len()
                     );
@@ -1268,12 +1271,12 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             let event = match build_result {
                 Ok(Ok(index)) => SemanticIndexEvent::Ready(index),
                 Ok(Err(error)) => {
-                    log::warn!("[aft] failed to build semantic index: {}", error);
+                    slog_warn!("failed to build semantic index: {}", error);
                     SemanticIndexEvent::Failed(error)
                 }
                 Err(_) => {
                     let error = "semantic index build panicked".to_string();
-                    log::warn!("[aft] {}", error);
+                    slog_warn!("{}", error);
                     SemanticIndexEvent::Failed(error)
                 }
             };
@@ -1291,7 +1294,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             .bash_background()
             .replay_session(&bg_storage_dir, req.session())
         {
-            log::warn!("[aft] failed to replay background bash tasks: {error}");
+            slog_warn!("failed to replay background bash tasks: {error}");
         }
     }
 
@@ -1309,7 +1312,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                     e
                 );
             } else {
-                log::info!("watcher started: {}", root_path.display());
+                slog_info!("watcher started: {}", root_path.display());
             }
             *ctx.watcher().borrow_mut() = Some(w);
             *ctx.watcher_rx().borrow_mut() = Some(rx);
@@ -1322,7 +1325,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    log::info!("project root set: {}", root_path.display());
+    slog_info!("project root set: {}", root_path.display());
 
     let config_snapshot = ctx.config().clone();
     let mut warnings = detect_missing_tools_for_languages(&detected_languages, &config_snapshot)

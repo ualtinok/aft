@@ -3,6 +3,7 @@ use std::io::{self, BufRead, BufWriter, Write};
 
 use aft::config::Config;
 use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
+use aft::log_ctx;
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, PushFrame, RawRequest, Response};
@@ -66,7 +67,9 @@ fn main() {
                 drain_lsp_events(&ctx);
                 let session_id = req.session().to_string();
                 let command = req.command.clone();
-                let mut response = dispatch(req, &ctx);
+                let session_id_for_log = req.session_id.clone();
+                let mut response =
+                    log_ctx::with_session(session_id_for_log, || dispatch(req, &ctx));
                 attach_bg_completions(&mut response, &ctx, &session_id, &command);
                 response
             }

@@ -63,6 +63,7 @@ pub mod fuzzy_match;
 pub mod imports;
 pub mod indent;
 pub mod language;
+pub mod log_ctx;
 pub mod lsp;
 pub mod lsp_hints;
 pub mod parser;

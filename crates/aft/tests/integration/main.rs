@@ -26,6 +26,7 @@ mod grep_glob_test;
 mod honest_failures_test;
 mod import_test;
 mod inline_symbol_test;
+mod log_ctx_test;
 mod lsp_commands_test;
 mod lsp_diagnostics_test;
 mod lsp_document_test;
