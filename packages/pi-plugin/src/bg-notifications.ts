@@ -29,7 +29,9 @@ type SessionBgState = {
 type TextContent = { type: "text"; text: string; textSignature?: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
 type ContentBlock = TextContent | ImageContent;
-type SendUserMessageRuntime = { sendUserMessage: (content: string) => void };
+type SendUserMessageRuntime = {
+  sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
+};
 
 export const sessionBgStates: Map<string, SessionBgState> = new Map();
 
@@ -120,7 +122,14 @@ async function triggerWakeIfPending(
 
   scheduleWake(state, async (reminder) => {
     try {
-      drainContext.runtime.sendUserMessage(reminder);
+      // Pi rejects sendUserMessage with "Agent is already processing" when
+      // the agent is mid-turn unless we pass `deliverAs`. Even though we gate
+      // on `isActive?.()` above, a turn can start between that check and the
+      // debounced send. `followUp` queues the wake after the current turn
+      // ends — semantically what bg-bash idle-wake wants anyway, since
+      // background completion is information for the next turn, not an
+      // interrupt. `steer` would interrupt mid-stream which is wrong here.
+      drainContext.runtime.sendUserMessage(reminder, { deliverAs: "followUp" });
     } catch (err) {
       warn(`${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`);
     }

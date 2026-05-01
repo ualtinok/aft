@@ -97,6 +97,12 @@ describe("Pi background notifications", () => {
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
     expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0)");
     expect(sendUserMessage.mock.calls[0][0]).not.toContain(": npm test");
+    // Regression: Pi's sendUserMessage rejects with "Agent is already
+    // processing" when the agent is mid-turn unless we pass `deliverAs`.
+    // The wake path must always pass `followUp` so a turn that starts
+    // between our isActive check and the debounced send still queues
+    // cleanly instead of throwing.
+    expect(sendUserMessage.mock.calls[0][1]).toEqual({ deliverAs: "followUp" });
   });
 
   test("push completion lands in pending and wakes when idle", async () => {
