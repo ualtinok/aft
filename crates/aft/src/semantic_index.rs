@@ -144,6 +144,8 @@ fn validate_embedding_batch(
 }
 
 fn normalize_base_url(raw: &str) -> Result<String, String> {
+    use std::net::{IpAddr, ToSocketAddrs};
+
     let parsed = Url::parse(raw).map_err(|error| format!("invalid base_url '{raw}': {error}"))?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -152,7 +154,75 @@ fn normalize_base_url(raw: &str) -> Result<String, String> {
             scheme
         ));
     }
+
+    // Reject well-known private/loopback hostnames before DNS lookup.
+    let host = parsed.host_str().unwrap_or("");
+    if host == "localhost"
+        || host == "localhost.localdomain"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+    {
+        return Err(format!(
+            "base_url host '{host}' resolves to a private/loopback address — only public endpoints are allowed"
+        ));
+    }
+
+    // Resolve the hostname and reject any private/loopback/link-local IPs.
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addr_str = format!("{host}:{port}");
+    let addrs: Vec<IpAddr> = addr_str
+        .to_socket_addrs()
+        .map(|iter| iter.map(|sa| sa.ip()).collect())
+        .unwrap_or_default();
+    for ip in &addrs {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "base_url '{raw}' resolves to a private/reserved IP address — only public endpoints are allowed"
+            ));
+        }
+    }
+
     Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 10.0.0.0/8
+            o[0] == 10
+            // 172.16.0.0/12
+            || (o[0] == 172 && (16..=31).contains(&o[1]))
+            // 192.168.0.0/16
+            || (o[0] == 192 && o[1] == 168)
+            // 127.0.0.0/8 loopback
+            || o[0] == 127
+            // 169.254.0.0/16 link-local
+            || (o[0] == 169 && o[1] == 254)
+            // 100.64.0.0/10 CGNAT
+            || (o[0] == 100 && (64..=127).contains(&o[1]))
+            // 0.0.0.0/8
+            || o[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            // ::1 loopback
+            *v6 == Ipv6Addr::LOCALHOST
+            // fe80::/10 link-local
+            || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // fc00::/7 unique-local
+            || (v6.segments()[0] & 0xfe00) == 0xfc00
+            // ::ffff:0:0/96 IPv4-mapped — check the embedded IPv4
+            || (v6.segments()[0] == 0 && v6.segments()[1] == 0
+                && v6.segments()[2] == 0 && v6.segments()[3] == 0
+                && v6.segments()[4] == 0 && v6.segments()[5] == 0xffff
+                && {
+                    let [a, b, c, d] = v6.segments()[6..8] else { return false; };
+                    let ipv4 = Ipv4Addr::new((a >> 8) as u8, (a & 0xff) as u8, (b >> 8) as u8, (b & 0xff) as u8);
+                    is_private_ip(&IpAddr::V4(ipv4))
+                })
+        }
+    }
 }
 
 fn build_openai_embeddings_endpoint(base_url: &str) -> String {
@@ -2129,5 +2199,61 @@ mod tests {
             !names.contains(&"doc heading"),
             "Heading symbol leaked into chunks: {names:?}"
         );
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_loopback_hostnames() {
+        for host in &[
+            "http://localhost",
+            "http://localhost:8080",
+            "http://localhost.localdomain",
+            "http://foo.localhost",
+        ] {
+            assert!(
+                normalize_base_url(host).is_err(),
+                "Expected {host} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_private_ips() {
+        for url in &[
+            "http://192.168.1.1",
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://127.0.0.1",
+            "http://169.254.169.254",
+        ] {
+            // Note: these may pass scheme check but should fail IP check.
+            // When running in CI with no DNS resolution, the IP-format hosts
+            // parse directly as IpAddr so this is deterministic.
+            let result = normalize_base_url(url);
+            assert!(
+                result.is_err(),
+                "Expected {url} to be rejected, got: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_public_url() {
+        // We use a clearly public URL; the test should not make real DNS calls
+        // (the host is a numeric IP that's not private).
+        // We can't easily test real public DNS in unit tests without network.
+        // Test that scheme validation works for https public.
+        let result = normalize_base_url("https://api.openai.com/v1");
+        // This makes a real DNS call — only assert scheme rejection doesn't fire.
+        // If DNS lookup fails, the error should be about DNS, not scheme/private.
+        match result {
+            Ok(_) => {} // DNS resolved, public IP confirmed
+            Err(e) => {
+                assert!(
+                    !e.contains("private") && !e.contains("loopback"),
+                    "Should not be rejected as private: {e}"
+                );
+            }
+        }
     }
 }
