@@ -384,6 +384,22 @@ function renderBashResult(
   container.clear();
   container.addChild(new Spacer(1));
 
+  // Output preview — last 25 lines, matching Pi built-in bash behaviour
+  const rawOutput = result.content
+    .filter((c) => c.type === "text")
+    .map((c) => (c as { text?: string }).text ?? "")
+    .join("\n")
+    .trim();
+  if (rawOutput) {
+    const lines = rawOutput.split("\n");
+    const preview =
+      lines.length > 25
+        ? `... (${lines.length - 25} lines omitted)\n${lines.slice(-25).join("\n")}`
+        : rawOutput;
+    container.addChild(new Text(preview, 1, 0));
+    container.addChild(new Spacer(1));
+  }
+
   // Exit code indicator
   if (exitCode !== undefined) {
     const exitColor = exitCode === 0 ? "success" : "error";
