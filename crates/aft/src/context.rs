@@ -15,7 +15,7 @@ use crate::lsp::manager::LspManager;
 use crate::lsp::registry::is_config_file_path_with_custom;
 use crate::protocol::{ProgressFrame, PushFrame};
 
-pub type ProgressSender = Box<dyn Fn(PushFrame) + Send + Sync>;
+pub type ProgressSender = Arc<Box<dyn Fn(PushFrame) + Send + Sync>>;
 pub type SharedProgressSender = Arc<Mutex<Option<ProgressSender>>>;
 use crate::search_index::SearchIndex;
 use crate::semantic_index::SemanticIndex;
@@ -268,7 +268,7 @@ impl AppContext {
     }
 
     pub fn emit_progress(&self, frame: ProgressFrame) {
-        let Ok(progress_sender) = self.progress_sender.lock() else {
+        let Ok(progress_sender) = self.progress_sender.lock().map(|sender| sender.clone()) else {
             return;
         };
         if let Some(sender) = progress_sender.as_ref() {

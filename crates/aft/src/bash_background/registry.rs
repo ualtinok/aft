@@ -610,12 +610,20 @@ impl BgTaskRegistry {
     }
 
     fn emit_bash_completed(&self, completion: BgCompletion) {
-        let Ok(progress_sender) = self.inner.progress_sender.lock() else {
+        let Ok(progress_sender) = self
+            .inner
+            .progress_sender
+            .lock()
+            .map(|sender| sender.clone())
+        else {
             return;
         };
         let Some(sender) = progress_sender.as_ref() else {
             return;
         };
+        // Clone the callback out of the registry mutex before writing to stdout;
+        // otherwise a blocked push-frame write could pin the mutex and starve
+        // unrelated progress-sender updates.
         // Bg task transitions are discovered by the watchdog thread, so the
         // sender is shared behind a Mutex. It still uses the same stdout writer
         // closure as foreground progress frames, preserving the existing lock/

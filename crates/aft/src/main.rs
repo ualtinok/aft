@@ -32,13 +32,13 @@ fn main() {
     log::info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
-    ctx.set_progress_sender(Some(Box::new(|frame: PushFrame| {
+    ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(|frame: PushFrame| {
         let stdout = io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
         if let Err(e) = write_push_frame(&mut writer, &frame) {
             log::error!("stdout push frame write error: {}", e);
         }
-    })));
+    }))));
 
     let stdin = io::stdin();
     let reader = stdin.lock();
