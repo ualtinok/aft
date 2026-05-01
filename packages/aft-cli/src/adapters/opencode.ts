@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirSize } from "../lib/fs-util.js";
 import { detectJsoncFile, readJsoncFile, writeJsoncFile } from "../lib/jsonc.js";
@@ -70,9 +70,19 @@ function pathPointsToOurPlugin(entry: string): boolean {
   if (!fsPath) return false;
   try {
     if (!existsSync(fsPath)) return false;
-    const isDir = statSync(fsPath).isDirectory();
-    const pkgJsonPath = isDir ? join(fsPath, "package.json") : fsPath;
-    if (!existsSync(pkgJsonPath)) return false;
+    let searchDir = statSync(fsPath).isDirectory() ? fsPath : dirname(fsPath);
+    let pkgJsonPath: string | null = null;
+    while (true) {
+      const candidate = join(searchDir, "package.json");
+      if (existsSync(candidate)) {
+        pkgJsonPath = candidate;
+        break;
+      }
+      const parent = dirname(searchDir);
+      if (parent === searchDir || searchDir === parse(searchDir).root) break;
+      searchDir = parent;
+    }
+    if (!pkgJsonPath) return false;
     const parsed = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as { name?: unknown };
     return parsed.name === PLUGIN_NAME;
   } catch {

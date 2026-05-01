@@ -86,6 +86,28 @@ describe("OpenCodeAdapter configuration", () => {
     expect(adapter.hasPluginEntry()).toBe(true);
   });
 
+  test("hasPluginEntry returns true for local entry file inside our plugin package", () => {
+    const pluginDir = join(tmpHome, "work", "aft-plugin");
+    const distDir = join(pluginDir, "dist");
+    mkdirSync(distDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, "package.json"),
+      JSON.stringify({ name: "@cortexkit/aft-opencode" }),
+    );
+    const entryFile = join(distDir, "index.js");
+    writeFileSync(entryFile, "export default {};\n");
+    writeFileSync(
+      join(configDir, "opencode.jsonc"),
+      `{
+  "plugin": [${JSON.stringify(entryFile)}]
+}
+`,
+    );
+
+    const adapter = new OpenCodeAdapter();
+    expect(adapter.hasPluginEntry()).toBe(true);
+  });
+
   test("hasPluginEntry returns false for unrelated third-party plugin path containing 'opencode-plugin'", () => {
     // Regression test: a user reported that `file:///F:/hackingtool-plugin/opencode-plugin`
     // in their config caused doctor to report AFT as registered when it wasn't, because the

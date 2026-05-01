@@ -39,6 +39,8 @@ const BG_COMPLETION_PREVIEW_BYTES: usize = 300;
 #[derive(Debug, Clone, Serialize)]
 pub struct BgCompletion {
     pub task_id: String,
+    /// Intentionally omitted from serialized completion payloads: push frames
+    /// carry `session_id` at the BashCompletedFrame envelope level for routing.
     #[serde(skip_serializing)]
     pub session_id: String,
     pub status: BgTaskStatus,

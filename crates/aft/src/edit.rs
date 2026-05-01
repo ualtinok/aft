@@ -253,7 +253,8 @@ pub struct WriteResult {
     /// Whether the file was auto-formatted.
     pub formatted: bool,
     /// Why formatting was skipped, if it was. Values: "unsupported_language",
-    /// "no_formatter_configured", "formatter_not_installed", "timeout", "error".
+    /// "no_formatter_configured", "formatter_not_installed", "formatter_excluded_path",
+    /// "timeout", "error".
     pub format_skipped_reason: Option<String>,
     /// Whether full validation was requested (controls whether validation_errors is included in response).
     pub validate_requested: bool,

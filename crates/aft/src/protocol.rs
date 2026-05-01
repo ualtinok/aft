@@ -192,7 +192,7 @@ impl RawRequest {
 ///    use a `<step>_skipped_reason` field. Approved values:
 ///    - `format_skipped_reason`: `"unsupported_language"` |
 ///      `"no_formatter_configured"` | `"formatter_not_installed"` |
-///      `"timeout"` | `"error"`
+///      `"formatter_excluded_path"` | `"timeout"` | `"error"`
 ///    - `validate_skipped_reason`: `"unsupported_language"` |
 ///      `"no_checker_configured"` | `"checker_not_installed"` |
 ///      `"timeout"` | `"error"`

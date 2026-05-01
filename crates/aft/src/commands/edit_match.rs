@@ -257,7 +257,7 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
     // `lsp_exited_servers` shape as `write` and `edit_match` find/replace.
     if lsp_outcome.is_some() {
         let write_result = edit::WriteResult {
-            syntax_valid: None,
+            syntax_valid: Some(true),
             formatted,
             format_skipped_reason: format_skipped_reason.clone(),
             validate_requested: false,
