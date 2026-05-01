@@ -404,7 +404,7 @@ fn handle_glob_edit_match(
     let checkpoint_name = if dry_run {
         None
     } else {
-        let name = unique_glob_checkpoint_name();
+        let name = unique_glob_checkpoint_name(&req.id);
         let files = pending
             .iter()
             .map(|edit| edit.path.clone())
@@ -627,12 +627,48 @@ fn handle_glob_edit_match(
     )
 }
 
-fn unique_glob_checkpoint_name() -> String {
-    let nanos = std::time::SystemTime::now()
+fn unique_glob_checkpoint_name(request_id: &str) -> String {
+    unique_glob_checkpoint_name_with_timestamp(request_id, current_timestamp_nanos())
+}
+
+fn current_timestamp_nanos() -> u128 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos();
-    format!("__edit_match_glob_{}__", nanos)
+        .as_nanos()
+}
+
+fn unique_glob_checkpoint_name_with_timestamp(request_id: &str, timestamp_nanos: u128) -> String {
+    format!(
+        "__glob_edit_match_{}_{}",
+        sanitize_checkpoint_component(request_id),
+        timestamp_nanos
+    )
+}
+
+fn sanitize_checkpoint_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod checkpoint_name_tests {
+    use super::unique_glob_checkpoint_name_with_timestamp;
+
+    #[test]
+    fn glob_checkpoint_name_includes_request_id() {
+        let timestamp = 123_456;
+        let first = unique_glob_checkpoint_name_with_timestamp("request-a", timestamp);
+        let second = unique_glob_checkpoint_name_with_timestamp("request-b", timestamp);
+
+        assert_ne!(first, second);
+        assert_eq!(first, "__glob_edit_match_request-a_123456");
+    }
 }
 
 fn restore_glob_checkpoint(
