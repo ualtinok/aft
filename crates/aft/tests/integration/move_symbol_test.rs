@@ -458,6 +458,33 @@ fn move_symbol_symbol_not_found() {
     aft.shutdown();
 }
 
+#[test]
+fn move_symbol_ambiguous_symbol_is_error_response() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let source = tmp.path().join("source.ts");
+    let dest = tmp.path().join("dest.ts");
+    std::fs::write(
+        &source,
+        "export function duplicate(): string { return 'top'; }\nexport class Boxed {\n  duplicate(): string { return 'method'; }\n}\n",
+    )
+    .expect("write source");
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &tmp.path().display().to_string());
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"ambiguous","command":"move_symbol","file":"{}","symbol":"duplicate","destination":"{}"}}"#,
+        source.display(),
+        dest.display()
+    ));
+
+    assert_eq!(resp["success"], false, "should fail: {resp:?}");
+    assert_eq!(resp["code"], "ambiguous_symbol");
+    assert!(resp["candidates"].as_array().unwrap().len() >= 2);
+
+    aft.shutdown();
+}
+
 /// `move_symbol` rejects non-top-level symbols (class methods).
 #[test]
 fn move_symbol_non_top_level() {

@@ -184,12 +184,11 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
             })
             .collect();
 
-        return Response::success(
+        return Response::error_with_data(
             &req.id,
-            serde_json::json!({
-                "code": "ambiguous_symbol",
-                "candidates": candidates,
-            }),
+            "ambiguous_symbol",
+            format!("symbol '{}' is ambiguous in {}", symbol_name, file),
+            serde_json::json!({ "candidates": candidates }),
         );
     }
 
