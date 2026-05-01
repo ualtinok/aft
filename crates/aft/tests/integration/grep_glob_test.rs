@@ -114,6 +114,32 @@ fn grep_fallback_returns_relative_paths_and_counts() {
 }
 
 #[test]
+fn grep_reports_empty_scope_separately() {
+    let project = setup_project(&[]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let response = send(
+        &mut aft,
+        json!({
+            "id": "grep-empty-scope",
+            "command": "grep",
+            "pattern": "anything",
+        }),
+    );
+
+    assert_eq!(
+        response["success"], true,
+        "grep should succeed: {response:?}"
+    );
+    assert_eq!(response["complete"], true);
+    assert_eq!(response["no_files_matched_scope"], true);
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn glob_fallback_respects_gitignore_and_returns_absolute_paths() {
     let project = setup_project(&[
         ("src/keep.rs", "fn keep() {}\n"),
@@ -145,6 +171,32 @@ fn glob_fallback_respects_gitignore_and_returns_absolute_paths() {
             &project.path().join("src/keep.rs")
         ))]
     );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn glob_reports_empty_scope_separately() {
+    let project = setup_project(&[]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let response = send(
+        &mut aft,
+        json!({
+            "id": "glob-empty-scope",
+            "command": "glob",
+            "pattern": "**/*.rs",
+        }),
+    );
+
+    assert_eq!(
+        response["success"], true,
+        "glob should succeed: {response:?}"
+    );
+    assert_eq!(response["complete"], true);
+    assert_eq!(response["no_files_matched_scope"], true);
 
     let status = aft.shutdown();
     assert!(status.success());

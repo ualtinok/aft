@@ -176,3 +176,33 @@ fn outline_directory_reports_parse_error_skips() {
 
     assert!(aft.shutdown().success());
 }
+
+#[test]
+fn outline_directory_reports_walk_truncation() {
+    let dir = tempdir().unwrap();
+    for index in 0..201 {
+        write_file(
+            dir.path(),
+            &format!("src/file_{index:03}.ts"),
+            "export function item() {}\n",
+        );
+    }
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "outline-truncated",
+            "command": "outline",
+            "directory": dir.path(),
+        }),
+    );
+
+    assert_eq!(resp["success"], true, "outline should complete: {resp:?}");
+    assert_eq!(resp["complete"], false, "response: {resp:?}");
+    assert_eq!(resp["walk_truncated"], true, "response: {resp:?}");
+
+    assert!(aft.shutdown().success());
+}

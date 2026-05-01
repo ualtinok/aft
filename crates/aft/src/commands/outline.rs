@@ -51,7 +51,7 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
             );
         }
 
-        let files = discover_outline_files(&dir_path);
+        let (files, walk_truncated) = discover_outline_files(&dir_path);
         let project_root = ctx.config().project_root.clone();
         let (file_outlines, skipped_files) =
             match outline_many_files(&files, ctx, &req.id, project_root.as_deref()) {
@@ -62,7 +62,12 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
         let text = format_multi_file_tree(&file_outlines, MAX_OUTPUT_BYTES, files.len());
         return Response::success(
             &req.id,
-            serde_json::json!({ "text": text, "skipped_files": skipped_files }),
+            serde_json::json!({
+                "text": text,
+                "complete": !walk_truncated,
+                "walk_truncated": walk_truncated,
+                "skipped_files": skipped_files,
+            }),
         );
     }
 
@@ -83,7 +88,7 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
         let text = format_multi_file_tree(&file_outlines, MAX_OUTPUT_BYTES, total_files_requested);
         return Response::success(
             &req.id,
-            serde_json::json!({ "text": text, "skipped_files": skipped_files }),
+            serde_json::json!({ "text": text, "complete": true, "skipped_files": skipped_files }),
         );
     }
 
@@ -125,7 +130,10 @@ pub fn handle_outline(req: &RawRequest, ctx: &AppContext) -> Response {
         .unwrap_or_else(|| file.to_string());
     let text = format_single_file_tree(&filename, &entries);
 
-    Response::success(&req.id, serde_json::json!({ "text": text }))
+    Response::success(
+        &req.id,
+        serde_json::json!({ "text": text, "complete": true }),
+    )
 }
 
 /// Build a nested outline tree from a flat symbol list.
@@ -266,15 +274,17 @@ fn outline_many_files(
     Ok((file_outlines, skipped_files))
 }
 
-fn discover_outline_files(directory: &Path) -> Vec<String> {
+fn discover_outline_files(directory: &Path) -> (Vec<String>, bool) {
     let mut files = Vec::new();
-    collect_outline_files(directory, &mut files);
+    let mut truncated = false;
+    collect_outline_files(directory, &mut files, &mut truncated);
     files.sort();
-    files
+    (files, truncated)
 }
 
-fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
+fn collect_outline_files(directory: &Path, files: &mut Vec<String>, truncated: &mut bool) {
     if files.len() >= 200 {
+        *truncated = true;
         return;
     }
 
@@ -284,6 +294,7 @@ fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
 
     for entry in entries.flatten() {
         if files.len() >= 200 {
+            *truncated = true;
             return;
         }
         let path = entry.path();
@@ -294,7 +305,7 @@ fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
             if should_skip_directory(&path) {
                 continue;
             }
-            collect_outline_files(&path, files);
+            collect_outline_files(&path, files, truncated);
         } else if path.is_file() {
             files.push(path.to_string_lossy().to_string());
         }

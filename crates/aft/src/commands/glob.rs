@@ -63,6 +63,14 @@ pub fn handle_glob(req: &RawRequest, ctx: &AppContext) -> Response {
             ),
         );
     }
+    let scope_has_files = walk_project_files_from(
+        &project_root,
+        &search_scope.root,
+        &build_path_filters(&["**/*".to_string()], &[]).expect("valid catch-all glob"),
+    )
+    .into_iter()
+    .next()
+    .is_some();
 
     let mut files = {
         let search_index = ctx.search_index().borrow();
@@ -96,6 +104,8 @@ pub fn handle_glob(req: &RawRequest, ctx: &AppContext) -> Response {
         &req.id,
         serde_json::json!({
             "text": format_glob_text(&files, pattern, &project_root, truncated),
+            "complete": true,
+            "no_files_matched_scope": !scope_has_files,
             "files": files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             "total": total,
             "truncated": truncated,

@@ -142,6 +142,7 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
             &req.id,
             serde_json::json!({
                 "binary": true,
+                "complete": true,
                 "byte_size": byte_size,
                 "message": format!("Binary file ({} bytes), cannot display as text", byte_size),
             }),
@@ -156,6 +157,7 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
                 &req.id,
                 serde_json::json!({
                     "binary": true,
+                    "complete": true,
                     "byte_size": byte_size,
                     "message": format!("Binary file ({} bytes), not valid UTF-8", byte_size),
                 }),
@@ -190,6 +192,7 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
             &req.id,
             serde_json::json!({
                 "content": "",
+                "complete": true,
                 "total_lines": total_lines,
                 "lines_read": 0,
                 "start_line": start_line,
@@ -246,6 +249,7 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
         &req.id,
         serde_json::json!({
             "content": output,
+            "complete": true,
             "total_lines": total_lines,
             "lines_read": lines_read,
             "start_line": start_line,
@@ -292,6 +296,7 @@ fn handle_streaming_range_read(
             &req.id,
             serde_json::json!({
                 "binary": true,
+                "complete": true,
                 "byte_size": byte_size as usize,
                 "message": format!("Binary file ({} bytes), cannot display as text", byte_size),
             }),
@@ -348,6 +353,7 @@ fn handle_streaming_range_read(
             &req.id,
             serde_json::json!({
                 "binary": true,
+                "complete": true,
                 "byte_size": byte_size as usize,
                 "message": format!("Binary file ({} bytes), not valid UTF-8", byte_size),
             }),
@@ -359,6 +365,7 @@ fn handle_streaming_range_read(
             &req.id,
             serde_json::json!({
                 "content": "",
+                "complete": true,
                 "total_lines": observed_lines,
                 "lines_read": 0,
                 "start_line": start_line,
@@ -410,6 +417,7 @@ fn handle_streaming_range_read(
         &req.id,
         serde_json::json!({
             "content": output,
+            "complete": true,
             "total_lines": observed_lines,
             "lines_read": lines_read,
             "start_line": start_line,
@@ -465,6 +473,7 @@ fn handle_directory(req: &RawRequest, path: &Path) -> Response {
         &req.id,
         serde_json::json!({
             "entries": entries,
+            "complete": true,
             "total_entries": total,
         }),
     )

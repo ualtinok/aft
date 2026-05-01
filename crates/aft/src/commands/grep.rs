@@ -92,6 +92,14 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
             ),
         );
     }
+    let scope_has_files = walk_project_files_from(
+        &project_root,
+        &search_scope.root,
+        &build_path_filters(&["**/*".to_string()], &[]).expect("valid catch-all glob"),
+    )
+    .into_iter()
+    .next()
+    .is_some();
 
     let fallback_status = if search_scope.use_index {
         current_index_status(ctx)
@@ -127,6 +135,8 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
                             &req.id,
                             serde_json::json!({
                                 "text": format_grep_text(&result, &project_root),
+                                "complete": true,
+                                "no_files_matched_scope": !scope_has_files,
                                 "matches": result.matches.iter().map(match_to_json).collect::<Vec<_>>(),
                                 "total_matches": result.total_matches,
                                 "files_searched": result.files_searched,
@@ -158,6 +168,8 @@ pub fn handle_grep(req: &RawRequest, ctx: &AppContext) -> Response {
         &req.id,
         serde_json::json!({
             "text": text,
+            "complete": true,
+            "no_files_matched_scope": !scope_has_files,
             "matches": result.matches.iter().map(match_to_json).collect::<Vec<_>>(),
             "total_matches": result.total_matches,
             "files_searched": result.files_searched,
