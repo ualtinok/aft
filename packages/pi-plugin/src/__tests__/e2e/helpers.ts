@@ -165,6 +165,7 @@ export async function createHarness(
 
   // Permissive surface — every tool wired up. Mirrors resolveToolSurface("all").
   const surface = {
+    hoistBash: true,
     hoistRead: true,
     hoistWrite: true,
     hoistEdit: true,

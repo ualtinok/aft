@@ -136,6 +136,7 @@ function resolveStorageDir(): string {
  * present; registering an AFT tool with the same name replaces them.
  */
 function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
+  hoistBash: boolean;
   hoistRead: boolean;
   hoistWrite: boolean;
   hoistEdit: boolean;
@@ -162,6 +163,7 @@ function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
 
   if (surface === "minimal") {
     return {
+      hoistBash: ok("bash"),
       hoistRead: false,
       hoistWrite: false,
       hoistEdit: false,
@@ -185,6 +187,7 @@ function resolveToolSurface(config: ReturnType<typeof loadAftConfig>): {
 
   // recommended + all
   const base = {
+    hoistBash: ok("bash"),
     hoistRead: ok("read"),
     hoistWrite: ok("write"),
     hoistEdit: ok("edit"),
@@ -423,7 +426,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const surface = resolveToolSurface(config);
 
   // Hoisted tool overrides (replace Pi's built-in bash/read/write/edit/grep with AFT versions).
-  if (surface.hoistRead) {
+  if (surface.hoistBash) {
     registerBashTool(pi, ctx);
   }
   registerHoistedTools(pi, ctx, surface);
@@ -536,3 +539,5 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   log(`AFT extension ready (surface=${config.tool_surface ?? "recommended"})`);
 }
+
+export const __test__ = { resolveToolSurface };
