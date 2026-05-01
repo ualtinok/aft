@@ -9,6 +9,10 @@ export interface BgCompletion {
   duration_ms?: number;
   runtime_ms?: number;
   runtime?: number;
+  /** Tail of stdout+stderr captured at completion (≤300 bytes from Rust). */
+  output_preview?: string;
+  /** True when the captured tail is shorter than the actual output. */
+  output_truncated?: boolean;
 }
 
 type SessionBgState = {
@@ -139,8 +143,14 @@ export function resetBgWake(sessionID: string | undefined): void {
 }
 
 export function formatSystemReminder(completions: readonly BgCompletion[]): string {
-  const bullets = completions.map((completion) => `- ${formatCompletion(completion)}`).join("\n");
-  return `<system-reminder>\n[BACKGROUND BASH COMPLETED]\n${bullets}\n\nUse bash_status({ task_id: "..." }) to retrieve full output.\n</system-reminder>`;
+  const bullets = completions.map((completion) => formatCompletion(completion)).join("\n");
+  // Only point at bash_status when at least one completion is truncated;
+  // for fully-captured short outputs the agent already has the full result.
+  const anyTruncated = completions.some((c) => c.output_truncated === true);
+  const tail = anyTruncated
+    ? `\n\nFor truncated tasks, use bash_status({ taskId: "..." }) to retrieve full output.`
+    : "";
+  return `<system-reminder>\n[BACKGROUND BASH COMPLETED]\n${bullets}${tail}\n</system-reminder>`;
 }
 
 export function extractSessionID(value: unknown): string | undefined {
@@ -266,7 +276,30 @@ function appendReminder(output: string, reminder: string): string {
 function formatCompletion(completion: BgCompletion): string {
   const status = formatStatus(completion);
   const duration = formatDuration(completion);
-  return `task ${completion.task_id} (${status}${duration ? `, ${duration}` : ""}): ${completion.command}`;
+  const header = `- task ${completion.task_id} (${status}${duration ? `, ${duration}` : ""})`;
+  const previewBlock = formatOutputPreview(completion);
+  return previewBlock ? `${header}\n${previewBlock}` : header;
+}
+
+function formatOutputPreview(completion: BgCompletion): string {
+  // Strip ANSI escape sequences defensively — most output passes through bash
+  // compressors first, but raw stdout from non-compressed commands may still
+  // contain colors that bloat the reminder. \x1b is the escape char.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires \x1b
+  const ansiRegex = /\x1b\[[0-9;]*[a-zA-Z]/g;
+  const raw = (completion.output_preview ?? "").replace(ansiRegex, "");
+  if (!raw.trim()) return "";
+  // Trim trailing newlines so the indented block doesn't end with a blank line
+  // but preserve internal newlines so multi-line output stays readable.
+  const trimmed = raw.replace(/\n+$/, "");
+  const ellipsis = completion.output_truncated ? "…" : "";
+  // 4-space indent makes the preview unambiguously a continuation of the
+  // bullet above when the agent skims the reminder.
+  const indented = trimmed
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
+  return ellipsis ? `    ${ellipsis}\n${indented}` : indented;
 }
 
 function formatStatus(completion: BgCompletion): string {

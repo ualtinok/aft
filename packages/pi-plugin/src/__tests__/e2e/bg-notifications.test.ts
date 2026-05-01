@@ -74,7 +74,12 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
 
     const reminder = content?.at(-1)?.text ?? "";
     expect(reminder).toContain("<system-reminder>");
-    expect(reminder).toContain(`- task ${taskId} (exit 0): printf done`);
+    expect(reminder).toContain(`- task ${taskId} (exit 0)`);
+    // The new design ships output preview instead of the command, so the
+    // captured `done` (printed by the bg task) should be present in the
+    // indented preview block, while the command itself must NOT leak in.
+    expect(reminder).toContain("    done");
+    expect(reminder).not.toContain(": printf done");
   });
 
   test("turn-end wake sends runtime user message", async () => {
@@ -98,7 +103,9 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
     });
 
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain(`- task ${taskId} (exit 0): printf idle-done`);
+    expect(messages[0]).toContain(`- task ${taskId} (exit 0)`);
+    expect(messages[0]).toContain("    idle-done");
+    expect(messages[0]).not.toContain(": printf idle-done");
   });
 });
 

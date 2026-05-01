@@ -41,7 +41,7 @@ describe("Pi background notifications", () => {
         },
       ]),
     ).toBe(
-      '<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task d2ed3a9e (exit 0, 1m 23s): cargo test --release\n- task 4f5b71c2 (timed out, 30s): npm install\n\nUse bash_status({ task_id: "..." }) to retrieve full output.\n</system-reminder>',
+      "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task d2ed3a9e (exit 0, 1m 23s)\n- task 4f5b71c2 (timed out, 30s)\n</system-reminder>",
     );
   });
 
@@ -60,7 +60,7 @@ describe("Pi background notifications", () => {
     expect(content).toHaveLength(2);
     expect(content?.[1]).toEqual({
       type: "text",
-      text: '<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task task-1 (exit 0): echo done\n\nUse bash_status({ task_id: "..." }) to retrieve full output.\n</system-reminder>',
+      text: "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task task-1 (exit 0)\n</system-reminder>",
     });
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
   });
@@ -95,7 +95,8 @@ describe("Pi background notifications", () => {
     await sleep(260);
 
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
-    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0): npm test");
+    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0)");
+    expect(sendUserMessage.mock.calls[0][0]).not.toContain(": npm test");
   });
 
   test("push completion lands in pending and wakes when idle", async () => {
@@ -115,7 +116,8 @@ describe("Pi background notifications", () => {
     await sleep(260);
 
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
-    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0): npm test");
+    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0)");
+    expect(sendUserMessage.mock.calls[0][0]).not.toContain(": npm test");
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
   });
 

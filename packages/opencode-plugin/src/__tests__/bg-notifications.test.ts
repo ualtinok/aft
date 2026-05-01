@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("OpenCode background notifications", () => {
-  test("formats system reminder bullets with status and duration", () => {
+  test("formats system reminder bullets with status and duration (no output, no preview block)", () => {
     expect(
       formatSystemReminder([
         {
@@ -41,7 +41,76 @@ describe("OpenCode background notifications", () => {
         },
       ]),
     ).toBe(
-      '<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task d2ed3a9e (exit 0, 1m 23s): cargo test --release\n- task 4f5b71c2 (timed out, 30s): npm install\n\nUse bash_status({ task_id: "..." }) to retrieve full output.\n</system-reminder>',
+      "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task d2ed3a9e (exit 0, 1m 23s)\n- task 4f5b71c2 (timed out, 30s)\n</system-reminder>",
+    );
+  });
+
+  test("formats system reminder with indented output preview when present", () => {
+    expect(
+      formatSystemReminder([
+        {
+          task_id: "abc123",
+          status: "completed",
+          exit_code: 0,
+          command: "git status",
+          duration_ms: 50,
+          output_preview: "On branch main\nnothing to commit, working tree clean\n",
+          output_truncated: false,
+        },
+      ]),
+    ).toBe(
+      "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task abc123 (exit 0, 50ms)\n    On branch main\n    nothing to commit, working tree clean\n</system-reminder>",
+    );
+  });
+
+  test("formats system reminder with truncation marker and bash_status pointer when truncated", () => {
+    const reminder = formatSystemReminder([
+      {
+        task_id: "xyz789",
+        status: "completed",
+        exit_code: 1,
+        command: "pytest",
+        duration_ms: 12_000,
+        output_preview: "...rest of trace\nFAILED tests/test_foo.py::test_bar - AssertionError\n",
+        output_truncated: true,
+      },
+    ]);
+    expect(reminder).toContain("- task xyz789 (exit 1, 12s)");
+    expect(reminder).toContain("    …");
+    expect(reminder).toContain("    ...rest of trace");
+    expect(reminder).toContain("    FAILED tests/test_foo.py::test_bar - AssertionError");
+    expect(reminder).toContain('For truncated tasks, use bash_status({ taskId: "..." })');
+  });
+
+  test("strips ANSI escape sequences from output preview", () => {
+    const reminder = formatSystemReminder([
+      {
+        task_id: "ansi1",
+        status: "completed",
+        exit_code: 0,
+        command: "ls --color",
+        output_preview: "\x1b[34mfile.txt\x1b[0m\n\x1b[1;32mREADME\x1b[0m\n",
+        output_truncated: false,
+      },
+    ]);
+    expect(reminder).toContain("    file.txt");
+    expect(reminder).toContain("    README");
+    expect(reminder).not.toContain("\x1b[");
+  });
+
+  test("blank or whitespace-only preview produces no preview block", () => {
+    const reminder = formatSystemReminder([
+      {
+        task_id: "empty1",
+        status: "completed",
+        exit_code: 0,
+        command: "true",
+        output_preview: "   \n\n",
+        output_truncated: false,
+      },
+    ]);
+    expect(reminder).toBe(
+      "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task empty1 (exit 0)\n</system-reminder>",
     );
   });
 
@@ -56,7 +125,8 @@ describe("OpenCode background notifications", () => {
     await appendInTurnBgCompletions({ ctx, directory: "/tmp/project", sessionID: "s1" }, output);
 
     expect(output.output).toContain("tool output\n\n<system-reminder>");
-    expect(output.output).toContain("- task task-1 (exit 0): echo done");
+    expect(output.output).toContain("- task task-1 (exit 0)");
+    expect(output.output).not.toContain(": echo done"); // command no longer in bullet
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
     expect(sessionBgStates.get("s1")?.outstandingTaskIds.size).toBe(0);
   });
@@ -93,7 +163,8 @@ describe("OpenCode background notifications", () => {
       body: { noReply: boolean; parts: Array<{ text: string }> };
     };
     expect(payload.body.noReply).toBe(false);
-    expect(payload.body.parts[0].text).toContain("- task task-1 (exit 0): npm test");
+    expect(payload.body.parts[0].text).toContain("- task task-1 (exit 0)");
+    expect(payload.body.parts[0].text).not.toContain(": npm test");
   });
 
   test("push completion lands in pending and wakes when idle", async () => {
@@ -115,7 +186,8 @@ describe("OpenCode background notifications", () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const text = (promptAsync.mock.calls[0][0] as { body: { parts: Array<{ text: string }> } }).body
       .parts[0].text;
-    expect(text).toContain("- task task-1 (exit 0): npm test");
+    expect(text).toContain("- task task-1 (exit 0)");
+    expect(text).not.toContain(": npm test");
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
   });
 

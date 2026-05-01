@@ -46,6 +46,17 @@ pub struct BashCompletedFrame {
     pub status: BgTaskStatus,
     pub exit_code: Option<i32>,
     pub command: String,
+    /// Tail of stdout+stderr (≤300 bytes), already decoded as lossy UTF-8.
+    /// Empty string when no output was captured. Used by plugins to inline
+    /// short results in the system-reminder so agents don't need a follow-up
+    /// `bash_status` round-trip for typical short commands.
+    #[serde(default)]
+    pub output_preview: String,
+    /// True when the task produced more output than `output_preview` shows
+    /// (rotated buffer, file > 300 bytes, etc). Plugins use this to render a
+    /// `…` prefix and signal that `bash_status` would return more.
+    #[serde(default)]
+    pub output_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +98,8 @@ impl BashCompletedFrame {
         status: BgTaskStatus,
         exit_code: Option<i32>,
         command: impl Into<String>,
+        output_preview: impl Into<String>,
+        output_truncated: bool,
     ) -> Self {
         Self {
             frame_type: "bash_completed",
@@ -95,6 +108,8 @@ impl BashCompletedFrame {
             status,
             exit_code,
             command: command.into(),
+            output_preview: output_preview.into(),
+            output_truncated,
         }
     }
 }

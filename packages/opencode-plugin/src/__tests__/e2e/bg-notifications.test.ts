@@ -82,7 +82,12 @@ maybeDescribe("e2e bg notifications (OpenCode adapter + bridge + Rust)", () => {
     });
 
     expect(output.output).toContain("<system-reminder>");
-    expect(output.output).toContain(`- task ${taskId} (exit 0): printf done`);
+    expect(output.output).toContain(`- task ${taskId} (exit 0)`);
+    // The new design ships output preview instead of the command, so the
+    // captured `done` (printed by the bg task) should be present in the
+    // indented preview block, while the command itself must NOT leak in.
+    expect(output.output).toContain("    done");
+    expect(output.output).not.toContain(": printf done");
   });
 
   test("turn-end wake sends promptAsync through OpenCode client", async () => {
@@ -107,7 +112,9 @@ maybeDescribe("e2e bg notifications (OpenCode adapter + bridge + Rust)", () => {
     expect(promptCalls).toHaveLength(1);
     const text = (promptCalls[0] as { body: { parts: Array<{ text: string }> } }).body.parts[0]
       .text;
-    expect(text).toContain(`- task ${taskId} (exit 0): printf idle-done`);
+    expect(text).toContain(`- task ${taskId} (exit 0)`);
+    expect(text).toContain("    idle-done");
+    expect(text).not.toContain(": printf idle-done");
   });
 });
 

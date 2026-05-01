@@ -28,6 +28,14 @@ use super::{BgTaskInfo, BgTaskStatus};
 const DEFAULT_BG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STALE_RUNNING_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Tail-bytes captured into BashCompletedFrame and BgCompletion records so the
+/// plugin can inline a preview into the system-reminder. Sized for ~3-4 lines
+/// of typical command output (git status, test results, exit messages) — short
+/// enough that round-tripping multiple completions in one reminder stays well
+/// under the model's context budget but long enough that most successful runs
+/// don't need a follow-up `bash_status` call.
+const BG_COMPLETION_PREVIEW_BYTES: usize = 300;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BgCompletion {
     pub task_id: String,
@@ -36,6 +44,23 @@ pub struct BgCompletion {
     pub status: BgTaskStatus,
     pub exit_code: Option<i32>,
     pub command: String,
+    /// Tail of stdout+stderr (≤300 bytes) at completion time, read once and
+    /// cached so push-frame consumers and `bash_drain_completions` callers see
+    /// the same preview without racing against later output rotation. Empty
+    /// when not captured (e.g., persisted task seen on startup before buffer
+    /// reattachment).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_preview: String,
+    /// True when the captured tail is shorter than the actual output (because
+    /// rotation occurred or the output exceeds the preview cap). Plugins use
+    /// this to render a `…` prefix and signal that `bash_status` would return
+    /// more.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub output_truncated: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -476,7 +501,7 @@ impl BgTaskRegistry {
             write_task(&task.paths.json, &state.metadata)
                 .map_err(|e| format!("failed to persist killed state: {e}"))?;
             state.buffer.enforce_terminal_cap();
-            self.enqueue_completion_locked(&state.metadata, true);
+            self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
         }
 
         Ok(task.snapshot(5 * 1024))
@@ -505,26 +530,41 @@ impl BgTaskRegistry {
         state.child = None;
         state.detached = true;
         state.buffer.enforce_terminal_cap();
-        self.enqueue_completion_locked(&state.metadata, true);
+        self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
         Ok(())
     }
 
     fn enqueue_completion_if_needed(&self, metadata: &PersistedTask, emit_frame: bool) {
         if metadata.status.is_terminal() && !metadata.completion_delivered {
-            self.enqueue_completion_locked(metadata, emit_frame);
+            self.enqueue_completion_locked(metadata, None, emit_frame);
         }
     }
 
-    fn enqueue_completion_locked(&self, metadata: &PersistedTask, emit_frame: bool) {
+    fn enqueue_completion_locked(
+        &self,
+        metadata: &PersistedTask,
+        buffer: Option<&BgBuffer>,
+        emit_frame: bool,
+    ) {
         if !metadata.status.is_terminal() || metadata.completion_delivered {
             return;
         }
+        // Read tail once at completion time and cache on the BgCompletion so
+        // both the push-frame consumer (running session) and any later
+        // `bash_drain_completions` poll (different session, restart) see the
+        // same preview without racing against rotation.
+        let (output_preview, output_truncated) = match buffer {
+            Some(buf) => buf.read_tail(BG_COMPLETION_PREVIEW_BYTES),
+            None => (String::new(), false),
+        };
         let completion = BgCompletion {
             task_id: metadata.task_id.clone(),
             session_id: metadata.session_id.clone(),
             status: metadata.status.clone(),
             exit_code: metadata.exit_code,
             command: metadata.command.clone(),
+            output_preview,
+            output_truncated,
         };
         if let Ok(mut completions) = self.inner.completions.lock() {
             if completions
@@ -560,6 +600,8 @@ impl BgTaskRegistry {
             completion.status,
             completion.exit_code,
             completion.command,
+            completion.output_preview,
+            completion.output_truncated,
         )));
     }
 
