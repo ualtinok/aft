@@ -1,3 +1,4 @@
+/// <reference path="../bun-test.d.ts" />
 import { describe, expect, test } from "bun:test";
 import type { AftConfig } from "../config.js";
 import { buildHintsFromConfig, buildWorkflowHints } from "../workflow-hints.js";
