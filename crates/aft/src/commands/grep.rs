@@ -349,7 +349,7 @@ fn ripgrep_grep(
         };
         cmd.args(["--glob", &negated]);
     }
-    cmd.arg("--regexp").arg(pattern).arg(search_root);
+    cmd.arg(format!("--regexp={}", pattern)).arg(search_root);
 
     let output = cmd.output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);

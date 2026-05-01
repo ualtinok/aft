@@ -406,6 +406,32 @@ fn grep_indexed_supports_line_anchors() {
 }
 
 #[test]
+fn grep_treats_leading_dash_pattern_as_literal() {
+    let project = setup_project(&[("notes.txt", "-foo\nbar\n")]);
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, project.path());
+
+    let response = send(
+        &mut aft,
+        json!({
+            "id": "grep-leading-dash",
+            "command": "grep",
+            "pattern": "-foo",
+            "path": project.path(),
+        }),
+    );
+
+    assert_eq!(
+        response["success"], true,
+        "grep should succeed: {response:?}"
+    );
+    assert_eq!(response["total_matches"], 1, "response: {response:?}");
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn grep_fallback_supports_end_of_line_anchor() {
     let project = setup_project(&[("src/a.rs", "fn foo() {}\nfn bar() {}\nlet x = 1;\n")]);
     let mut aft = AftProcess::spawn();
