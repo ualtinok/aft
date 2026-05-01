@@ -2,8 +2,10 @@
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import type { LookupAddress } from "node:dns";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Dispatcher } from "undici";
 
 const tempRoots = new Set<string>();
 
@@ -24,19 +26,78 @@ describe("fetchUrlToTempFile", () => {
   test("blocks redirects to private hosts by default", async () => {
     const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
 
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(
+    const fetchImpl = mock(
       async () =>
         new Response(null, { status: 302, headers: { location: "http://127.0.0.1/internal" } }),
-    ) as unknown as typeof fetch;
+    );
 
-    try {
-      await expect(
-        fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir()),
-      ).rejects.toThrow("Blocked private URL host");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(
+      fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir(), { fetchImpl }),
+    ).rejects.toThrow("Blocked private URL host");
+  });
+
+  test("pins fetch dispatcher to the already validated DNS result", async () => {
+    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const dispatcher = {} as Dispatcher;
+    const dispatcherIps: string[] = [];
+    const lookups: string[] = [];
+    const lookup = mock(async (hostname: string) => {
+      lookups.push(hostname);
+      return [{ address: hostname === "example.com" ? "93.184.216.34" : "8.8.8.8", family: 4 }];
+    }) as unknown as typeof import("node:dns/promises").lookup;
+    const fetchImpl = mock(async (_url: string, init: { dispatcher?: Dispatcher }) => {
+      expect(init.dispatcher).toBe(dispatcher);
+      return new Response("# ok", { headers: { "content-type": "text/markdown" } });
+    });
+
+    await fetchUrlToTempFile("http://example.com/readme", makeStorageDir(), {
+      dispatcherFactory: (validatedIp) => {
+        dispatcherIps.push(validatedIp);
+        return dispatcher;
+      },
+      fetchImpl,
+      lookup,
+    });
+
+    expect(lookups).toEqual(["example.com"]);
+    expect(dispatcherIps).toEqual(["93.184.216.34"]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("re-validates and re-pins each redirect target", async () => {
+    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const dispatcher = {} as Dispatcher;
+    const dispatcherIps: string[] = [];
+    const lookups: string[] = [];
+    const lookupResults: Record<string, LookupAddress[]> = {
+      "docs.example.com": [{ address: "93.184.216.34", family: 4 }],
+      "cdn.example.com": [{ address: "8.8.8.8", family: 4 }],
+    };
+    const lookup = mock(async (hostname: string) => {
+      lookups.push(hostname);
+      return lookupResults[hostname] ?? [];
+    }) as unknown as typeof import("node:dns/promises").lookup;
+    const fetchImpl = mock(async (url: string) => {
+      if (url === "http://docs.example.com/start") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "http://cdn.example.com/final" },
+        });
+      }
+      return new Response("# final", { headers: { "content-type": "text/markdown" } });
+    });
+
+    await fetchUrlToTempFile("http://docs.example.com/start", makeStorageDir(), {
+      dispatcherFactory: (validatedIp) => {
+        dispatcherIps.push(validatedIp);
+        return dispatcher;
+      },
+      fetchImpl,
+      lookup,
+    });
+
+    expect(lookups).toEqual(["docs.example.com", "cdn.example.com"]);
+    expect(dispatcherIps).toEqual(["93.184.216.34", "8.8.8.8"]);
   });
 });
 
@@ -66,65 +127,50 @@ describe("isPrivateIp", () => {
   test("rejects IPv4-mapped IPv6 loopback bypass via SSRF guard", async () => {
     const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
 
-    const originalFetch = globalThis.fetch;
     // Redirect to IPv4-mapped IPv6 form of 127.0.0.1
-    globalThis.fetch = mock(
+    const fetchImpl = mock(
       async () =>
         new Response(null, {
           status: 302,
           headers: { location: "http://[::ffff:127.0.0.1]/internal" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
-    try {
-      await expect(
-        fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir()),
-      ).rejects.toThrow("Blocked private URL host");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(
+      fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir(), { fetchImpl }),
+    ).rejects.toThrow("Blocked private URL host");
   });
 
   test("rejects IPv4-compatible IPv6 loopback bypass via SSRF guard", async () => {
     const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
 
-    const originalFetch = globalThis.fetch;
     // IPv4-compatible form: ::127.0.0.1 (last colon is at index 1)
-    globalThis.fetch = mock(
+    const fetchImpl = mock(
       async () =>
         new Response(null, {
           status: 302,
           headers: { location: "http://[::127.0.0.1]/internal" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
-    try {
-      await expect(
-        fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir()),
-      ).rejects.toThrow("Blocked private URL host");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(
+      fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir(), { fetchImpl }),
+    ).rejects.toThrow("Blocked private URL host");
   });
 
   test("rejects IPv6 unspecified address ::", async () => {
     const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
 
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(
+    const fetchImpl = mock(
       async () =>
         new Response(null, {
           status: 302,
           headers: { location: "http://[::]/internal" },
         }),
-    ) as unknown as typeof fetch;
+    );
 
-    try {
-      await expect(
-        fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir()),
-      ).rejects.toThrow("Blocked private URL host");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    await expect(
+      fetchUrlToTempFile("http://93.184.216.34/start", makeStorageDir(), { fetchImpl }),
+    ).rejects.toThrow("Blocked private URL host");
   });
 });

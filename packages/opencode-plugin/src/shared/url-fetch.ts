@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";
+import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { log, warn } from "../logger";
 
 /** Max response body size (10 MB) */
@@ -22,7 +23,23 @@ const MAX_REDIRECTS = 5;
 
 interface FetchUrlOptions {
   allowPrivate?: boolean;
+  /** Test-only injection point. Production fetches use undici with DNS pinning. */
+  fetchImpl?: FetchImpl;
+  /** Test-only injection point. Production DNS resolution uses node:dns/promises.lookup. */
+  lookup?: LookupFn;
+  /** Test-only injection point for observing the DNS-pinned dispatcher. */
+  dispatcherFactory?: (validatedIp: string) => Dispatcher;
 }
+
+type LookupFn = typeof lookup;
+interface FetchInit {
+  signal?: AbortSignal;
+  redirect?: "manual";
+  dispatcher?: Dispatcher;
+  headers?: Record<string, string>;
+}
+
+type FetchImpl = (input: string, init: FetchInit) => Promise<Response>;
 
 interface CacheMeta {
   url: string;
@@ -163,11 +180,15 @@ function isPrivateIp(address: string): boolean {
   return true;
 }
 
-async function assertPublicUrl(url: URL, allowPrivate: boolean): Promise<void> {
+async function assertPublicUrl(
+  url: URL,
+  allowPrivate: boolean,
+  dnsLookup: LookupFn = lookup,
+): Promise<string | undefined> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`Only http:// and https:// URLs are supported, got: ${url.protocol}`);
   }
-  if (allowPrivate) return;
+  if (allowPrivate) return undefined;
 
   // URL.hostname returns IPv6 literals wrapped in brackets ("[::1]") per WHATWG.
   // Strip them before checking the address.
@@ -180,15 +201,29 @@ async function assertPublicUrl(url: URL, allowPrivate: boolean): Promise<void> {
     if (isPrivateIp(hostname)) {
       throw new Error(`Blocked private URL host ${url.hostname} (${hostname})`);
     }
-    return;
+    return hostname;
   }
 
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const addresses = await dnsLookup(hostname, { all: true, verbatim: true });
   for (const { address } of addresses) {
     if (isPrivateIp(address)) {
       throw new Error(`Blocked private URL host ${url.hostname} (${address})`);
     }
   }
+  if (addresses.length === 0) {
+    throw new Error(`Failed to resolve URL host ${url.hostname}`);
+  }
+  return addresses[0].address;
+}
+
+function createPinnedDispatcher(validatedIp: string): Dispatcher {
+  return new Agent({
+    connect: {
+      lookup: (_hostname, _opts, callback) => {
+        callback(null, validatedIp, validatedIp.includes(":") ? 6 : 4);
+      },
+    },
+  });
 }
 
 function resolveRedirectUrl(currentUrl: URL, location: string | null): URL {
@@ -198,19 +233,29 @@ function resolveRedirectUrl(currentUrl: URL, location: string | null): URL {
   return new URL(location, currentUrl);
 }
 
-async function fetchWithRedirects(startUrl: URL, allowPrivate: boolean): Promise<Response> {
+async function fetchWithRedirects(
+  startUrl: URL,
+  allowPrivate: boolean,
+  deps: Pick<FetchUrlOptions, "dispatcherFactory" | "fetchImpl" | "lookup"> = {},
+): Promise<Response> {
   let currentUrl = startUrl;
+  const fetchImpl = deps.fetchImpl ?? (undiciFetch as FetchImpl);
+  const dnsLookup = deps.lookup ?? lookup;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-    await assertPublicUrl(currentUrl, allowPrivate);
+    const validatedIp = await assertPublicUrl(currentUrl, allowPrivate, dnsLookup);
+    const dispatcher = validatedIp
+      ? (deps.dispatcherFactory ?? createPinnedDispatcher)(validatedIp)
+      : undefined;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await fetch(currentUrl.href, {
+      response = await fetchImpl(currentUrl.href, {
         signal: controller.signal,
         redirect: "manual",
+        dispatcher,
         headers: {
           "user-agent": "aft-opencode-plugin",
           // Prioritize markdown for content-negotiating servers (GitHub API, many docs sites).
@@ -316,7 +361,7 @@ export async function fetchUrlToTempFile(
   }
 
   log(`Fetching URL: ${url}`);
-  const response = await fetchWithRedirects(parsed, allowPrivate);
+  const response = await fetchWithRedirects(parsed, allowPrivate, options);
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText} fetching ${url}`);

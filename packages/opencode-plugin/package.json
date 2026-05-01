@@ -31,6 +31,7 @@
     "@opencode-ai/plugin": "^1.2.26",
     "@opencode-ai/sdk": "^1.2.26",
     "comment-json": "^4.6.2",
+    "undici": "^7.25.0",
     "zod": "^4.1.8"
   },
   "optionalDependencies": {
