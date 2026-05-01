@@ -215,9 +215,91 @@ fn zoom_html_heading_returns_content_with_context() {
     assert_eq!(resp["name"], "Features");
     assert_eq!(resp["kind"], "heading");
     let content = resp["content"].as_str().unwrap();
+    // Section content must include the heading AND the paragraph beneath it.
     assert!(
         content.contains("Features"),
         "content should contain heading text: {content}"
+    );
+    assert!(
+        content.contains("Feature list here"),
+        "content should include section body, not just the heading line: {content}"
+    );
+    // The About section belongs to a different heading — must not bleed in.
+    assert!(
+        !content.contains("About section"),
+        "content should stop before next sibling heading: {content}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+/// Regression: aft_zoom on an HTML heading must return the full section extent
+/// (heading through the line before the next same-or-shallower heading), not
+/// just the single heading element line.
+#[test]
+fn zoom_html_heading_returns_section_extent_not_just_heading_line() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "docs.html",
+        r#"<html><body>
+<h2>Installation</h2>
+<p>Run npm install.</p>
+<pre>npm install pkg</pre>
+<h2>Configuration</h2>
+<p>Set env vars.</p>
+<h3>Advanced</h3>
+<p>Advanced details here.</p>
+<h2>Usage</h2>
+<p>Call the API.</p>
+</body></html>
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({ "id": "z1", "command": "zoom", "file": file, "symbol": "Configuration" }),
+    );
+    assert_eq!(resp["success"], true);
+    let content = resp["content"].as_str().unwrap();
+    // Must include the h2 itself, the <p>, and the nested h3 + its content.
+    assert!(content.contains("Configuration"), "missing h2: {content}");
+    assert!(
+        content.contains("Set env vars"),
+        "missing section body: {content}"
+    );
+    assert!(
+        content.contains("Advanced"),
+        "nested h3 should be within section: {content}"
+    );
+    assert!(
+        content.contains("Advanced details here"),
+        "nested content should be included: {content}"
+    );
+    // Usage is a sibling h2 — must not bleed in.
+    assert!(
+        !content.contains("Call the API"),
+        "sibling section must not bleed in: {content}"
+    );
+
+    // h1 section: should span to EOF when it's the last heading.
+    let resp2 = send(
+        &mut aft,
+        json!({ "id": "z2", "command": "zoom", "file": file, "symbol": "Installation" }),
+    );
+    assert_eq!(resp2["success"], true);
+    let content2 = resp2["content"].as_str().unwrap();
+    assert!(
+        content2.contains("npm install pkg"),
+        "Installation section body missing: {content2}"
+    );
+    assert!(
+        !content2.contains("Set env vars"),
+        "Installation must stop before Configuration: {content2}"
     );
 
     let status = aft.shutdown();

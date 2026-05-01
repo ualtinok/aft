@@ -2587,6 +2587,21 @@ fn extract_html_symbols(source: &str, root: &Node) -> Result<Vec<Symbol>, AftErr
     let mut headings: Vec<(u8, Symbol)> = Vec::new();
     collect_html_headings(source, root, &mut headings);
 
+    let total_lines = source.lines().count() as u32;
+
+    // Extend each heading's end_line to just before the next heading at the
+    // same or shallower level (or EOF). This makes aft_zoom return the full
+    // section content rather than just the heading element's single line.
+    for i in 0..headings.len() {
+        let level = headings[i].0;
+        let section_end = headings[i + 1..]
+            .iter()
+            .find(|(l, _)| *l <= level)
+            .map(|(_, s)| s.range.start_line.saturating_sub(1))
+            .unwrap_or(total_lines);
+        headings[i].1.range.end_line = section_end;
+    }
+
     // Build hierarchy: assign scope_chain and parent based on heading level
     let mut scope_stack: Vec<(u8, String)> = Vec::new(); // (level, name)
     for (level, symbol) in headings.iter_mut() {
