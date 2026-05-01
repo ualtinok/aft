@@ -489,13 +489,14 @@ describe("loadAftConfig", () => {
     const fixture = createConfigFixture();
     writeFileSync(
       fixture.userConfigPath,
-      '{\n  // keep me\n  "experimental_bash_rewrite": true,\n}\n',
+      '{\n  // keep me\n  /* keep this block too */\n  "experimental_bash_rewrite": true,\n}\n',
     );
 
     runConfigLoader(fixture.projectDirectory, { HOME: fixture.home });
 
     const migrated = readFileSync(fixture.userConfigPath, "utf-8");
     expect(migrated).toContain("// keep me");
+    expect(migrated).toContain("/* keep this block too */");
     expect(migrated).toContain('"experimental"');
     expect(migrated).not.toContain("experimental_bash_rewrite");
   });

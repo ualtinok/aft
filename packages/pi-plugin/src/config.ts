@@ -323,6 +323,24 @@ function isWritableMigrationError(errorValue: unknown): boolean {
   return code === "EROFS" || code === "EACCES" || code === "EPERM";
 }
 
+/**
+ * Pulls all `//` line comments and `/* ... *​/` block comments out of a JSONC
+ * source string. Used as a backup safety net during migration so comments
+ * attached to deleted/reshaped keys don't disappear silently.
+ */
+function extractCommentsForPreservation(content: string): string[] {
+  const comments: string[] = [];
+  const linePattern = /\/\/[^\n]*/g;
+  for (const match of content.match(linePattern) ?? []) {
+    comments.push(match.trim());
+  }
+  const blockPattern = /\/\*[\s\S]*?\*\//g;
+  for (const match of content.match(blockPattern) ?? []) {
+    comments.push(match.replace(/\s+/g, " ").trim());
+  }
+  return comments;
+}
+
 function ensureRecordAtPath(root: Record<string, unknown>, path: readonly string[]) {
   let current = root;
   for (const segment of path) {
@@ -395,9 +413,10 @@ export function migrateAftConfigFile(
       return { migrated: false, oldKeys: [] };
     }
 
-    const comments = content.match(/^\s*\/\/.*$/gm) ?? [];
     const serialized = `${stringifyJsonc(rawConfig, null, 2)}\n`;
-    const preservedComments = comments.filter((comment) => !serialized.includes(comment.trim()));
+    const preservedComments = extractCommentsForPreservation(content).filter(
+      (comment) => !serialized.includes(comment.trim()),
+    );
     const nextContent =
       preservedComments.length > 0 ? `${preservedComments.join("\n")}\n${serialized}` : serialized;
 
