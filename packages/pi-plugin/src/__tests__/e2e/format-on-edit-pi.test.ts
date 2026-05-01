@@ -247,7 +247,12 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
     expect(await readFile(h.path("src/b.ts"), "utf8")).toContain("export function foo");
   });
 
-  test("Pi appendContent currently bypasses formatter", async () => {
+  test("Pi appendContent triggers formatter (bug #4 fix)", async () => {
+    // Bug #4 (v0.18.3): append now runs auto_format. The fake biome shim
+    // overwrites the entire file with formatted output, so post-format
+    // content matches the shim's canonical block. The test verifies:
+    //   - response.formatted is `true` (not undefined; pre-fix hardcoded)
+    //   - on-disk content reflects the shim's formatting (not raw append)
     const h = await formatHarness(BIOME_TS_PRESET, [formattingBiomeShim()]);
     await mkdir(h.path("src"), { recursive: true });
     await writeFile(h.path("src/append.ts"), "export const before = 1;\n", "utf8");
@@ -258,10 +263,12 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
       include_diff: true,
     });
 
-    expect(response.formatted).toBeUndefined();
-    expect(await readFile(h.path("src/append.ts"), "utf8")).toBe(
-      `export const before = 1;\n${TS_INPUT}`,
-    );
+    expect(response.formatted).toBe(true);
+    expect(response.format_skipped_reason).toBeUndefined();
+    // The fake biome shim rewrites the file to its canonical formatted
+    // block (see formattingBiomeShim above). After append+format, that's
+    // what's on disk — not the raw append concatenation.
+    expect(await readFile(h.path("src/append.ts"), "utf8")).toContain("export function foo");
   });
 
   test("Pi response shape parity: Rust formatted/format_skipped_reason flow through to wrapper details", async () => {

@@ -208,9 +208,20 @@ maybeDescribe("e2e format_on_edit edit tool", () => {
       appendContent: "export   const z=3\n",
     });
 
-    expect(await readFile(filePath, "utf8")).toContain("export   const z=3");
-    expect(output).not.toContain("Auto-formatted.");
-    expect(data.formatted).toBeUndefined();
+    // Bug #4 fix (v0.18.3): append now runs through auto_format like
+    // write/edit do. Biome reformats `export   const z=3` to
+    // `export const z = 3;` and the response carries `formatted: true`.
+    // Before the fix, append hardcoded `formatted: false, format_skipped_reason: None`
+    // and the messy text landed verbatim.
+    const finalContent = await readFile(filePath, "utf8");
+    expect(finalContent).toContain("export const z = 3;");
+    expect(finalContent).not.toContain("export   const z=3");
+    expect(data.formatted).toBe(true);
+    expect(data.format_skipped_reason).toBeUndefined();
+    // Hoisted `edit` tool returns JSON-stringified Rust response, so the
+    // `formatted: true` signal is in the JSON output (the human-readable
+    // "Auto-formatted." string is only used by hoisted `write`).
+    expect(output).toContain('"formatted":true');
   });
 
   test("edit symbol replace triggers formatter", async () => {

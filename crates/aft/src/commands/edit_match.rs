@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::context::AppContext;
 use crate::edit::{self, validate_syntax};
+use crate::format;
+
 use crate::protocol::{RawRequest, Response};
 
 /// Handle an `edit_match` request.
@@ -205,8 +207,21 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    // Re-read final content for LSP notification + optional diff. Read once
-    // and reuse for both purposes.
+    // Run the project formatter on the appended file. `auto_format` honors
+    // `config.format_on_edit` internally and returns `(false, None)` when
+    // disabled, so we can call it unconditionally. Bug #4 of the v0.18.3
+    // format_on_edit audit: append previously hardcoded `formatted: false,
+    // format_skipped_reason: None` and bypassed the formatter entirely.
+    // Agents that appended messy lines kept them messy with no signal.
+    let config = ctx.config();
+    let (formatted, format_skipped_reason) = format::auto_format(path.as_path(), &config);
+    drop(config);
+
+    // Re-read final content AFTER formatting so the LSP sees the formatted
+    // text (matches `write_format_validate` ordering: write → format → validate
+    // → notify LSP) and the diff in the response reflects what's actually
+    // on disk. Reading once and reusing for LSP + diff also avoids a TOCTOU
+    // window where the formatter could rewrite the file between reads.
     let final_content = std::fs::read_to_string(path.as_path()).unwrap_or_default();
 
     // Honor `diagnostics: true` like other write-style handlers (write,
@@ -219,7 +234,12 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
         "file": file,
         "created": !existed,
         "bytes_written": append_content.len(),
+        "formatted": formatted,
     });
+
+    if let Some(reason) = &format_skipped_reason {
+        result["format_skipped_reason"] = serde_json::json!(reason);
+    }
 
     if let Some(id) = backup_id {
         result["backup_id"] = serde_json::json!(id);
@@ -228,6 +248,7 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
     if want_diff {
         // For new files, before-content is empty; compute_diff_info handles
         // that correctly (additions = number of lines in append_content).
+        // Diff reflects post-format content because we re-read after format.
         result["diff"] = edit::compute_diff_info(&before_content, &final_content);
     }
 
@@ -237,8 +258,8 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
     if lsp_outcome.is_some() {
         let write_result = edit::WriteResult {
             syntax_valid: None,
-            formatted: false,
-            format_skipped_reason: None,
+            formatted,
+            format_skipped_reason: format_skipped_reason.clone(),
             validate_requested: false,
             validation_errors: Vec::new(),
             validate_skipped_reason: None,
