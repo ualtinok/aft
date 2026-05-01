@@ -55,12 +55,7 @@ describe("Pi buildWorkflowHints", () => {
 });
 
 describe("Pi buildHintsFromConfig", () => {
-  test("workflow_hints=false returns null", () => {
-    const config: AftConfig = { workflow_hints: false, tool_surface: "all" };
-    expect(buildHintsFromConfig(config, new Set(), true)).toBeNull();
-  });
-
-  test("default is enabled and includes hoisted bash name", () => {
+  test("emits hints by default and includes hoisted bash name", () => {
     const config: AftConfig = {
       tool_surface: "recommended",
       experimental: { bash: { background: true } },

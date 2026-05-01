@@ -107,11 +107,6 @@ export interface AftConfig {
    * Default: 20000 (applied Rust-side; undefined here means "use default").
    */
   max_callgraph_files?: number;
-  /**
-   * Inject a short workflow hints block into Pi's system prompt teaching
-   * the agent token-efficient AFT workflows. Default: true.
-   */
-  workflow_hints?: boolean;
 }
 
 // TODO: move this schema to a shared package/module with aft-opencode to avoid drift.
@@ -225,7 +220,6 @@ export const AftConfigSchema = z
     url_fetch_allow_private: z.boolean().optional(),
     semantic: SemanticConfigSchema.optional(),
     max_callgraph_files: z.number().int().positive().optional(),
-    workflow_hints: z.boolean().optional(),
   })
   .strict();
 

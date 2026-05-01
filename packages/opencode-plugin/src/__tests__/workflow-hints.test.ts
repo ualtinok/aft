@@ -115,13 +115,7 @@ describe("buildWorkflowHints", () => {
 });
 
 describe("buildHintsFromConfig", () => {
-  test("respects workflow_hints=false (returns null)", () => {
-    const config: AftConfig = { workflow_hints: false, tool_surface: "all" };
-    const out = buildHintsFromConfig(config, new Set());
-    expect(out).toBeNull();
-  });
-
-  test("default workflow_hints is enabled", () => {
+  test("emits hints by default", () => {
     const config: AftConfig = { tool_surface: "recommended" };
     const out = buildHintsFromConfig(config, new Set());
     expect(out).not.toBeNull();

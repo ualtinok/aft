@@ -105,9 +105,6 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
  * disabled-tools set computed at registration time.
  */
 export function buildHintsFromConfig(config: AftConfig, disabledTools: Set<string>): string | null {
-  if (config.workflow_hints === false) {
-    return null;
-  }
   return buildWorkflowHints({
     toolSurface: config.tool_surface ?? "recommended",
     hoistBuiltins: config.hoist_builtin_tools !== false,

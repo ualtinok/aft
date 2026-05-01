@@ -469,7 +469,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   // Workflow hints: short system-prompt block teaching token-efficient
   // AFT workflows. Hooked into Pi's `before_agent_start` event with
-  // systemPrompt extension. User-only — config.workflow_hints=false to opt out.
+  // systemPrompt extension. Always-on; conditional on the registered
+  // tool surface so absent tools aren't advertised.
   registerWorkflowHints(pi, config, surface);
 
   // Slash command: /aft-status

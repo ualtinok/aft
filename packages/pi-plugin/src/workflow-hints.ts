@@ -89,9 +89,6 @@ export function buildHintsFromConfig(
   absentTools: Set<string>,
   hoistBuiltins: boolean,
 ): string | null {
-  if (config.workflow_hints === false) {
-    return null;
-  }
   return buildWorkflowHints({
     toolSurface: config.tool_surface ?? "recommended",
     hoistBuiltins,
@@ -127,8 +124,6 @@ export function registerWorkflowHints(
   config: AftConfig,
   surface: ToolSurfaceFlags,
 ): void {
-  if (config.workflow_hints === false) return;
-
   // Build the absent-tools set from the resolved tool surface. Pi always
   // hoists built-ins (read/grep/bash), so `hoistBuiltins=true`.
   const absent = new Set<string>();
