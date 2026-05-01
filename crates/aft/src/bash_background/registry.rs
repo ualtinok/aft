@@ -674,7 +674,7 @@ impl BgTaskRegistry {
             .map(|task| task.paths.exit.clone())
     }
 
-    /// Generate a `bgb-{8hex}` slug that is unique against live tasks and queued completions.
+    /// Generate a `bgb-{16hex}` slug that is unique against live tasks and queued completions.
     fn generate_unique_task_id(&self) -> Result<String, String> {
         for _ in 0..32 {
             let candidate = random_slug();
@@ -820,7 +820,9 @@ fn random_slug() -> String {
     let mixed = unix_millis_nanos()
         ^ (std::process::id() as u128).wrapping_mul(0x9E3779B97F4A7C15)
         ^ (counter as u128).wrapping_mul(0xBF58476D1CE4E5B9);
-    format!("bgb-{:08x}", (mixed as u32))
+    // Use 64 bits (`bgb-` + 16 lowercase hex chars) to keep IDs compact while
+    // avoiding the birthday-collision risk of the old 32-bit suffix.
+    format!("bgb-{:016x}", mixed as u64)
 }
 
 fn unix_millis_nanos() -> u128 {
