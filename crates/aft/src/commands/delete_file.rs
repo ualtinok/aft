@@ -57,7 +57,7 @@ pub fn handle_delete_file(req: &RawRequest, ctx: &AppContext) -> Response {
         };
 
     // Delete the file
-    if let Err(e) = std::fs::remove_file(path) {
+    if let Err(e) = std::fs::remove_file(&path) {
         return Response::error(
             &req.id,
             "io_error",
@@ -65,7 +65,7 @@ pub fn handle_delete_file(req: &RawRequest, ctx: &AppContext) -> Response {
         );
     }
 
-    ctx.lsp_notify_watched_config_file(Path::new(file), FileChangeType::DELETED);
+    ctx.lsp_notify_watched_config_file(path.as_path(), FileChangeType::DELETED);
 
     log::debug!("delete_file: {}", file);
 
