@@ -439,7 +439,7 @@ fn handle_glob_edit_match(
         for edit in &pending {
             if let Err(e) = std::fs::write(&edit.path, &edit.new_source) {
                 if let Some(name) = &checkpoint_name {
-                    restore_glob_checkpoint(ctx, req.session(), name, &written_paths);
+                    let _ = restore_glob_checkpoint(ctx, req.session(), name, &written_paths);
                     delete_glob_checkpoint(ctx, req.session(), name);
                 }
                 return Response::error(
@@ -486,7 +486,7 @@ fn handle_glob_edit_match(
                             .iter()
                             .map(|edit| edit.path.clone())
                             .collect::<Vec<_>>();
-                        restore_glob_checkpoint(ctx, req.session(), name, &paths);
+                        let _ = restore_glob_checkpoint(ctx, req.session(), name, &paths);
                         delete_glob_checkpoint(ctx, req.session(), name);
                     }
                     return Response::error(&req.id, e.code(), e.to_string());
@@ -520,12 +520,13 @@ fn handle_glob_edit_match(
     // batch back to the pre-edit checkpoint. Don't leave the project in a
     // partially-broken state across many files at once.
     if !dry_run && !syntax_failures.is_empty() {
+        let mut rollback: Option<Result<(), String>> = None;
         if let Some(name) = &checkpoint_name {
             let paths = pending
                 .iter()
                 .map(|edit| edit.path.clone())
                 .collect::<Vec<_>>();
-            restore_glob_checkpoint(ctx, req.session(), name, &paths);
+            rollback = Some(restore_glob_checkpoint(ctx, req.session(), name, &paths));
             delete_glob_checkpoint(ctx, req.session(), name);
             // Re-notify LSP so any cached diagnostics for the rolled-back
             // files reflect the restored content, not the broken edits.
@@ -544,16 +545,31 @@ fn handle_glob_edit_match(
                 syntax_failures.len() - 5
             )
         };
-        return Response::error(
-            &req.id,
-            "syntax_invalid",
-            format!(
-                "edit_match (glob): replacement would leave {} of {} file(s) syntax-invalid; rolled back. Affected: {}",
-                syntax_failures.len(),
-                pending.len(),
-                summary
+        return match rollback {
+            Some(Err(reason)) => Response::error_with_data(
+                &req.id,
+                "syntax_invalid",
+                format!(
+                    "edit_match (glob): replacement would leave {} of {} file(s) syntax-invalid; rollback FAILED: {}. Files may be in inconsistent state. Affected: {}",
+                    syntax_failures.len(),
+                    pending.len(),
+                    reason,
+                    summary
+                ),
+                serde_json::json!({ "rollback_succeeded": false }),
             ),
-        );
+            _ => Response::error_with_data(
+                &req.id,
+                "syntax_invalid",
+                format!(
+                    "edit_match (glob): replacement would leave {} of {} file(s) syntax-invalid; rolled back. Affected: {}",
+                    syntax_failures.len(),
+                    pending.len(),
+                    summary
+                ),
+                serde_json::json!({ "rollback_succeeded": true }),
+            ),
+        };
     }
 
     if dry_run {
@@ -614,20 +630,69 @@ fn unique_glob_checkpoint_name() -> String {
     format!("__edit_match_glob_{}__", nanos)
 }
 
-fn restore_glob_checkpoint(ctx: &AppContext, session: &str, name: &str, paths: &[PathBuf]) {
+fn restore_glob_checkpoint(
+    ctx: &AppContext,
+    session: &str,
+    name: &str,
+    paths: &[PathBuf],
+) -> Result<(), String> {
     if paths.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Err(e) = ctx
+    match ctx
         .checkpoint()
         .borrow()
         .restore_validated(session, name, paths)
     {
-        log::warn!(
-            "[aft] edit_match glob rollback: failed to restore checkpoint {}: {}",
-            name,
-            e
-        );
+        Ok(_) => Ok(()),
+        Err(e) => {
+            log::warn!(
+                "[aft] edit_match glob rollback: failed to restore checkpoint {}: {}",
+                name,
+                e
+            );
+            Err(e.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::config::Config;
+    use crate::context::AppContext;
+    use crate::language::StubProvider;
+
+    use super::restore_glob_checkpoint;
+
+    #[test]
+    fn restore_glob_checkpoint_reports_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let a = root.join("a.ts");
+        let b = root.join("b.ts");
+        fs::write(&a, "const a = TARGET;\n").unwrap();
+
+        let ctx = AppContext::new(Box::new(StubProvider), Config::default());
+        let checkpoint_name = ctx
+            .checkpoint()
+            .borrow_mut()
+            .create(
+                "default",
+                "__edit_match_glob_missing_path__",
+                vec![a.clone()],
+                &ctx.backup().borrow(),
+            )
+            .unwrap()
+            .name;
+
+        let result = restore_glob_checkpoint(&ctx, "default", &checkpoint_name, &[a, b]);
+        ctx.checkpoint()
+            .borrow_mut()
+            .delete("default", &checkpoint_name);
+
+        assert!(result.unwrap_err().contains("file not found"));
     }
 }
 
