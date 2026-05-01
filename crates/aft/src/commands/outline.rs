@@ -287,6 +287,9 @@ fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
             return;
         }
         let path = entry.path();
+        if is_symlink(&path) {
+            continue;
+        }
         if path.is_dir() {
             if should_skip_directory(&path) {
                 continue;
@@ -296,6 +299,12 @@ fn collect_outline_files(directory: &Path, files: &mut Vec<String>) {
             files.push(path.to_string_lossy().to_string());
         }
     }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 fn should_skip_directory(path: &Path) -> bool {

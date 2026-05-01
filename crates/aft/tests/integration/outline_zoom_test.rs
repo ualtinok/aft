@@ -17,6 +17,16 @@ fn send(aft: &mut AftProcess, request: serde_json::Value) -> serde_json::Value {
     aft.send(&request.to_string())
 }
 
+#[cfg(unix)]
+fn create_dir_symlink(src: &Path, dst: &Path) {
+    std::os::unix::fs::symlink(src, dst).expect("create symlink");
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(src: &Path, dst: &Path) {
+    std::os::windows::fs::symlink_dir(src, dst).expect("create symlink");
+}
+
 #[test]
 fn outline_single_file_returns_tree_text_with_signatures_and_variables() {
     let dir = TempDir::new().unwrap();
@@ -84,6 +94,38 @@ let localCount = 0;
 
     let status = aft.shutdown();
     assert!(status.success());
+}
+
+#[test]
+fn outline_directory_skips_symlink_loops() {
+    let dir = TempDir::new().unwrap();
+    write_file(
+        dir.path(),
+        "src/main.ts",
+        "export function reachable(): void {}\n",
+    );
+    create_dir_symlink(dir.path(), &dir.path().join("src/loop"));
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({"id": "outline-symlink-loop", "command": "outline", "directory": dir.path()}),
+    );
+
+    assert_eq!(resp["success"], true, "outline should succeed: {resp:?}");
+    let text = resp["text"].as_str().expect("outline text");
+    assert!(
+        text.contains("reachable"),
+        "outline missed real file: {text}"
+    );
+    assert!(
+        !text.contains("loop/src"),
+        "outline followed symlink loop: {text}"
+    );
+
+    assert!(aft.shutdown().success());
 }
 
 #[test]
