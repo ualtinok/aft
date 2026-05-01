@@ -161,6 +161,20 @@ fn background_completion_push_frame_emits_on_terminal_transition() {
 }
 
 #[test]
+fn background_completion_frame_remains_valid_json() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+
+    let task_id = spawn_bg(&mut aft, "spawn-valid-json", "echo json-frame-done");
+    let frame = wait_for_bash_completed_frame(&mut aft, &task_id);
+
+    assert_eq!(frame["type"], "bash_completed");
+    assert_eq!(frame["status"], "completed");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
 fn background_output_preview_updates_and_completes() {
     let mut aft = AftProcess::spawn();
     let _dir = configure_background(&mut aft);

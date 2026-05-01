@@ -1,4 +1,5 @@
 use std::cell::{Ref, RefCell, RefMut};
+use std::io::{self, BufWriter};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -17,6 +18,7 @@ use crate::protocol::{ProgressFrame, PushFrame};
 
 pub type ProgressSender = Arc<Box<dyn Fn(PushFrame) + Send + Sync>>;
 pub type SharedProgressSender = Arc<Mutex<Option<ProgressSender>>>;
+pub type SharedStdoutWriter = Arc<Mutex<BufWriter<io::Stdout>>>;
 use crate::search_index::SearchIndex;
 use crate::semantic_index::SemanticIndex;
 
@@ -234,6 +236,7 @@ pub struct AppContext {
     watcher: RefCell<Option<RecommendedWatcher>>,
     watcher_rx: RefCell<Option<mpsc::Receiver<notify::Result<notify::Event>>>>,
     lsp_manager: RefCell<LspManager>,
+    stdout_writer: SharedStdoutWriter,
     progress_sender: SharedProgressSender,
     bash_background: BgTaskRegistry,
 }
@@ -241,6 +244,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(provider: Box<dyn LanguageProvider>, config: Config) -> Self {
         let progress_sender = Arc::new(Mutex::new(None));
+        let stdout_writer = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
         AppContext {
             provider,
             backup: RefCell::new(BackupStore::new()),
@@ -256,9 +260,14 @@ impl AppContext {
             watcher: RefCell::new(None),
             watcher_rx: RefCell::new(None),
             lsp_manager: RefCell::new(LspManager::new()),
+            stdout_writer,
             progress_sender: Arc::clone(&progress_sender),
             bash_background: BgTaskRegistry::new(progress_sender),
         }
+    }
+
+    pub fn stdout_writer(&self) -> SharedStdoutWriter {
+        Arc::clone(&self.stdout_writer)
     }
 
     pub fn set_progress_sender(&self, sender: Option<ProgressSender>) {

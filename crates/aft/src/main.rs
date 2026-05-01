@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufRead, Write};
 
 use aft::config::Config;
 use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
@@ -32,13 +32,18 @@ fn main() {
     log::info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
-    ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(|frame: PushFrame| {
-        let stdout = io::stdout();
-        let mut writer = BufWriter::new(stdout.lock());
-        if let Err(e) = write_push_frame(&mut writer, &frame) {
-            log::error!("stdout push frame write error: {}", e);
-        }
-    }))));
+    let stdout_writer = ctx.stdout_writer();
+    ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(
+        move |frame: PushFrame| {
+            let Ok(mut writer) = stdout_writer.lock() else {
+                log::error!("stdout push frame lock poisoned");
+                return;
+            };
+            if let Err(e) = write_push_frame(&mut *writer, &frame) {
+                log::error!("stdout push frame write error: {}", e);
+            }
+        },
+    ))));
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -83,7 +88,7 @@ fn main() {
             }
         };
 
-        if let Err(e) = write_response(&response) {
+        if let Err(e) = write_response(&ctx, &response) {
             log::error!("stdout write error: {}", e);
             break;
         }
@@ -246,16 +251,18 @@ fn handle_snapshot(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 }
 
-fn write_response(response: &Response) -> io::Result<()> {
-    let stdout = io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
-    serde_json::to_writer(&mut writer, response)?;
+fn write_response(ctx: &AppContext, response: &Response) -> io::Result<()> {
+    let stdout_writer = ctx.stdout_writer();
+    let mut writer = stdout_writer
+        .lock()
+        .map_err(|_| io::Error::other("stdout writer lock poisoned"))?;
+    serde_json::to_writer(&mut *writer, response)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
 }
 
-fn write_push_frame(writer: &mut BufWriter<io::StdoutLock>, frame: &PushFrame) -> io::Result<()> {
+fn write_push_frame(writer: &mut impl Write, frame: &PushFrame) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, frame)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
