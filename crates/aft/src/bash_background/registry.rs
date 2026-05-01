@@ -93,6 +93,7 @@ pub(crate) struct BgTask {
     pub(crate) session_id: String,
     pub(crate) paths: TaskPaths,
     pub(crate) started: Instant,
+    pub(crate) terminal_at: Mutex<Option<Instant>>,
     pub(crate) state: Mutex<BgTaskState>,
 }
 
@@ -177,6 +178,7 @@ impl BgTaskRegistry {
             session_id,
             paths: paths.clone(),
             started: Instant::now(),
+            terminal_at: Mutex::new(None),
             state: Mutex::new(BgTaskState {
                 metadata,
                 child: Some(child),
@@ -307,7 +309,28 @@ impl BgTaskRegistry {
             .map(|_| ())
     }
 
-    pub fn cleanup_finished(&self, _older_than: Duration) {}
+    pub fn cleanup_finished(&self, older_than: Duration) {
+        let cutoff = Instant::now().checked_sub(older_than);
+        if let Ok(mut tasks) = self.inner.tasks.lock() {
+            tasks.retain(|_, task| {
+                let is_terminal = task
+                    .state
+                    .lock()
+                    .map(|state| state.metadata.status.is_terminal())
+                    .unwrap_or(false);
+                if !is_terminal {
+                    return true;
+                }
+
+                let terminal_at = task.terminal_at.lock().ok().and_then(|at| *at);
+                match (terminal_at, cutoff) {
+                    (Some(terminal_at), Some(cutoff)) => terminal_at > cutoff,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+            });
+        }
+    }
 
     pub fn drain_completions(&self) -> Vec<BgCompletion> {
         self.drain_completions_for_session(None)
@@ -437,6 +460,7 @@ impl BgTaskRegistry {
             session_id,
             paths: paths.clone(),
             started: Instant::now(),
+            terminal_at: Mutex::new(metadata.status.is_terminal().then(Instant::now)),
             state: Mutex::new(BgTaskState {
                 metadata,
                 child: None,
@@ -498,6 +522,7 @@ impl BgTaskRegistry {
             state
                 .metadata
                 .mark_terminal(terminal_status, exit_code, None);
+            task.mark_terminal_now();
             write_task(&task.paths.json, &state.metadata)
                 .map_err(|e| format!("failed to persist killed state: {e}"))?;
             state.buffer.enforce_terminal_cap();
@@ -527,6 +552,7 @@ impl BgTaskRegistry {
         })
         .map_err(|e| format!("failed to persist terminal state: {e}"))?;
         state.metadata = updated;
+        task.mark_terminal_now();
         state.child = None;
         state.detached = true;
         state.buffer.enforce_terminal_cap();
@@ -728,6 +754,14 @@ impl BgTask {
             .unwrap_or(false)
     }
 
+    fn mark_terminal_now(&self) {
+        if let Ok(mut terminal_at) = self.terminal_at.lock() {
+            if terminal_at.is_none() {
+                *terminal_at = Some(Instant::now());
+            }
+        }
+    }
+
     fn set_completion_delivered(&self, delivered: bool) -> Result<(), String> {
         let mut state = self
             .state
@@ -794,4 +828,59 @@ fn unix_millis_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn cleanup_finished_removes_terminal_tasks_older_than_threshold() {
+        let registry = BgTaskRegistry::default();
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = registry
+            .spawn(
+                "true",
+                "session".to_string(),
+                dir.path().to_path_buf(),
+                HashMap::new(),
+                Some(Duration::from_secs(30)),
+                dir.path().to_path_buf(),
+                10,
+            )
+            .unwrap();
+        registry
+            .kill_with_status(&task_id, "session", BgTaskStatus::Killed)
+            .unwrap();
+
+        registry.cleanup_finished(Duration::ZERO);
+
+        assert!(registry.inner.tasks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cleanup_finished_keeps_running_tasks() {
+        let registry = BgTaskRegistry::new(Arc::new(Mutex::new(None)));
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = registry
+            .spawn(
+                "sleep 5",
+                "session".to_string(),
+                dir.path().to_path_buf(),
+                HashMap::new(),
+                Some(Duration::from_secs(30)),
+                dir.path().to_path_buf(),
+                10,
+            )
+            .unwrap();
+
+        registry.cleanup_finished(Duration::ZERO);
+
+        assert!(registry.inner.tasks.lock().unwrap().contains_key(&task_id));
+        let _ = registry.kill(&task_id, "session");
+    }
 }

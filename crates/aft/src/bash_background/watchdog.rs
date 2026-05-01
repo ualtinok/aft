@@ -6,12 +6,27 @@ use crossbeam_channel::tick;
 
 use super::registry::BgTaskRegistry;
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(500);
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const FINISHED_RETENTION: Duration = Duration::from_secs(60 * 60);
 
 pub(crate) fn start(registry: BgTaskRegistry) {
     thread::spawn(move || {
         let ticker = tick(WATCHDOG_INTERVAL);
+        let cleanup_ticker = tick(CLEANUP_INTERVAL);
         while !registry.inner.shutdown.load(Ordering::SeqCst) {
-            if ticker.recv().is_err() {
+            crossbeam_channel::select! {
+                recv(ticker) -> tick => {
+                    if tick.is_err() {
+                        break;
+                    }
+                }
+                recv(cleanup_ticker) -> _ => {
+                    registry.cleanup_finished(FINISHED_RETENTION);
+                    continue;
+                }
+            }
+
+            if registry.inner.shutdown.load(Ordering::SeqCst) {
                 break;
             }
 
