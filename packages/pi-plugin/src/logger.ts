@@ -3,7 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const TAG = "[aft-pi]";
-const logFile = path.join(os.tmpdir(), "aft-pi.log");
+
+const isTestEnv = process.env.BUN_TEST === "1" || process.env.NODE_ENV === "test";
+const logFile = path.join(os.tmpdir(), isTestEnv ? "aft-pi-test.log" : "aft-pi.log");
 
 /**
  * When AFT_LOG_STDERR=1, logs go to stderr (useful for subprocess tests that

@@ -29,12 +29,12 @@ function createMockClient(): any {
   };
 }
 
-function createPluginContext(pool: BridgePool): PluginContext {
+function createPluginContext(pool: BridgePool, storageDir: string): PluginContext {
   return {
     pool,
     client: createMockClient(),
     config: {} as PluginContext["config"],
-    storageDir: "/tmp/aft-test",
+    storageDir,
   };
 }
 
@@ -89,7 +89,7 @@ maybeDescribe("e2e semantic search tool", () => {
       harness,
       pool,
       sdkCtx: createSdkContext(harness.tempDir),
-      tools: semanticTools(createPluginContext(pool)),
+      tools: semanticTools(createPluginContext(pool, join(harness.tempDir, ".storage"))),
     };
   }
 

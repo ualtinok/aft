@@ -3,7 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const TAG = "[aft-plugin]";
-const logFile = path.join(os.tmpdir(), "aft-plugin.log");
+
+// Route test runs to a separate log file so `bun test` never pollutes the
+// live session log that users read to diagnose problems. Bun sets BUN_TEST=1
+// automatically; NODE_ENV=test covers other test harnesses.
+const isTestEnv = process.env.BUN_TEST === "1" || process.env.NODE_ENV === "test";
+const logFile = path.join(os.tmpdir(), isTestEnv ? "aft-plugin-test.log" : "aft-plugin.log");
 
 /**
  * When AFT_LOG_STDERR=1, logs go to stderr (useful for subprocess tests that
