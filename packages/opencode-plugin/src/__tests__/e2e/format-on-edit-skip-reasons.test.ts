@@ -616,6 +616,9 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
           format_on_edit: true,
           validate_on_edit: "syntax",
           formatter: { typescript: "biome" },
+          // Set a short timeout so the 10s-sleep shim is reliably killed.
+          // Without this, the default 10s timeout races with `sleep 10`.
+          formatter_timeout_secs: 2,
         },
       },
       {
