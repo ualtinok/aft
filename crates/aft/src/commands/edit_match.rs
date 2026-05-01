@@ -228,12 +228,17 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
     // edit_match, edit_symbol). When false/absent, this still notifies the
     // LSP layer that the file changed but doesn't wait for diagnostics.
     let lsp_outcome = ctx.lsp_post_write(path.as_path(), &final_content, &req.params);
+    let syntax_valid = match edit::validate_syntax(path.as_path()) {
+        Ok(result) => result,
+        Err(error) => return Response::error(&req.id, error.code(), error.to_string()),
+    };
 
     let mut result = serde_json::json!({
         "ok": true,
         "file": file,
         "created": !existed,
         "bytes_written": append_content.len(),
+        "syntax_valid": syntax_valid,
         "formatted": formatted,
     });
 
@@ -257,7 +262,7 @@ fn handle_append(req: &RawRequest, ctx: &AppContext) -> Response {
     // `lsp_exited_servers` shape as `write` and `edit_match` find/replace.
     if lsp_outcome.is_some() {
         let write_result = edit::WriteResult {
-            syntax_valid: Some(true),
+            syntax_valid,
             formatted,
             format_skipped_reason: format_skipped_reason.clone(),
             validate_requested: false,

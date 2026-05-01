@@ -73,6 +73,25 @@ fn append_appends_to_existing_file() {
 }
 
 #[test]
+fn append_reports_invalid_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("broken.ts");
+    fs::write(&target, "export function broken() {\n").unwrap();
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, dir.path());
+
+    let req = append_request("append-invalid-syntax", &target, "const value = ;\n");
+    let resp = aft.send(&serde_json::to_string(&req).unwrap());
+
+    assert_eq!(resp["success"], true, "append failed: {resp:?}");
+    assert_eq!(resp["syntax_valid"], false, "response: {resp:?}");
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn append_creates_parent_directories() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("newdir/subdir/file.txt");
