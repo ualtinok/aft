@@ -369,8 +369,10 @@ export function tsCollapseSpacesShim(name = "biome"): FakeFormatterShim {
   return {
     name,
     // Args: "format" "--write" "<file>". The file path is the LAST arg.
+    // Use POSIX-compatible last-arg extraction (${@: -1} is bash-only, not
+    // supported by dash which is /bin/sh on Ubuntu/Debian CI runners).
     script: `#!/bin/sh
-file="\${@: -1}"
+for file; do :; done
 sed -E 's/  +/ /g' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
 exit 0
 `,
