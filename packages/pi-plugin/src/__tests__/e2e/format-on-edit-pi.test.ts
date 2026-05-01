@@ -38,7 +38,10 @@ const BIOME_TS_PRESET: FormatPreset = {
         2,
       ),
     },
-    { path: "package.json", content: JSON.stringify({ name: "pi-format-test", private: true }) },
+    {
+      path: "package.json",
+      content: JSON.stringify({ name: "pi-format-test", private: true }),
+    },
   ],
 };
 
@@ -55,7 +58,10 @@ const BIOME_TS_EXCLUDED_PRESET: FormatPreset = {
         2,
       ),
     },
-    { path: "package.json", content: JSON.stringify({ name: "pi-format-excluded-test" }) },
+    {
+      path: "package.json",
+      content: JSON.stringify({ name: "pi-format-excluded-test" }),
+    },
   ],
 };
 
@@ -149,7 +155,10 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
   async function formatHarness(
     preset: FormatPreset,
     shims: FakeFormatterShim[] = [],
-    config: Record<string, unknown> = { format_on_edit: true, validate_on_edit: "syntax" },
+    config: Record<string, unknown> = {
+      format_on_edit: true,
+      validate_on_edit: "syntax",
+    },
   ): Promise<Harness> {
     const h = await createHarness(preparedBinary, {
       fixtureNames: [],
@@ -163,7 +172,10 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
 
   test("Pi hoisted write triggers formatter", async () => {
     const h = await formatHarness(BIOME_TS_PRESET, [formattingBiomeShim()]);
-    const result = await h.callTool("write", { filePath: "src/write.ts", content: TS_INPUT });
+    const result = await h.callTool("write", {
+      filePath: "src/write.ts",
+      content: TS_INPUT,
+    });
 
     expect(await readFile(h.path("src/write.ts"), "utf8")).toContain("export function foo");
     // Pi wrapper now surfaces the formatter outcome through details.formatted
@@ -193,7 +205,11 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
   test("Pi formatter_excluded_path propagates through raw Rust response", async () => {
     const h = await formatHarness(BIOME_TS_EXCLUDED_PRESET, [excludedPathShim()]);
     const file = h.path("scratch/excluded.ts");
-    const response = await h.bridge.send("write", { file, content: TS_INPUT, create_dirs: true });
+    const response = await h.bridge.send("write", {
+      file,
+      content: TS_INPUT,
+      create_dirs: true,
+    });
 
     expect(response.success).toBe(true);
     expect(response.formatted).toBe(false);
@@ -247,6 +263,45 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
     expect(await readFile(h.path("src/b.ts"), "utf8")).toContain("export function foo");
   });
 
+  test("Pi glob edit_match formats every matched file", async () => {
+    const h = await formatHarness(BIOME_TS_PRESET, [formattingBiomeShim()]);
+    await mkdir(h.path("src"), { recursive: true });
+    await writeFile(h.path("src/a.ts"), "export const a = OLD;\n", "utf8");
+    await writeFile(h.path("src/b.ts"), "export const b = OLD;\n", "utf8");
+
+    const response = await h.bridge.send("edit_match", {
+      file: h.path("src/*.ts"),
+      match: "OLD",
+      replacement: "NEW",
+    });
+
+    expect(response.success).toBe(true);
+    expect(response.total_files).toBe(2);
+    expect(response.format_skipped_count).toBe(0);
+    expect(response.format_skip_reasons).toEqual([]);
+    const files = response.files as Array<Record<string, unknown>>;
+    expect(files.every((file) => file.formatted === true)).toBe(true);
+    expect(files.every((file) => file.format_skipped_reason === undefined)).toBe(true);
+    expect(await readFile(h.path("src/a.ts"), "utf8")).toContain("export function foo");
+    expect(await readFile(h.path("src/b.ts"), "utf8")).toContain("export function foo");
+  });
+
+  test("Pi glob edit_match surfaces actionable skip reasons in agent text", async () => {
+    const h = await formatHarness(formatterPreset("biome"), [excludedPathShim()]);
+    await mkdir(h.path("src"), { recursive: true });
+    await writeFile(h.path("src/a.ts"), 'export const a = "OLD";\n', "utf8");
+    await writeFile(h.path("src/b.ts"), 'export const b = "OLD";\n', "utf8");
+
+    const wrapped = await h.callTool("edit", {
+      filePath: h.path("src/*.ts"),
+      oldString: "OLD",
+      newString: "NEW",
+    });
+
+    expect(h.text(wrapped)).toContain("formatter skipped some glob edit result file(s)");
+    expect(h.text(wrapped)).toContain("formatter_excluded_path");
+  });
+
   test("Pi appendContent triggers formatter (bug #4 fix)", async () => {
     // Bug #4 (v0.18.3): append now runs auto_format. The fake biome shim
     // overwrites the entire file with formatted output, so post-format
@@ -278,7 +333,10 @@ maybeDescribe("e2e Pi format_on_edit parity", () => {
       content: TS_INPUT,
       create_dirs: true,
     });
-    const wrapped = await h.callTool("write", { filePath: "src/wrapped.ts", content: TS_INPUT });
+    const wrapped = await h.callTool("write", {
+      filePath: "src/wrapped.ts",
+      content: TS_INPUT,
+    });
     const wrappedDetails = detailsOf(wrapped);
 
     expect(raw.formatted).toBe(false);

@@ -346,6 +346,7 @@ export function buildMutationResult(
   // these the same way; this is the Pi parity fix.
   const formatted = response.formatted as boolean | undefined;
   const formatSkippedReason = response.format_skipped_reason as string | undefined;
+  const globFormatSkipReasons = response.format_skip_reasons as unknown;
 
   // Generate the Pi-style line-numbered diff when Rust gave us before/after
   // and the diff wasn't truncated. Truncated diffs carry `additions`/`deletions`
@@ -384,6 +385,8 @@ export function buildMutationResult(
   // pointing at the right remediation.
   const skipNote = formatSkipReasonNote(formatSkippedReason);
   if (skipNote) text += `\n\n${skipNote}`;
+  const globSkipNote = formatGlobSkipReasonsNote(globFormatSkipReasons);
+  if (globSkipNote) text += `\n\n${globSkipNote}`;
   if (diagnostics && diagnostics.length > 0) {
     text += `\n\nLSP diagnostics:\n${formatDiagnosticsText(diagnostics)}`;
   }
@@ -402,6 +405,17 @@ export function buildMutationResult(
       formatSkippedReason,
     },
   };
+}
+
+function formatGlobSkipReasonsNote(reasons: unknown): string | undefined {
+  if (!Array.isArray(reasons)) return undefined;
+  const actionable = reasons
+    .filter((reason): reason is string => typeof reason === "string")
+    .filter((reason) =>
+      ["formatter_not_installed", "formatter_excluded_path", "timeout", "error"].includes(reason),
+    );
+  if (actionable.length === 0) return undefined;
+  return `Note: formatter skipped some glob edit result file(s): ${[...new Set(actionable)].sort().join(", ")}. See per-file format_skipped_reason values for details.`;
 }
 
 /**

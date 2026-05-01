@@ -11,6 +11,7 @@ import type { PluginContext } from "../../types.js";
 import {
   BIOME_TS_EXCLUDED_PRESET,
   BIOME_TS_PRESET,
+  biomeExcludedPathShim,
   createFormatHarness,
   type FakeFormatterShim,
   FIXTURES,
@@ -91,6 +92,49 @@ function genericErrorShim(name = "biome"): FakeFormatterShim {
   return shim(name, "fake formatter: something exploded", 2);
 }
 
+function formattingBiomeShim(name = "biome"): FakeFormatterShim {
+  return {
+    name,
+    script: `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "${name} 2.0.0"
+  exit 0
+fi
+file=""
+for arg in "$@"; do file="$arg"; done
+echo "$file" >> "$(dirname "$file")/formatter-count.log"
+python3 - "$file" <<'PY'
+import re, sys
+p=sys.argv[1]
+s=open(p).read()
+s=re.sub(r"export\\s+const\\s+(\\w+)\\s*=\\s*([^;\\n]+);?", r"export const \\1 = \\2;", s)
+open(p,"w").write(s)
+PY
+exit 0
+`,
+  };
+}
+
+async function executeRustGlobEdit(
+  h: E2EHarness,
+  pattern: string,
+  overrides?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (overrides) {
+    const configured = await h.bridge.send("configure", {
+      project_root: h.tempDir,
+      validate_on_edit: "syntax",
+      ...overrides,
+    });
+    expect(configured.success).toBe(true);
+  }
+  return await h.bridge.send("edit_match", {
+    file: h.path(pattern),
+    match: "OLD",
+    replacement: "NEW  VALUE",
+  });
+}
+
 function hangingShim(name = "biome"): FakeFormatterShim {
   return {
     name,
@@ -143,16 +187,50 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     h: E2EHarness,
     filePath: string,
     content: string,
-    poolOverrides: Record<string, unknown> = { format_on_edit: true, validate_on_edit: "syntax" },
+    poolOverrides: Record<string, unknown> = {
+      format_on_edit: true,
+      validate_on_edit: "syntax",
+    },
   ): Promise<string> {
     const pool = new BridgePool(
       h.binaryPath,
       { timeoutMs: 30_000 },
-      { project_root: h.tempDir, storage_dir: h.path(".storage"), ...poolOverrides },
+      {
+        project_root: h.tempDir,
+        storage_dir: h.path(".storage"),
+        ...poolOverrides,
+      },
     );
     pools.push(pool);
     const tools = hoistedTools(createPluginContext(pool, h.path(".storage")));
     return await tools.write.execute({ filePath, content }, createSdkContext(h.tempDir));
+  }
+
+  async function executeHoistedEdit(
+    h: E2EHarness,
+    filePath: string,
+    oldString: string,
+    newString: string,
+    poolOverrides: Record<string, unknown> = {
+      format_on_edit: true,
+      validate_on_edit: "syntax",
+    },
+  ): Promise<string> {
+    const pool = new BridgePool(
+      h.binaryPath,
+      { timeoutMs: 30_000 },
+      {
+        project_root: h.tempDir,
+        storage_dir: h.path(".storage-edit"),
+        ...poolOverrides,
+      },
+    );
+    pools.push(pool);
+    const tools = hoistedTools(createPluginContext(pool, h.path(".storage-edit")));
+    return await tools.edit.execute(
+      { filePath, oldString, newString },
+      createSdkContext(h.tempDir),
+    );
   }
 
   async function writeAndExpectSkip(
@@ -161,7 +239,11 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     content: string,
     reason: FormatSkipReason,
     poolOverrides?: Record<string, unknown>,
-  ): Promise<{ output: string; data: Record<string, unknown>; filePath: string }> {
+  ): Promise<{
+    output: string;
+    data: Record<string, unknown>;
+    filePath: string;
+  }> {
     const filePath = h.path(relativePath);
     const data = await executeRustWrite(h, relativePath, content, poolOverrides);
 
@@ -183,12 +265,19 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     h: E2EHarness,
     relativePath: string,
     content: string,
-    overrides: Record<string, unknown> = { format_on_edit: true, validate_on_edit: "syntax" },
+    overrides: Record<string, unknown> = {
+      format_on_edit: true,
+      validate_on_edit: "syntax",
+    },
   ): Promise<Record<string, unknown>> {
     const pool = new BridgePool(
       h.binaryPath,
       { timeoutMs: 30_000 },
-      { project_root: h.tempDir, storage_dir: h.path(".storage-rust"), ...overrides },
+      {
+        project_root: h.tempDir,
+        storage_dir: h.path(".storage-rust"),
+        ...overrides,
+      },
     );
     pools.push(pool);
     const bridge = pool.getBridge(h.tempDir);
@@ -245,7 +334,10 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
   });
 
   test("no_formatter_configured: explicit formatter.typescript off", async () => {
-    const h = await formatHarness({ configFiles: [], explicitFormatter: { typescript: "off" } });
+    const h = await formatHarness({
+      configFiles: [],
+      explicitFormatter: { typescript: "off" },
+    });
     await writeAndExpectSkip(h, "src/off.ts", TS_INPUT, "no_formatter_configured", {
       format_on_edit: true,
       validate_on_edit: "syntax",
@@ -254,7 +346,10 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
   });
 
   test("no_formatter_configured: explicit formatter.typescript none", async () => {
-    const h = await formatHarness({ configFiles: [], explicitFormatter: { typescript: "none" } });
+    const h = await formatHarness({
+      configFiles: [],
+      explicitFormatter: { typescript: "none" },
+    });
     await writeAndExpectSkip(h, "src/none.ts", TS_INPUT, "no_formatter_configured", {
       format_on_edit: true,
       validate_on_edit: "syntax",
@@ -379,6 +474,84 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     expect(Object.hasOwn(data, "formatted")).toBe(true);
     expect(Object.hasOwn(data, "format_skipped_reason")).toBe(true);
     expect(data.format_skipped_reason).toBe("no_formatter_configured");
+  });
+
+  test("glob edit_match triggers formatter on every matched file", async () => {
+    const h = await formatHarness(BIOME_TS_PRESET, [formattingBiomeShim()]);
+    await mkdir(h.path("src"), { recursive: true });
+    await writeFile(h.path("src/a.ts"), 'export   const   a="OLD";\n', "utf8");
+    await writeFile(h.path("src/b.ts"), 'export   const   b="OLD";\n', "utf8");
+
+    const data = await executeRustGlobEdit(h, "src/*.ts");
+
+    expect(data.success).toBe(true);
+    expect(data.total_files).toBe(2);
+    expect(data.format_skipped_count).toBe(0);
+    expect(data.format_skip_reasons).toEqual([]);
+    const files = data.files as Array<Record<string, unknown>>;
+    expect(files).toHaveLength(2);
+    expect(files.every((file) => file.formatted === true)).toBe(true);
+    expect(files.every((file) => file.format_skipped_reason === undefined)).toBe(true);
+    const countLog = await readFile(h.path("src/formatter-count.log"), "utf8");
+    expect(countLog.trim().split("\n")).toHaveLength(2);
+    expect(await readFile(h.path("src/a.ts"), "utf8")).toContain('export const a = "NEW  VALUE";');
+    expect(await readFile(h.path("src/b.ts"), "utf8")).toContain('export const b = "NEW  VALUE";');
+  });
+
+  test("glob edit_match surfaces formatter_excluded_path per-file and aggregate", async () => {
+    const h = await formatHarness(formatterPreset("biome"), [biomeExcludedPathShim()]);
+    await mkdir(h.path("src"), { recursive: true });
+    await writeFile(h.path("src/a.ts"), 'export const a = "OLD";\n', "utf8");
+    await writeFile(h.path("src/b.ts"), 'export const b = "OLD";\n', "utf8");
+
+    const data = await executeRustGlobEdit(h, "src/*.ts", {
+      format_on_edit: true,
+      formatter: { typescript: "biome" },
+    });
+
+    expect(data.success).toBe(true);
+    expect(data.format_skipped_count).toBe(2);
+    expect(data.format_skip_reasons).toEqual(["formatter_excluded_path"]);
+    const files = data.files as Array<Record<string, unknown>>;
+    expect(files.every((file) => file.formatted === false)).toBe(true);
+    expect(files.every((file) => file.format_skipped_reason === "formatter_excluded_path")).toBe(
+      true,
+    );
+
+    const output = await executeHoistedEdit(h, h.path("src/*.ts"), "NEW  VALUE", "NEWER", {
+      format_on_edit: true,
+      validate_on_edit: "syntax",
+      formatter: { typescript: "biome" },
+    });
+    expect(output).toContain("formatter skipped some glob edit result file(s)");
+    expect(output).toContain("formatter_excluded_path");
+  });
+
+  test("glob edit_match with format_on_edit=false reports per-file no_formatter_configured", async () => {
+    const h = await formatHarness(BIOME_TS_PRESET, [formattingBiomeShim()]);
+    await mkdir(h.path("src"), { recursive: true });
+    await writeFile(h.path("src/a.ts"), 'export   const   a="OLD";\n', "utf8");
+    await writeFile(h.path("src/b.ts"), 'export   const   b="OLD";\n', "utf8");
+
+    const data = await executeRustGlobEdit(h, "src/*.ts", {
+      format_on_edit: false,
+    });
+
+    expect(data.success).toBe(true);
+    expect(data.format_skipped_count).toBe(2);
+    expect(data.format_skip_reasons).toEqual(["no_formatter_configured"]);
+    const files = data.files as Array<Record<string, unknown>>;
+    expect(files.every((file) => file.formatted === false)).toBe(true);
+    expect(files.every((file) => file.format_skipped_reason === "no_formatter_configured")).toBe(
+      true,
+    );
+    expect(await readFile(h.path("src/a.ts"), "utf8")).toBe('export   const   a="NEW  VALUE";\n');
+
+    const output = await executeHoistedEdit(h, h.path("src/*.ts"), "NEW  VALUE", "NEWER", {
+      format_on_edit: false,
+      validate_on_edit: "syntax",
+    });
+    expect(output).not.toContain("formatter skipped some glob edit result file(s)");
   });
 
   test("agent output never claims Auto-formatted. when formatted=false across skip reasons", async () => {

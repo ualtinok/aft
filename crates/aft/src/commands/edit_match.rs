@@ -25,7 +25,7 @@ use crate::protocol::{RawRequest, Response};
 ///   - Applies match/replace across all matching files
 ///   - `replace_all` is implicitly true
 ///   - `occurrence` is ignored
-///   - Returns: `{ ok, files: [{ file, replacements, ... }], total_replacements, total_files }`
+///   - Returns: `{ ok, files: [{ file, replacements, formatted, format_skipped_reason?, ... }], total_replacements, total_files, format_skipped_count, format_skip_reasons }`
 ///
 /// When `file` is a literal path:
 ///   - Original single-file behavior
@@ -464,26 +464,19 @@ fn handle_glob_edit_match(
     // honesty (the agent has full visibility on one file); the multi-file
     // glob path makes silent partial breakage too easy.
     let mut syntax_failures: Vec<String> = Vec::new();
+    let mut format_skipped_count: usize = 0;
+    let mut format_skip_reasons = std::collections::BTreeSet::new();
     for edit in &pending {
         let file_str = edit.path.display().to_string();
-        let formatted = if !dry_run {
-            match edit::write_format_only(&edit.path, &config) {
-                Ok(formatted) => formatted,
-                Err(e) => {
-                    if let Some(name) = &checkpoint_name {
-                        let paths = pending
-                            .iter()
-                            .map(|edit| edit.path.clone())
-                            .collect::<Vec<_>>();
-                        restore_glob_checkpoint(ctx, req.session(), name, &paths);
-                        delete_glob_checkpoint(ctx, req.session(), name);
-                    }
-                    return Response::error(&req.id, e.code(), e.to_string());
-                }
-            }
+        let (formatted, format_skipped_reason) = if !dry_run {
+            format::auto_format(&edit.path, &config)
         } else {
-            false
+            (false, None)
         };
+        if let Some(reason) = &format_skipped_reason {
+            format_skipped_count += 1;
+            format_skip_reasons.insert(reason.clone());
+        }
         let syntax_valid = if !dry_run {
             match validate_syntax(&edit.path) {
                 Ok(valid) => valid,
@@ -511,12 +504,16 @@ fn handle_glob_edit_match(
             ctx.lsp_notify_file_changed(&edit.path, &final_content);
         }
 
-        file_results.push(serde_json::json!({
+        let mut file_result = serde_json::json!({
             "file": file_str,
             "replacements": edit.count,
             "formatted": formatted,
             "syntax_valid": syntax_valid,
-        }));
+        });
+        if let Some(reason) = format_skipped_reason {
+            file_result["format_skipped_reason"] = serde_json::json!(reason);
+        }
+        file_results.push(file_result);
     }
 
     // If any file's post-edit content is syntax-invalid, roll the entire
@@ -592,6 +589,10 @@ fn handle_glob_edit_match(
         total_files
     );
 
+    // Top-level format summary lets agents notice actionable glob formatting
+    // skips (for example formatter_excluded_path) without scanning every file.
+    let format_skip_reasons = format_skip_reasons.into_iter().collect::<Vec<_>>();
+
     Response::success(
         &req.id,
         serde_json::json!({
@@ -599,6 +600,8 @@ fn handle_glob_edit_match(
             "files": file_results,
             "total_replacements": total_replacements,
             "total_files": total_files,
+            "format_skipped_count": format_skipped_count,
+            "format_skip_reasons": format_skip_reasons,
         }),
     )
 }

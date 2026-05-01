@@ -492,28 +492,3 @@ mod tests {
         assert_eq!(result, "new content");
     }
 }
-
-/// Format an already-written file (no re-write) without re-writing or validating.
-/// Returns Ok(true) if formatting was applied, Ok(false) if skipped.
-pub fn write_format_only(path: &Path, config: &Config) -> Result<bool, AftError> {
-    use crate::format::detect_formatter;
-    let lang = match crate::parser::detect_language(path) {
-        Some(l) => l,
-        None => return Ok(false),
-    };
-    let formatter = detect_formatter(path, lang, config);
-    if let Some((cmd, args)) = formatter {
-        let status = std::process::Command::new(&cmd)
-            .args(&args)
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => Ok(true),
-            _ => Ok(false),
-        }
-    } else {
-        Ok(false)
-    }
-}

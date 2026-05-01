@@ -26,6 +26,28 @@ fn fake_server_path() -> PathBuf {
         })
         .expect("fake-lsp-server binary path")
 }
+
+#[cfg(unix)]
+fn install_executable(dir: &std::path::Path, name: &str, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = dir.join("node_modules").join(".bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let tool = bin_dir.join(name);
+    fs::write(&tool, script).unwrap();
+    let mut perms = fs::metadata(&tool).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&tool, perms).unwrap();
+    tool
+}
+
+#[cfg(unix)]
+fn path_with_node_bin(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut paths =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    paths.insert(0, dir.join("node_modules").join(".bin"));
+    std::env::join_paths(paths).unwrap()
+}
 // ============================================================================
 // write command tests
 // ============================================================================
@@ -1165,6 +1187,251 @@ fn edit_match_glob_no_files_matched() {
     let resp = aft.send(&serde_json::to_string(&req).unwrap());
 
     assert_eq!(resp["success"], false);
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+#[cfg(unix)]
+fn edit_match_glob_formats_each_matched_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("biome.json"), "{}\n").unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/a.ts"), "export   const   a=\"OLD\";\n").unwrap();
+    fs::write(root.join("src/b.ts"), "export   const   b=\"OLD\";\n").unwrap();
+    install_executable(
+        root,
+        "biome",
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "biome 2.0.0"; exit 0; fi
+file=""
+for arg in "$@"; do file="$arg"; done
+echo "$file" >> "$(dirname "$file")/formatter-count.log"
+python3 - "$file" <<'PY'
+import re, sys
+p=sys.argv[1]
+s=open(p).read()
+s=re.sub(r"export\s+const\s+(\w+)\s*=\s*([^;\n]+);?", r"export const \1 = \2;", s)
+open(p,"w").write(s)
+PY
+exit 0
+"#,
+    );
+
+    let path = path_with_node_bin(root);
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+    let cfg = aft.configure(root);
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "glob-fmt-success",
+            "command": "edit_match",
+            "file": format!("{}/*.ts", root.join("src").display()),
+            "match": "OLD",
+            "replacement": "NEW  VALUE"
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "glob edit should succeed: {resp:?}");
+    assert_eq!(resp["total_files"], 2);
+    assert_eq!(resp["format_skipped_count"], 0);
+    assert_eq!(resp["format_skip_reasons"].as_array().unwrap().len(), 0);
+    let files = resp["files"].as_array().unwrap();
+    assert!(files.iter().all(|f| f["formatted"] == true), "{resp:?}");
+    assert!(files
+        .iter()
+        .all(|f| f.get("format_skipped_reason").is_none()));
+    let count_log = fs::read_to_string(root.join("src/formatter-count.log")).unwrap();
+    assert_eq!(count_log.lines().count(), 2);
+    assert!(fs::read_to_string(root.join("src/a.ts"))
+        .unwrap()
+        .contains("export const a = \"NEW  VALUE\";"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+#[cfg(unix)]
+fn edit_match_glob_reports_formatter_excluded_path_per_file_and_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/a.ts"), "export const a = \"OLD\";\n").unwrap();
+    fs::write(root.join("src/b.ts"), "export const b = \"OLD\";\n").unwrap();
+    install_executable(
+        root,
+        "biome",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"biome 2.0.0\"; exit 0; fi\necho \"No files were processed in the specified paths.\" >&2\nexit 1\n",
+    );
+
+    let path = path_with_node_bin(root);
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+    let cfg = aft.send(
+        &serde_json::json!({
+            "id": "cfg-glob-excluded",
+            "command": "configure",
+            "project_root": root.display().to_string(),
+            "format_on_edit": true,
+            "formatter": { "typescript": "biome" }
+        })
+        .to_string(),
+    );
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "glob-fmt-excluded",
+            "command": "edit_match",
+            "file": format!("{}/*.ts", root.join("src").display()),
+            "match": "OLD",
+            "replacement": "NEW"
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "glob edit should succeed: {resp:?}");
+    assert_eq!(resp["format_skipped_count"], 2);
+    assert_eq!(
+        resp["format_skip_reasons"],
+        serde_json::json!(["formatter_excluded_path"])
+    );
+    let files = resp["files"].as_array().unwrap();
+    assert!(files.iter().all(|f| f["formatted"] == false), "{resp:?}");
+    assert!(
+        files
+            .iter()
+            .all(|f| f["format_skipped_reason"] == "formatter_excluded_path"),
+        "{resp:?}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn edit_match_glob_reports_format_on_edit_false_for_each_file() {
+    let mut aft = AftProcess::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("biome.json"), "{}\n").unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/a.ts"), "export const a = \"OLD\";\n").unwrap();
+    fs::write(root.join("src/b.ts"), "export const b = \"OLD\";\n").unwrap();
+    let cfg = aft.send(
+        &serde_json::json!({
+            "id": "cfg-glob-disabled",
+            "command": "configure",
+            "project_root": root.display().to_string(),
+            "format_on_edit": false
+        })
+        .to_string(),
+    );
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "glob-fmt-disabled",
+            "command": "edit_match",
+            "file": format!("{}/*.ts", root.join("src").display()),
+            "match": "OLD",
+            "replacement": "NEW"
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "glob edit should succeed: {resp:?}");
+    assert_eq!(resp["format_skipped_count"], 2);
+    assert_eq!(
+        resp["format_skip_reasons"],
+        serde_json::json!(["no_formatter_configured"])
+    );
+    let files = resp["files"].as_array().unwrap();
+    assert!(files.iter().all(|f| f["formatted"] == false), "{resp:?}");
+    assert!(
+        files
+            .iter()
+            .all(|f| f["format_skipped_reason"] == "no_formatter_configured"),
+        "{resp:?}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+#[cfg(unix)]
+fn edit_match_glob_mixed_success_and_skip_reasons() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/a.ts"), "export   const   a=\"OLD\";\n").unwrap();
+    fs::write(root.join("src/b.py"), "x = 'OLD'\n").unwrap();
+    fs::write(root.join("src/c.txt"), "OLD\n").unwrap();
+    install_executable(
+        root,
+        "biome",
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "biome 2.0.0"; exit 0; fi
+file=""
+for arg in "$@"; do file="$arg"; done
+case "$file" in
+  *.ts) sed -E 's/  +/ /g' "$file" > "$file.tmp" && mv "$file.tmp" "$file"; exit 0 ;;
+  *.py) echo "No files were processed in the specified paths." >&2; exit 1 ;;
+esac
+exit 0
+"#,
+    );
+
+    let path = path_with_node_bin(root);
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+    let cfg = aft.send(
+        &serde_json::json!({
+            "id": "cfg-glob-mixed",
+            "command": "configure",
+            "project_root": root.display().to_string(),
+            "format_on_edit": true,
+            "formatter": { "typescript": "biome", "python": "biome" }
+        })
+        .to_string(),
+    );
+    assert_eq!(cfg["success"], true, "configure should succeed: {cfg:?}");
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "glob-fmt-mixed",
+            "command": "edit_match",
+            "file": format!("{}/*", root.join("src").display()),
+            "match": "OLD",
+            "replacement": "NEW"
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "glob edit should succeed: {resp:?}");
+    assert_eq!(resp["total_files"], 3);
+    assert_eq!(resp["format_skipped_count"], 2);
+    assert_eq!(
+        resp["format_skip_reasons"],
+        serde_json::json!(["formatter_excluded_path", "unsupported_language"])
+    );
+    let files = resp["files"].as_array().unwrap();
+    let ts = files
+        .iter()
+        .find(|f| f["file"].as_str().unwrap().ends_with("a.ts"))
+        .unwrap();
+    let py = files
+        .iter()
+        .find(|f| f["file"].as_str().unwrap().ends_with("b.py"))
+        .unwrap();
+    let txt = files
+        .iter()
+        .find(|f| f["file"].as_str().unwrap().ends_with("c.txt"))
+        .unwrap();
+    assert_eq!(ts["formatted"], true);
+    assert!(ts.get("format_skipped_reason").is_none());
+    assert_eq!(py["format_skipped_reason"], "formatter_excluded_path");
+    assert_eq!(txt["format_skipped_reason"], "unsupported_language");
 
     let status = aft.shutdown();
     assert!(status.success());
