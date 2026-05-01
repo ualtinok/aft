@@ -21,6 +21,18 @@ use crate::protocol::{
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const INLINE_OUTPUT_LIMIT: usize = 30 * 1024;
+const BLOCKED_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "PATH",
+];
 
 #[derive(Debug, Deserialize)]
 struct BashParams {
@@ -74,6 +86,14 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
 
     if let Some(description) = params.description.as_deref() {
         log::debug!("bash description: {description}");
+    }
+
+    if let Some(blocked) = blocked_env_var(&params.env) {
+        return Response::error(
+            &req.id,
+            "blocked_env_var",
+            format!("bash env contains blocked variable: {blocked}"),
+        );
     }
 
     let workdir = params
@@ -154,6 +174,23 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
             "timed_out": result.timed_out,
         }),
     )
+}
+
+fn blocked_env_var(env: &HashMap<String, String>) -> Option<&str> {
+    env.keys()
+        .find(|key| {
+            BLOCKED_ENV_VARS.iter().any(|blocked| {
+                #[cfg(windows)]
+                {
+                    key.eq_ignore_ascii_case(blocked)
+                }
+                #[cfg(not(windows))]
+                {
+                    key.as_str() == *blocked
+                }
+            })
+        })
+        .map(String::as_str)
 }
 
 fn permissions_granted_cover(

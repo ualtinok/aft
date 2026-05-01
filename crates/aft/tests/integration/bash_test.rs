@@ -52,6 +52,29 @@ fn bash_streams_progress_and_returns_final_response() {
     assert!(status.success());
 }
 
+#[test]
+fn bash_rejects_blocked_env_vars() {
+    let mut aft = AftProcess::spawn();
+
+    let response = aft.send(
+        &serde_json::json!({
+            "id": "bash-blocked-env",
+            "method": "bash",
+            "params": {
+                "command": "echo should-not-run",
+                "env": { "LD_PRELOAD": "foo" }
+            }
+        })
+        .to_string(),
+    );
+
+    assert_eq!(response["success"], false, "response: {response:?}");
+    assert_eq!(response["code"], "blocked_env_var");
+    assert!(response["message"].as_str().unwrap().contains("LD_PRELOAD"));
+
+    assert!(aft.shutdown().success());
+}
+
 #[cfg(unix)]
 #[test]
 fn bash_timeout_terminates_shell_process_group_grandchild() {
