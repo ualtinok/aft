@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+const REGEX_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+
 use crate::bash_rewrite::footer::add_footer;
 use crate::bash_rewrite::parser::parse;
 use crate::bash_rewrite::RewriteRule;
@@ -304,6 +306,14 @@ fn grep_request(command: &str, binary: &str) -> Option<Value> {
     } else {
         pattern
     };
+
+    if regex::RegexBuilder::new(&pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .is_err()
+    {
+        return None;
+    }
 
     let mut params = json!({
         "pattern": pattern,

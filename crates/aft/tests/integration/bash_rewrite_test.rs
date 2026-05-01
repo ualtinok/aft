@@ -127,6 +127,16 @@ fn rewrites_grep_and_rejects_pipes() {
 }
 
 #[test]
+fn grep_rewrite_rejects_oversized_regex_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("notes.txt"), "needle\n").unwrap();
+    let ctx = context(dir.path(), true);
+    let pattern = "(a?){500000}";
+
+    assert!(rewrite(&format!("grep '{pattern}' {}", dir.path().display()), &ctx).is_none());
+}
+
+#[test]
 fn rewrites_rg_and_rejects_chains() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("notes.txt"), "alpha beta\n").unwrap();
