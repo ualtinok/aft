@@ -201,6 +201,57 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
   };
 }
 
+export function createBashStatusTool(ctx: PluginContext): ToolDefinition {
+  return {
+    description:
+      "Check the status and captured output of a background bash task spawned with bash({ background: true }). Returns status (running | completed | failed | killed | timed_out), exit code, duration, and a preview of captured output.",
+    args: {
+      taskId: z
+        .string()
+        .describe("Background task ID returned by bash({ background: true }), e.g. bgb-6b454047."),
+    },
+    execute: async (args, context) => {
+      const data = await callBridge(ctx, context, "bash_status", {
+        task_id: args.taskId as string,
+      });
+      if (data.success === false) {
+        throw new Error((data.message as string | undefined) ?? "bash_status failed");
+      }
+      const status = data.status as string;
+      const exit = typeof data.exit_code === "number" ? ` (exit ${data.exit_code})` : "";
+      const dur =
+        typeof data.duration_ms === "number" ? ` ${Math.round(data.duration_ms / 1000)}s` : "";
+      let text = `Task ${args.taskId}: ${status}${exit}${dur}`;
+      const preview = data.output_preview as string | undefined;
+      if (preview && status !== "running") {
+        text += `\n${preview.slice(0, 2000)}`;
+      }
+      return text;
+    },
+  };
+}
+
+export function createBashKillTool(ctx: PluginContext): ToolDefinition {
+  return {
+    description:
+      "Terminate a running background bash task spawned with bash({ background: true }). Returns confirmation of kill or an error if the task already finished.",
+    args: {
+      taskId: z
+        .string()
+        .describe("Background task ID returned by bash({ background: true }), e.g. bgb-6b454047."),
+    },
+    execute: async (args, context) => {
+      const data = await callBridge(ctx, context, "bash_kill", {
+        task_id: args.taskId as string,
+      });
+      if (data.success === false) {
+        throw new Error((data.message as string | undefined) ?? "bash_kill failed");
+      }
+      return `Task ${args.taskId}: killed`;
+    },
+  };
+}
+
 function bashTransportTimeoutMs(timeout: number | undefined): number {
   const bashTimeout = timeout ?? DEFAULT_BASH_TIMEOUT_MS;
   return Math.max(30_000, bashTimeout + BASH_TRANSPORT_TIMEOUT_OVERHEAD_MS);

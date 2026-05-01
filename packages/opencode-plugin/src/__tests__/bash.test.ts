@@ -5,7 +5,7 @@ import { type ToolContext, tool } from "@opencode-ai/plugin";
 import type { BridgeRequestOptions } from "../bridge.js";
 import { consumeToolMetadata } from "../metadata-store.js";
 import type { BridgePool } from "../pool.js";
-import { createBashTool } from "../tools/bash.js";
+import { createBashKillTool, createBashStatusTool, createBashTool } from "../tools/bash.js";
 import type { PluginContext } from "../types.js";
 
 const PROJECT_CWD = resolve(import.meta.dir, "../../../..");
@@ -294,5 +294,93 @@ describe("OpenCode bash adapter", () => {
       status: "running",
       taskId: "task-xyz",
     });
+  });
+});
+
+describe("bash_status tool", () => {
+  function makeCtx(sendImpl: (cmd: string, params: Record<string, unknown>) => BridgeResponse) {
+    const bridge = {
+      send: async (cmd: string, params: Record<string, unknown> = {}) => sendImpl(cmd, params),
+    };
+    const pool = { getBridge: () => bridge } as unknown as BridgePool;
+    const ctx: PluginContext = {
+      pool,
+      client: createMockClient(),
+      config: {} as PluginContext["config"],
+      storageDir: "/tmp/aft-test",
+    };
+    return { ctx, statusTool: createBashStatusTool(ctx), killTool: createBashKillTool(ctx) };
+  }
+
+  test("returns running status with no output preview", async () => {
+    const { statusTool } = makeCtx((_cmd, _params) => ({
+      success: true,
+      status: "running",
+      exit_code: null,
+      duration_ms: 3000,
+      output_preview: null,
+    }));
+    const result = await statusTool.execute({ taskId: "bgb-abc123" }, createMockSdkContext());
+    expect(result).toBe("Task bgb-abc123: running 3s");
+    expect(result).not.toContain("null");
+  });
+
+  test("returns completed status with exit code and output preview", async () => {
+    const { statusTool } = makeCtx((_cmd, _params) => ({
+      success: true,
+      status: "completed",
+      exit_code: 0,
+      duration_ms: 15168,
+      output_preview: "test 1: bg starting at 09:19:24\ntest 1: bg done at 09:19:39",
+    }));
+    const result = await statusTool.execute({ taskId: "bgb-6b454047" }, createMockSdkContext());
+    expect(result).toContain("Task bgb-6b454047: completed (exit 0) 15s");
+    expect(result).toContain("test 1: bg starting at");
+    expect(result).toContain("test 1: bg done at");
+  });
+
+  test("forwards task_id as snake_case to bridge", async () => {
+    const calls: Array<{ cmd: string; params: Record<string, unknown> }> = [];
+    const { statusTool } = makeCtx((cmd, params) => {
+      calls.push({ cmd, params });
+      return { success: true, status: "running", exit_code: null, duration_ms: 0 };
+    });
+    await statusTool.execute({ taskId: "bgb-deadbeef" }, createMockSdkContext());
+    expect(calls[0].cmd).toBe("bash_status");
+    expect(calls[0].params.task_id).toBe("bgb-deadbeef");
+  });
+
+  test("throws on bridge error", async () => {
+    const { statusTool } = makeCtx(() => ({
+      success: false,
+      code: "not_found",
+      message: "task bgb-unknown not found",
+    }));
+    await expect(
+      statusTool.execute({ taskId: "bgb-unknown" }, createMockSdkContext()),
+    ).rejects.toThrow("task bgb-unknown not found");
+  });
+
+  test("bash_kill forwards task_id and returns confirmation", async () => {
+    const calls: Array<{ cmd: string; params: Record<string, unknown> }> = [];
+    const { killTool } = makeCtx((cmd, params) => {
+      calls.push({ cmd, params });
+      return { success: true, killed: true };
+    });
+    const result = await killTool.execute({ taskId: "bgb-deadbeef" }, createMockSdkContext());
+    expect(result).toBe("Task bgb-deadbeef: killed");
+    expect(calls[0].cmd).toBe("bash_kill");
+    expect(calls[0].params.task_id).toBe("bgb-deadbeef");
+  });
+
+  test("bash_kill throws on bridge error", async () => {
+    const { killTool } = makeCtx(() => ({
+      success: false,
+      code: "not_running",
+      message: "task already finished",
+    }));
+    await expect(killTool.execute({ taskId: "bgb-done" }, createMockSdkContext())).rejects.toThrow(
+      "task already finished",
+    );
   });
 });

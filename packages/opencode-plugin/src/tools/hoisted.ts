@@ -17,7 +17,7 @@ import { storeToolMetadata } from "../metadata-store.js";
 import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
-import { createBashTool } from "./bash.js";
+import { createBashKillTool, createBashStatusTool, createBashTool } from "./bash.js";
 
 /** Extract callID from plugin context (exists on object but not in TS type). */
 function getCallID(ctx: unknown): string | undefined {
@@ -880,6 +880,9 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
 
       let result = JSON.stringify(data);
 
+      const globSkipNote = formatGlobSkipReasonsNote(data.format_skip_reasons as unknown);
+      if (globSkipNote) result += `\n\n${globSkipNote}`;
+
       // Append inline diagnostics to output (matching write tool pattern)
       if (!args.dryRun) {
         const diags = data.lsp_diagnostics as Array<Record<string, unknown>> | undefined;
@@ -906,6 +909,17 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
       return result;
     },
   };
+}
+
+function formatGlobSkipReasonsNote(reasons: unknown): string | undefined {
+  if (!Array.isArray(reasons)) return undefined;
+  const actionable = reasons
+    .filter((reason): reason is string => typeof reason === "string")
+    .filter((reason) =>
+      ["formatter_not_installed", "formatter_excluded_path", "timeout", "error"].includes(reason),
+    );
+  if (actionable.length === 0) return undefined;
+  return `Note: formatter skipped some glob edit result file(s): ${[...new Set(actionable)].sort().join(", ")}. See per-file format_skipped_reason values for details.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1503,8 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
 export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition> {
   return {
     bash: createBashTool(ctx),
+    bash_status: createBashStatusTool(ctx),
+    bash_kill: createBashKillTool(ctx),
     read: createReadTool(ctx),
     write: createWriteTool(ctx, "edit"),
     edit: createEditTool(ctx, "write"),
