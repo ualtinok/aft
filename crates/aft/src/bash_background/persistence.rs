@@ -126,7 +126,7 @@ pub fn write_task(path: &Path, task: &PersistedTask) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_vec_pretty(task).map_err(io::Error::other)?;
-    atomic_write(path, &content)
+    atomic_write(path, &content, &task.task_id)
 }
 
 pub fn update_task<F>(path: &Path, update: F) -> io::Result<PersistedTask>
@@ -150,7 +150,7 @@ pub fn write_kill_marker_if_absent(path: &Path) -> io::Result<()> {
     if path.exists() {
         return Ok(());
     }
-    atomic_write(path, b"killed")
+    atomic_write(path, b"killed", "kill")
 }
 
 pub fn read_exit_marker(path: &Path) -> io::Result<Option<ExitMarker>> {
@@ -174,14 +174,18 @@ pub fn read_exit_marker(path: &Path) -> io::Result<Option<ExitMarker>> {
     }
 }
 
-pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+pub fn atomic_write(path: &Path, content: &[u8], task_id: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("task");
-    let tmp = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        sanitize_task_id(task_id)
+    ));
     {
         let mut file = OpenOptions::new()
             .create(true)
@@ -193,6 +197,44 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn sanitize_task_id(task_id: &str) -> String {
+    task_id
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn atomic_write_temp_names_include_task_id() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("task.json");
+
+        let left_path = path.clone();
+        let left = thread::spawn(move || atomic_write(&left_path, b"left", "task-left"));
+        let right_path = path.clone();
+        let right = thread::spawn(move || atomic_write(&right_path, b"right", "task-right"));
+
+        left.join().expect("join left").expect("write left");
+        right.join().expect("join right").expect("write right");
+
+        let content = fs::read_to_string(&path).expect("read final content");
+        assert!(content == "left" || content == "right");
+        assert!(!dir
+            .path()
+            .join(format!(".task.json.tmp.{}", std::process::id()))
+            .exists());
+    }
 }
 
 pub fn create_capture_file(path: &Path) -> io::Result<File> {
