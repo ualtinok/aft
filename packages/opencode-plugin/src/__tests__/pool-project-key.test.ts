@@ -57,6 +57,24 @@ describe("BridgePool project-key sharing", () => {
     }
   });
 
+  test("real paths collapse symlinked project roots to one bridge", () => {
+    const real = realpathSync(mkdtempSync(join(tmpdir(), "aft-opencode-pool-")));
+    const linkDir = realpathSync(mkdtempSync(join(tmpdir(), "aft-opencode-pool-link-")));
+    const link = join(linkDir, "link");
+    symlinkSync(real, link);
+
+    const pool = new BridgePool(BINARY_PATH, { timeoutMs: 1_000 });
+    try {
+      const viaLink = pool.getBridge(link);
+      const viaReal = pool.getBridge(real);
+
+      expect(viaLink).toBe(viaReal);
+      expect(pool.size).toBe(1);
+    } finally {
+      pool.shutdown().catch(() => {});
+    }
+  });
+
   test("root-scoped active lookup does not fall back to another project", () => {
     const pool = new BridgePool(BINARY_PATH, { timeoutMs: 1_000 });
     try {

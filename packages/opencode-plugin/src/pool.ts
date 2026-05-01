@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { BinaryBridge, type BridgeOptions } from "./bridge";
 import { error, log } from "./logger.js";
 
@@ -188,7 +189,12 @@ export class BridgePool {
   }
 }
 
-/** Strip trailing path separators so `/repo` and `/repo/` collapse to one key. */
+/** Canonicalize bridge keys so symlinked paths and trailing separators collapse to one key. */
 function normalizeKey(projectRoot: string): string {
-  return projectRoot.replace(/[/\\]+$/, "");
+  const stripped = projectRoot.replace(/[/\\]+$/, "");
+  try {
+    return realpathSync(stripped);
+  } catch {
+    return stripped;
+  }
 }
