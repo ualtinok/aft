@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { isIP } from "node:net";
 import { join } from "node:path";
-import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { Agent, type Dispatcher, fetch as undiciFetch } from "undici";
 import { log, warn } from "../logger";
 
 /** Max response body size (10 MB) */

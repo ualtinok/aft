@@ -1,8 +1,8 @@
 /// <reference path="../bun-test.d.ts" />
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
 import type { LookupAddress } from "node:dns";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Dispatcher } from "undici";
