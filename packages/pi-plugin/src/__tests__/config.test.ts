@@ -561,6 +561,11 @@ describe("loadAftConfig", () => {
     expect(AftConfigSchema.safeParse({ experimental_search_index: true }).success).toBe(false);
   });
 
+  test("accepts formatter_timeout_secs in Pi config schema", () => {
+    expect(AftConfigSchema.parse({ formatter_timeout_secs: 7 }).formatter_timeout_secs).toBe(7);
+    expect(AftConfigSchema.safeParse({ formatter_timeout_secs: 0 }).success).toBe(false);
+  });
+
   test("keeps user executable-origin lsp settings when project also sets every lsp key", () => {
     const fixture = createConfigFixture();
     writeFileSync(

@@ -299,10 +299,25 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
     const completed = await waitForToolStatus(h, bashStatus, taskId, "completed");
 
     expect(completed.output).toContain(`Task ${taskId}: completed (exit 0)`);
+    expect(completed.output).toMatch(/\(exit 0\) \d+s/);
     expect(completed.output).toContain("pi-done");
     expect(completed.details.success).toBe(true);
     expect(completed.details.exit_code).toBe(0);
     expect(completed.details.output_preview).toBe("pi-done\n");
+  });
+
+  test("Pi bash_status preview preserves more than 200 chars", async () => {
+    const { h, bash, bashStatus } = await pluginHarness({ experimental_bash_background: true });
+    const longOutput = "x".repeat(260);
+    const spawned = await callBash(bash, h, {
+      command: `printf '${longOutput}'`,
+      background: true,
+    });
+    const taskId = String(spawned.details.task_id);
+
+    const completed = await waitForToolStatus(h, bashStatus, taskId, "completed");
+
+    expect(completed.output).toContain("x".repeat(260));
   });
 
   test("bash_kill terminates a running task", async () => {

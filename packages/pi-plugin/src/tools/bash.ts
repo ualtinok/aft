@@ -85,6 +85,7 @@ interface BashStatusDetails {
   success: boolean;
   status: string;
   exit_code?: number;
+  duration_ms?: number;
   output_preview?: string;
   command?: string;
 }
@@ -335,9 +336,11 @@ function bashKillResult(
 
 function formatBashStatus(taskId: string, details: BashStatusDetails): string {
   const exit = typeof details.exit_code === "number" ? ` (exit ${details.exit_code})` : "";
-  let text = `Task ${taskId}: ${details.status}${exit}`;
+  const dur =
+    typeof details.duration_ms === "number" ? ` ${Math.round(details.duration_ms / 1000)}s` : "";
+  let text = `Task ${taskId}: ${details.status}${exit}${dur}`;
   if (isTerminalStatus(details.status) && details.output_preview) {
-    text += `\n${details.output_preview.slice(0, 200)}`;
+    text += `\n${details.output_preview.slice(0, 2000)}`;
   }
   return text;
 }
