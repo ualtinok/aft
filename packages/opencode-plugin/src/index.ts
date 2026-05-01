@@ -44,6 +44,7 @@ import {
 } from "./onnx-runtime.js";
 import { BridgePool } from "./pool.js";
 import { findBinary } from "./resolver.js";
+import { getLastUserModel } from "./shared/last-user-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import { clearSharedBridgePool, setSharedBridgePool } from "./shared/runtime.js";
 import { coerceAftStatus, formatStatusMarkdown } from "./shared/status.js";
@@ -102,13 +103,21 @@ async function sendIgnoredMessage(client: unknown, sessionID: string, text: stri
     };
   };
 
-  const promptInput = {
-    path: { id: sessionID },
-    body: {
-      noReply: true,
-      parts: [{ type: "text", text, ignored: true }],
-    },
+  // Pass the last user message's model + variant explicitly so OpenCode's
+  // createUserMessage doesn't fall back to agent.variant or undefined and
+  // bust the provider prefix cache. Even though noReply: true keeps this turn
+  // from triggering an assistant response, the synthetic user message we
+  // create still pins the variant for the *next* real assistant turn.
+  const lastModel = await getLastUserModel(client, sessionID);
+  const body: Record<string, unknown> = {
+    noReply: true,
+    parts: [{ type: "text", text, ignored: true }],
   };
+  if (lastModel) {
+    body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
+    if (lastModel.variant) body.variant = lastModel.variant;
+  }
+  const promptInput = { path: { id: sessionID }, body };
 
   if (typeof typedClient.session?.prompt === "function") {
     await Promise.resolve(typedClient.session.prompt(promptInput));

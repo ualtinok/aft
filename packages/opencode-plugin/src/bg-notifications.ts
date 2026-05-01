@@ -1,4 +1,5 @@
 import { warn } from "./logger.js";
+import { getLastUserModel } from "./shared/last-user-model.js";
 import type { PluginContext } from "./types.js";
 
 export interface BgCompletion {
@@ -45,6 +46,7 @@ interface DrainContext {
 interface OpenCodeClient {
   session?: {
     promptAsync?: (input: unknown) => Promise<unknown> | unknown;
+    messages?: (input: { path: { id: string } }) => Promise<{ data?: unknown[] }>;
   };
 }
 
@@ -125,12 +127,21 @@ async function triggerWakeIfPending(
       if (typeof client.session?.promptAsync !== "function") {
         throw new Error("client.session.promptAsync is unavailable");
       }
+      // Pass the last user message's model + variant explicitly so OpenCode's
+      // createUserMessage doesn't fall back to agent.variant or undefined and
+      // bust the provider prefix cache for the next assistant turn.
+      const lastModel = await getLastUserModel(client, drainContext.sessionID);
+      const body: Record<string, unknown> = {
+        noReply: false,
+        parts: [{ type: "text", text: reminder }],
+      };
+      if (lastModel) {
+        body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
+        if (lastModel.variant) body.variant = lastModel.variant;
+      }
       await client.session.promptAsync({
         path: { id: drainContext.sessionID },
-        body: {
-          noReply: false,
-          parts: [{ type: "text", text: reminder }],
-        },
+        body,
       });
     } catch (err) {
       warn(`${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`);

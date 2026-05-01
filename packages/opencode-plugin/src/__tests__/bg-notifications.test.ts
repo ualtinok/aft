@@ -13,12 +13,14 @@ import {
   sessionBgStates,
   trackBgTask,
 } from "../bg-notifications.js";
+import { __resetLastUserModelCacheForTests } from "../shared/last-user-model.js";
 import type { PluginContext } from "../types.js";
 
 type BridgeResponse = Record<string, unknown>;
 
 afterEach(() => {
   __resetBgNotificationStateForTests();
+  __resetLastUserModelCacheForTests();
 });
 
 describe("OpenCode background notifications", () => {
@@ -165,6 +167,80 @@ describe("OpenCode background notifications", () => {
     expect(payload.body.noReply).toBe(false);
     expect(payload.body.parts[0].text).toContain("- task task-1 (exit 0)");
     expect(payload.body.parts[0].text).not.toContain(": npm test");
+  });
+
+  test("turn-end wake forwards last user model + variant to preserve prefix cache", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({
+      success: true,
+      bg_completions: [completion("task-1", "npm test")],
+    }));
+    const promptAsync = mock(async () => {});
+    const messages = mock(async () => ({
+      data: [
+        {
+          info: {
+            role: "user",
+            model: { providerID: "anthropic", modelID: "claude-opus-4-7", variant: "thinking" },
+          },
+        },
+        { info: { role: "assistant" } },
+      ],
+    }));
+
+    await handleIdleBgCompletions({
+      ctx,
+      directory: "/tmp/project",
+      sessionID: "s1",
+      client: { session: { promptAsync, messages } },
+    });
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const payload = promptAsync.mock.calls[0][0] as {
+      body: {
+        noReply: boolean;
+        parts: Array<{ text: string }>;
+        model?: { providerID: string; modelID: string };
+        variant?: string;
+      };
+    };
+    expect(payload.body.model).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-opus-4-7",
+    });
+    expect(payload.body.variant).toBe("thinking");
+  });
+
+  test("turn-end wake omits model/variant when no user history is reachable", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({
+      success: true,
+      bg_completions: [completion("task-1", "npm test")],
+    }));
+    const promptAsync = mock(async () => {});
+
+    // No `messages` on the client — getLastUserModel falls through to null,
+    // and the wake should still go out without forging a fake model.
+    await handleIdleBgCompletions({
+      ctx,
+      directory: "/tmp/project",
+      sessionID: "s1",
+      client: { session: { promptAsync } },
+    });
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const payload = promptAsync.mock.calls[0][0] as {
+      body: {
+        noReply: boolean;
+        parts: Array<{ text: string }>;
+        model?: unknown;
+        variant?: unknown;
+      };
+    };
+    expect(payload.body.model).toBeUndefined();
+    expect(payload.body.variant).toBeUndefined();
   });
 
   test("push completion lands in pending and wakes when idle", async () => {

@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { log } from "./logger.js";
+import { getLastUserModel } from "./shared/last-user-model.js";
 
 // --- TUI toast helper ---
 
@@ -191,13 +192,20 @@ async function sendIgnoredMessage(
       };
     };
 
-    const promptInput = {
-      path: { id: sessionId },
-      body: {
-        noReply: true,
-        parts: [{ type: "text", text, ignored: true }],
-      },
+    // Pass the last user message's model + variant explicitly so OpenCode's
+    // createUserMessage doesn't fall back to agent.variant or undefined and
+    // bust the provider prefix cache. See shared/last-user-model.ts for the
+    // reasoning — the same fix applies to all three sendIgnoredMessage paths.
+    const lastModel = await getLastUserModel(client, sessionId);
+    const body: Record<string, unknown> = {
+      noReply: true,
+      parts: [{ type: "text", text, ignored: true }],
     };
+    if (lastModel) {
+      body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
+      if (lastModel.variant) body.variant = lastModel.variant;
+    }
+    const promptInput = { path: { id: sessionId }, body };
 
     if (typeof c.session?.prompt === "function") {
       await Promise.resolve(c.session.prompt(promptInput));
