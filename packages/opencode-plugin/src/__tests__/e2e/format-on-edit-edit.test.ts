@@ -58,7 +58,7 @@ function countingTsShim(name = "biome"): FakeFormatterShim {
   return {
     name,
     script: `#!/bin/sh
-file="\${@: -1}"
+for file; do :; done
 dir="$(dirname "$file")"
 echo "$file" >> "$dir/formatter-count.log"
 python3 - "$file" <<'PY'
