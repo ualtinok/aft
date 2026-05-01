@@ -335,6 +335,20 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
     expect(status.details.status).toBe("killed");
   });
 
+  test("Pi bash_kill tool surfaces already-completed task status", async () => {
+    const { h, bash, bashStatus, bashKill } = await pluginHarness({
+      experimental_bash_background: true,
+    });
+    const spawned = await callBash(bash, h, { command: "echo already-done", background: true });
+    const taskId = String(spawned.details.task_id);
+
+    await waitForToolStatus(h, bashStatus, taskId, "completed");
+    const killed = await callTaskTool<BashKillDetails>(bashKill, h, taskId);
+
+    expect(killed.output).toBe(`Task ${taskId}: completed`);
+    expect(killed.details.status).toBe("completed");
+  });
+
   test("background completions are no longer appended by the bash adapter", async () => {
     const { h, pool, bash } = await pluginHarness({ experimental_bash_background: true });
     const pluginBridge = pool.getBridge(h.tempDir);

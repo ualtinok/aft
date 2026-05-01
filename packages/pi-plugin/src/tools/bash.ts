@@ -291,7 +291,7 @@ export function createBashKillTool(ctx: PluginContext) {
         throw new Error((data.message as string | undefined) ?? "bash_kill failed");
       }
       const details = data as unknown as BashKillDetails;
-      return bashKillResult(`Task ${params.task_id}: killed`, details);
+      return bashKillResult(`Task ${params.task_id}: ${details.status}`, details);
     },
   };
 }

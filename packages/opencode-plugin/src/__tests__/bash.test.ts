@@ -365,12 +365,18 @@ describe("bash_status tool", () => {
     const calls: Array<{ cmd: string; params: Record<string, unknown> }> = [];
     const { killTool } = makeCtx((cmd, params) => {
       calls.push({ cmd, params });
-      return { success: true, killed: true };
+      return { success: true, status: "killed" };
     });
     const result = await killTool.execute({ taskId: "bgb-deadbeef" }, createMockSdkContext());
     expect(result).toBe("Task bgb-deadbeef: killed");
     expect(calls[0].cmd).toBe("bash_kill");
     expect(calls[0].params.task_id).toBe("bgb-deadbeef");
+  });
+
+  test("bash_kill surfaces already-terminal status from bridge", async () => {
+    const { killTool } = makeCtx(() => ({ success: true, status: "completed", exit_code: 0 }));
+    const result = await killTool.execute({ taskId: "bgb-done" }, createMockSdkContext());
+    expect(result).toBe("Task bgb-done: completed");
   });
 
   test("bash_kill throws on bridge error", async () => {
