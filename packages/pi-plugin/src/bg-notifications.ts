@@ -151,6 +151,9 @@ async function triggerWakeIfPending(
       // ends — semantically what bg-bash idle-wake wants anyway, since
       // background completion is information for the next turn, not an
       // interrupt. `steer` would interrupt mid-stream which is wrong here.
+      // Unlike OpenCode, Pi's public extension API does not expose session
+      // message model/variant metadata here, so there is no equivalent
+      // getLastUserModel() pinning to apply for bg-completion wakes.
       drainContext.runtime.sendUserMessage(reminder, { deliverAs: "followUp" });
     },
     (err) => {

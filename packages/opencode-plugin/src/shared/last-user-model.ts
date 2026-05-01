@@ -18,6 +18,7 @@
 interface SessionMessageInfo {
   id?: string;
   role?: string;
+  parts?: Array<{ ignored?: boolean }>;
   model?: {
     providerID?: string;
     modelID?: string;
@@ -27,6 +28,7 @@ interface SessionMessageInfo {
 
 interface SessionMessage {
   info?: SessionMessageInfo;
+  parts?: Array<{ ignored?: boolean }>;
 }
 
 interface OpenCodeClientShape {
@@ -47,6 +49,7 @@ interface CacheEntry {
 }
 
 const CACHE_TTL_MS = 5_000;
+const CACHE_MAX_ENTRIES = 100;
 const cache = new Map<string, CacheEntry>();
 
 /**
@@ -69,13 +72,15 @@ export async function getLastUserModel(
   const now = Date.now();
   const cached = cache.get(sessionId);
   if (cached && cached.expiresAt > now) {
+    cache.delete(sessionId);
+    cache.set(sessionId, cached);
     return cached.model;
   }
+  if (cached) cache.delete(sessionId);
 
   const c = client as OpenCodeClientShape;
   const fetcher = c?.session?.messages;
   if (typeof fetcher !== "function") {
-    setCache(sessionId, null);
     return null;
   }
 
@@ -92,6 +97,7 @@ export async function getLastUserModel(
   for (let i = messages.length - 1; i >= 0; i--) {
     const info = messages[i]?.info;
     if (info?.role !== "user") continue;
+    if (isSyntheticIgnoredMessage(messages[i])) continue;
     const model = info.model;
     if (!model?.providerID || !model?.modelID) continue;
     const resolved: LastUserModel = {
@@ -103,12 +109,22 @@ export async function getLastUserModel(
     return resolved;
   }
 
-  setCache(sessionId, null);
   return null;
 }
 
 function setCache(sessionId: string, model: LastUserModel | null): void {
+  if (cache.has(sessionId)) cache.delete(sessionId);
   cache.set(sessionId, { expiresAt: Date.now() + CACHE_TTL_MS, model });
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (typeof oldest !== "string") break;
+    cache.delete(oldest);
+  }
+}
+
+function isSyntheticIgnoredMessage(message: SessionMessage | undefined): boolean {
+  const parts = message?.info?.parts ?? message?.parts;
+  return Array.isArray(parts) && parts.length > 0 && parts.every((part) => part?.ignored === true);
 }
 
 /** Test-only: drop the cache so unit tests can simulate fresh sessions. */

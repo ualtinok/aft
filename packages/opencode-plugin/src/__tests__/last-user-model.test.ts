@@ -108,6 +108,28 @@ describe("getLastUserModel", () => {
     expect(result?.modelID).toBe("claude-opus-4-7");
   });
 
+  test("skips synthetic ignored user messages", async () => {
+    const client = makeClient([
+      {
+        info: {
+          role: "user",
+          model: { providerID: "anthropic", modelID: "claude-opus-4-7", variant: "thinking" },
+        },
+      },
+      {
+        info: {
+          role: "user",
+          parts: [{ ignored: true }],
+          model: { providerID: "openai", modelID: "gpt-4o", variant: "synthetic" },
+        },
+      },
+    ]);
+
+    const result = await getLastUserModel(client, "session-1");
+    expect(result?.modelID).toBe("claude-opus-4-7");
+    expect(result?.variant).toBe("thinking");
+  });
+
   test("caches results within the TTL window per session", async () => {
     let callCount = 0;
     const client = {
@@ -136,6 +158,34 @@ describe("getLastUserModel", () => {
     // Different session bypasses the cache.
     await getLastUserModel(client, "session-2");
     expect(callCount).toBe(2);
+  });
+
+  test("evicts least-recently-used cache entries over 100 sessions", async () => {
+    let callCount = 0;
+    const client = {
+      session: {
+        messages: async () => {
+          callCount++;
+          return {
+            data: [
+              {
+                info: {
+                  role: "user",
+                  model: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+                },
+              },
+            ],
+          };
+        },
+      },
+    };
+
+    for (let i = 0; i < 101; i++) {
+      await getLastUserModel(client, `session-${i}`);
+    }
+    await getLastUserModel(client, "session-0");
+
+    expect(callCount).toBe(102);
   });
 
   test("does not cache fetch failures", async () => {
