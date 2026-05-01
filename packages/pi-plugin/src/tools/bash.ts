@@ -183,6 +183,12 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
         extCtx,
         {
           transportTimeoutMs: bashTransportTimeoutMs(params.timeout),
+          // Rust bash has its own watchdog that kills the child shell on the
+          // bash-level timeout and returns a normal timed_out response well
+          // before our transport timeout fires. If we hit the transport
+          // deadline anyway it means the response is just late — don't
+          // sacrifice the bridge (and all its warm state) for that.
+          keepBridgeOnTimeout: true,
           onProgress: ({ text }) => {
             streamed += text;
             // Stream truncated output to avoid overwhelming the UI

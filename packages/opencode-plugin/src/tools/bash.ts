@@ -125,6 +125,12 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         callBridge,
         {
           transportTimeoutMs: bashTransportTimeoutMs(args.timeout as number | undefined),
+          // Rust bash has its own watchdog that kills the child shell on the
+          // bash-level timeout (`args.timeout`) and returns a normal timed_out
+          // response well before our transport timeout fires. If we hit the
+          // transport deadline anyway it means the response is just late —
+          // don't sacrifice the bridge (and all its warm state) for that.
+          keepBridgeOnTimeout: true,
           onProgress: ({ text }) => {
             accumulatedOutput = preview(accumulatedOutput + text);
             metadata?.({ output: accumulatedOutput, description });

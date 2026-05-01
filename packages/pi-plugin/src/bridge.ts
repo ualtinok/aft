@@ -136,6 +136,22 @@ export interface BridgeRequestOptions {
   onProgress?: (chunk: { kind: "stdout" | "stderr"; text: string }) => void;
   /** Per-call transport timeout in milliseconds. Defaults to the bridge-wide timeout. */
   transportTimeoutMs?: number;
+  /**
+   * Skip the "kill the child process on timeout" behavior for this request.
+   *
+   * The default (false) treats a transport-level timeout as evidence the bridge
+   * is wedged — Rust normally responds well within the budget, so silence past
+   * the deadline almost always means a stuck child. Killing forces a clean
+   * respawn on the next call.
+   *
+   * Some commands enforce their own timeouts on the Rust side (notably `bash`,
+   * which uses a watchdog thread to terminate the child shell and return a
+   * timeout response). For those, a transport timeout means the response was
+   * lost or queued behind something else — the bridge itself is still healthy
+   * and should keep its warm state. Pass `keepBridgeOnTimeout: true` to
+   * reject the request without tearing down the bridge.
+   */
+  keepBridgeOnTimeout?: boolean;
 }
 
 interface SendOptions extends BridgeRequestOptions {
@@ -306,10 +322,13 @@ export class BinaryBridge {
         ? params.session_id
         : undefined;
 
+    const keepBridgeOnTimeout = options?.keepBridgeOnTimeout === true;
+
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        const timeoutMsg = `Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms — restarting bridge`;
+        const restartSuffix = keepBridgeOnTimeout ? "" : " — restarting bridge";
+        const timeoutMsg = `Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms${restartSuffix}`;
         if (requestSessionId) {
           sessionWarn(requestSessionId, timeoutMsg);
         } else {
@@ -320,8 +339,13 @@ export class BinaryBridge {
             `[aft-pi] Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms`,
           ),
         );
-        // Kill the hung process so the next request gets a fresh bridge
-        this.handleTimeout();
+        // Kill the hung process so the next request gets a fresh bridge —
+        // unless the caller explicitly opted out (e.g. bash, which enforces
+        // its own timeout on the Rust side and shouldn't lose warm bridge
+        // state when its response is merely late).
+        if (!keepBridgeOnTimeout) {
+          this.handleTimeout();
+        }
       }, effectiveTimeoutMs);
 
       this.pending.set(id, { resolve, reject, timer, onProgress: options?.onProgress });

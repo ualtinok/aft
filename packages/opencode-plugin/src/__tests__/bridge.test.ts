@@ -312,6 +312,51 @@ describe("BinaryBridge lifecycle", () => {
     }
   });
 
+  test("keepBridgeOnTimeout: child process survives transport timeout for retry-friendly commands", async () => {
+    // Fake binary that hangs forever on input — same pattern as the timeout
+    // test above. Prove that with keepBridgeOnTimeout=true the same hung child
+    // process is still alive after the request rejects, so subsequent commands
+    // can race through it without a respawn (and don't pay the bridge-restart
+    // cost just because one bash call's response was late).
+    const fakeBin = join(tmpdir(), `aft-fake-slow-keep-${Date.now()}.sh`);
+    await writeFile(fakeBin, ["#!/bin/sh", "sleep 30", ""].join("\n"), { mode: 0o755 });
+
+    try {
+      bridge = new BinaryBridge(fakeBin, PROJECT_CWD, {
+        timeoutMs: 5_000,
+        maxRestarts: 0,
+      });
+
+      // First request: timeout with keepBridgeOnTimeout — should reject without
+      // killing the bridge.
+      const err1 = await bridge
+        .send("version", {}, { timeoutMs: 50, keepBridgeOnTimeout: true })
+        .catch((e) => e);
+      expect(err1).toBeInstanceOf(Error);
+      expect((err1 as Error).message).toContain("timed out");
+
+      // Without keepBridgeOnTimeout, handleTimeout() would have killed the
+      // child. With it set, the child is still alive — verify by calling the
+      // private getter via cast (test-only).
+      const child = (bridge as unknown as { process: { killed: boolean } | null }).process;
+      expect(child).not.toBeNull();
+      expect(child?.killed).toBe(false);
+
+      // Compare with default (no keep flag): same hung binary, but now the
+      // bridge will tear it down on timeout.
+      const err2 = await bridge.send("version", {}, { timeoutMs: 50 }).catch((e) => e);
+      expect(err2).toBeInstanceOf(Error);
+      expect((err2 as Error).message).toContain("timed out");
+      // After handleTimeout fires, the previous child is killed (process is
+      // cleared). New send() would spawn fresh, but we set maxRestarts=0 so
+      // no respawn happens — process should now be null.
+      const childAfter = (bridge as unknown as { process: { killed: boolean } | null }).process;
+      expect(childAfter).toBeNull();
+    } finally {
+      await rm(fakeBin).catch(() => {});
+    }
+  });
+
   test("send rejects params that contain reserved id key before writing", async () => {
     const marker = join(tmpdir(), `aft-fake-id-collision-started-${Date.now()}`);
     const fakeBin = join(tmpdir(), `aft-fake-id-collision-${Date.now()}.sh`);
