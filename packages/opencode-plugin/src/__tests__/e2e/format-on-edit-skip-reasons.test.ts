@@ -581,13 +581,15 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
       },
       {
         reason: "formatter_not_installed",
-        preset: formatterPreset("prettier"),
+        // Use a deliberately nonexistent tool name rather than "prettier"
+        // because some CI runners have prettier globally installed.
+        preset: formatterPreset("nonexistent-formatter-xyz"),
         path: "src/missing.ts",
         content: TS_INPUT,
         overrides: {
           format_on_edit: true,
           validate_on_edit: "syntax",
-          formatter: { typescript: "prettier" },
+          formatter: { typescript: "nonexistent-formatter-xyz" },
         },
       },
       {
