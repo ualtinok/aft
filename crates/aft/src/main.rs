@@ -1,12 +1,12 @@
-use std::collections::HashSet;
-use std::io::{self, BufRead, Write};
-
+use aft::bash_background::BgTaskRegistry;
 use aft::config::Config;
 use aft::context::{AppContext, SemanticIndexEvent, SemanticIndexStatus};
 use aft::log_ctx;
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, PushFrame, RawRequest, Response};
+use std::collections::HashSet;
+use std::io::{self, BufRead, Write};
 
 fn main() {
     // Handle --version flag before anything else
@@ -32,6 +32,7 @@ fn main() {
     log::info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
+    install_signal_detach_handler(ctx.bash_background().clone());
     let stdout_writer = ctx.stdout_writer();
     ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(
         move |frame: PushFrame| {
@@ -97,6 +98,29 @@ fn main() {
     ctx.lsp().shutdown_all();
     ctx.bash_background().detach();
     log::info!("stdin closed, shutting down");
+}
+
+fn install_signal_detach_handler(registry: BgTaskRegistry) {
+    let signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+    ]);
+    let Ok(mut signals) = signals else {
+        if let Err(error) = signals {
+            log::error!("failed to install signal handlers: {error}");
+        }
+        return;
+    };
+
+    std::thread::spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            // Plugin restarts can SIGTERM the bridge while background bash jobs
+            // are still running. Detach first so child handles are not killed by
+            // Rust drop glue and can be rehydrated from disk.
+            registry.detach();
+            std::process::exit(128 + signal);
+        }
+    });
 }
 
 fn attach_bg_completions(
