@@ -143,9 +143,10 @@ fn validate_embedding_batch(
     Ok(())
 }
 
+/// Normalize a base URL: validate scheme and strip trailing slash.
+/// Does NOT perform SSRF/private-IP validation — call
+/// `validate_base_url_no_ssrf` separately when processing user-supplied config.
 fn normalize_base_url(raw: &str) -> Result<String, String> {
-    use std::net::{IpAddr, ToSocketAddrs};
-
     let parsed = Url::parse(raw).map_err(|error| format!("invalid base_url '{raw}': {error}"))?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -154,6 +155,16 @@ fn normalize_base_url(raw: &str) -> Result<String, String> {
             scheme
         ));
     }
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+/// Validate that a base URL does not point to a private/loopback address.
+/// Call this on user-supplied config (at configure time) to prevent SSRF.
+/// Not called for programmatically constructed configs (e.g. tests).
+pub fn validate_base_url_no_ssrf(raw: &str) -> Result<(), String> {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    let parsed = Url::parse(raw).map_err(|error| format!("invalid base_url '{raw}': {error}"))?;
 
     // Reject well-known private/loopback hostnames before DNS lookup.
     let host = parsed.host_str().unwrap_or("");
@@ -182,7 +193,7 @@ fn normalize_base_url(raw: &str) -> Result<String, String> {
         }
     }
 
-    Ok(parsed.to_string().trim_end_matches('/').to_string())
+    Ok(())
 }
 
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
@@ -2202,7 +2213,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_base_url_rejects_loopback_hostnames() {
+    fn validate_ssrf_rejects_loopback_hostnames() {
         for host in &[
             "http://localhost",
             "http://localhost:8080",
@@ -2210,14 +2221,14 @@ mod tests {
             "http://foo.localhost",
         ] {
             assert!(
-                normalize_base_url(host).is_err(),
+                validate_base_url_no_ssrf(host).is_err(),
                 "Expected {host} to be rejected"
             );
         }
     }
 
     #[test]
-    fn normalize_base_url_rejects_private_ips() {
+    fn validate_ssrf_rejects_private_ips() {
         for url in &[
             "http://192.168.1.1",
             "http://10.0.0.1",
@@ -2225,10 +2236,7 @@ mod tests {
             "http://127.0.0.1",
             "http://169.254.169.254",
         ] {
-            // Note: these may pass scheme check but should fail IP check.
-            // When running in CI with no DNS resolution, the IP-format hosts
-            // parse directly as IpAddr so this is deterministic.
-            let result = normalize_base_url(url);
+            let result = validate_base_url_no_ssrf(url);
             assert!(
                 result.is_err(),
                 "Expected {url} to be rejected, got: {:?}",
@@ -2238,22 +2246,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_base_url_accepts_public_url() {
-        // We use a clearly public URL; the test should not make real DNS calls
-        // (the host is a numeric IP that's not private).
-        // We can't easily test real public DNS in unit tests without network.
-        // Test that scheme validation works for https public.
-        let result = normalize_base_url("https://api.openai.com/v1");
-        // This makes a real DNS call — only assert scheme rejection doesn't fire.
-        // If DNS lookup fails, the error should be about DNS, not scheme/private.
-        match result {
-            Ok(_) => {} // DNS resolved, public IP confirmed
-            Err(e) => {
-                assert!(
-                    !e.contains("private") && !e.contains("loopback"),
-                    "Should not be rejected as private: {e}"
-                );
-            }
-        }
+    fn normalize_base_url_allows_localhost_for_tests() {
+        // normalize_base_url itself should NOT block localhost — only
+        // validate_base_url_no_ssrf does. Tests construct backends directly.
+        assert!(normalize_base_url("http://127.0.0.1:9999").is_ok());
+        assert!(normalize_base_url("http://localhost:8080").is_ok());
     }
 }

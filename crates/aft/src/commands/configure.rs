@@ -95,6 +95,8 @@ fn parse_semantic_config(
         semantic.base_url = if base_url.is_empty() {
             None
         } else {
+            // Reject private/loopback IPs at configure time to prevent SSRF.
+            crate::semantic_index::validate_base_url_no_ssrf(&base_url)?;
             Some(base_url)
         };
     }
