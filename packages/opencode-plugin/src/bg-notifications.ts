@@ -24,6 +24,8 @@ type SessionBgState = {
   firstCompletionAt: number | null;
   scheduledFireAt: number | null;
   scheduledCompletionCount: number;
+  retryDelayMs: number | null;
+  unknownCompletions: Array<{ completion: BgCompletion; receivedAt: number }>;
   lastSeenAt: number;
 };
 
@@ -33,6 +35,8 @@ export const sessionBgStates: Map<string, SessionBgState> = new Map();
 export const SESSION_BG_STATE_IDLE_TTL_MS = 60 * 60 * 1000;
 const DEBOUNCE_STEP_MS = 200;
 const DEBOUNCE_CAP_MS = 1000;
+const UNKNOWN_COMPLETION_TTL_MS = 5000;
+const UNKNOWN_COMPLETION_CAP = 32;
 const DEFAULT_SESSION_ID = "__default__";
 const LOG_PREFIX = "[aft-plugin] bg-notifications:";
 
@@ -51,7 +55,21 @@ interface OpenCodeClient {
 }
 
 export function trackBgTask(sessionID: string | undefined, taskId: string): void {
-  stateFor(sessionID).outstandingTaskIds.add(taskId);
+  const state = stateFor(sessionID);
+  pruneUnknownCompletions(state, Date.now());
+  const buffered = state.unknownCompletions.filter((entry) => entry.completion.task_id === taskId);
+  state.unknownCompletions = state.unknownCompletions.filter(
+    (entry) => entry.completion.task_id !== taskId,
+  );
+  if (buffered.length > 0) {
+    for (const entry of buffered) {
+      if (!state.pendingCompletions.some((pending) => pending.task_id === taskId)) {
+        state.pendingCompletions.push(entry.completion);
+      }
+    }
+    return;
+  }
+  state.outstandingTaskIds.add(taskId);
 }
 
 export function ingestBgCompletions(
@@ -63,7 +81,10 @@ export function ingestBgCompletions(
   const accepted: BgCompletion[] = [];
   for (const completion of completions) {
     if (!isBgCompletion(completion)) continue;
-    if (!state.outstandingTaskIds.has(completion.task_id)) continue;
+    if (!state.outstandingTaskIds.has(completion.task_id)) {
+      bufferUnknownCompletion(state, completion);
+      continue;
+    }
     state.outstandingTaskIds.delete(completion.task_id);
     if (
       !state.pendingCompletions.some((pending) => pending.task_id === completion.task_id) &&
@@ -121,8 +142,9 @@ async function triggerWakeIfPending(
   }
   if (state.pendingCompletions.length === 0) return;
 
-  scheduleWake(state, async (reminder) => {
-    try {
+  scheduleWake(
+    state,
+    async (reminder) => {
       const client = drainContext.client as OpenCodeClient;
       if (typeof client.session?.promptAsync !== "function") {
         throw new Error("client.session.promptAsync is unavailable");
@@ -143,13 +165,14 @@ async function triggerWakeIfPending(
         path: { id: drainContext.sessionID },
         body,
       });
-    } catch (err) {
+    },
+    (err) => {
       sessionWarn(
         drainContext.sessionID,
         `${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-    }
-  });
+    },
+  );
 }
 
 export function resetBgWake(sessionID: string | undefined): void {
@@ -210,7 +233,11 @@ async function drainCompletions({ ctx, directory, sessionID }: DrainContext): Pr
   }
 }
 
-function scheduleWake(state: SessionBgState, sendWake: (reminder: string) => Promise<void>): void {
+function scheduleWake(
+  state: SessionBgState,
+  sendWake: (reminder: string) => Promise<void>,
+  onSendFailure: (err: unknown) => void,
+): void {
   // Race model: JS state changes are synchronous; awaits only happen before scheduling
   // drains and during final prompt delivery. Multiple hook invocations can interleave
   // only at those awaits, so we gate timer extension on the pending completion count.
@@ -231,16 +258,26 @@ function scheduleWake(state: SessionBgState, sendWake: (reminder: string) => Pro
   state.scheduledCompletionCount = state.pendingCompletions.length;
 
   if (state.debounceTimer) clearTimeout(state.debounceTimer);
-  const delay = Math.max(0, (state.scheduledFireAt ?? now) - now);
+  const delay = state.retryDelayMs ?? Math.max(0, (state.scheduledFireAt ?? now) - now);
   state.debounceTimer = setTimeout(() => {
-    const reminder = formatSystemReminder(state.pendingCompletions);
+    const pending = state.pendingCompletions;
+    const reminder = formatSystemReminder(pending);
     state.pendingCompletions = [];
     state.debounceTimer = null;
-    state.wakeFiredThisIdle = true;
     state.firstCompletionAt = null;
     state.scheduledFireAt = null;
     state.scheduledCompletionCount = 0;
-    void sendWake(reminder);
+    void sendWake(reminder)
+      .then(() => {
+        state.retryDelayMs = null;
+        state.wakeFiredThisIdle = true;
+      })
+      .catch((err) => {
+        state.pendingCompletions = [...pending, ...state.pendingCompletions];
+        state.retryDelayMs = Math.min((delay || DEBOUNCE_STEP_MS) * 2, DEBOUNCE_CAP_MS);
+        onSendFailure(err);
+        scheduleWake(state, sendWake, onSendFailure);
+      });
   }, delay);
   state.debounceTimer.unref?.();
 }
@@ -259,6 +296,8 @@ function stateFor(sessionID: string | undefined): SessionBgState {
       firstCompletionAt: null,
       scheduledFireAt: null,
       scheduledCompletionCount: 0,
+      retryDelayMs: null,
+      unknownCompletions: [],
       lastSeenAt: now,
     };
     sessionBgStates.set(key, state);
@@ -276,6 +315,24 @@ function cleanupIdleSessionStates(now: number): void {
     if (state.debounceTimer) clearTimeout(state.debounceTimer);
     sessionBgStates.delete(sessionID);
   }
+}
+
+function bufferUnknownCompletion(state: SessionBgState, completion: BgCompletion): void {
+  const now = Date.now();
+  pruneUnknownCompletions(state, now);
+  state.unknownCompletions = state.unknownCompletions.filter(
+    (entry) => entry.completion.task_id !== completion.task_id,
+  );
+  state.unknownCompletions.push({ completion, receivedAt: now });
+  if (state.unknownCompletions.length > UNKNOWN_COMPLETION_CAP) {
+    state.unknownCompletions.splice(0, state.unknownCompletions.length - UNKNOWN_COMPLETION_CAP);
+  }
+}
+
+function pruneUnknownCompletions(state: SessionBgState, now: number): void {
+  state.unknownCompletions = state.unknownCompletions.filter(
+    (entry) => now - entry.receivedAt <= UNKNOWN_COMPLETION_TTL_MS,
+  );
 }
 
 function isBgCompletion(value: unknown): value is BgCompletion {
@@ -323,7 +380,7 @@ function formatOutputPreview(completion: BgCompletion): string {
 }
 
 function formatStatus(completion: BgCompletion): string {
-  if (completion.status === "timeout") return "timed out";
+  if (completion.status === "timed_out" || completion.status === "timeout") return "timed out";
   if (completion.status === "killed") return "killed";
   if (completion.exit_code !== null) return `exit ${completion.exit_code}`;
   return completion.status;

@@ -34,7 +34,7 @@ describe("Pi background notifications", () => {
         },
         {
           task_id: "4f5b71c2",
-          status: "timeout",
+          status: "timed_out",
           exit_code: null,
           command: "npm install",
           duration_ms: 30_000,
@@ -43,6 +43,21 @@ describe("Pi background notifications", () => {
     ).toBe(
       "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task d2ed3a9e (exit 0, 1m 23s)\n- task 4f5b71c2 (timed out, 30s)\n</system-reminder>",
     );
+  });
+
+  test("uses Pi task_id syntax in truncated-output reminder", () => {
+    expect(
+      formatSystemReminder([
+        {
+          task_id: "task-1",
+          status: "completed",
+          exit_code: 0,
+          command: "cmd",
+          output_preview: "tail",
+          output_truncated: true,
+        },
+      ]),
+    ).toContain('bash_status({ task_id: "..." })');
   });
 
   test("tool_result mutation appends a reminder text block", async () => {
@@ -125,6 +140,66 @@ describe("Pi background notifications", () => {
     expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0)");
     expect(sendUserMessage.mock.calls[0][0]).not.toContain(": npm test");
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
+  });
+
+  test("buffers push completion received before task tracking", async () => {
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const sendUserMessage = mock(() => {});
+
+    await handlePushedBgCompletion(
+      {
+        ctx,
+        directory: "/tmp/project",
+        sessionID: "s1",
+        runtime: { sendUserMessage },
+      },
+      completion("task-1", "npm test"),
+    );
+    trackBgTask("s1", "task-1");
+    await handleTurnEndBgCompletions({
+      ctx,
+      directory: "/tmp/project",
+      sessionID: "s1",
+      runtime: { sendUserMessage },
+    });
+    await sleep(260);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sendUserMessage.mock.calls[0][0]).toContain("- task task-1 (exit 0)");
+  });
+
+  test("failed wake keeps pending completions and retries", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const sendUserMessage = mock(() => {
+      throw new Error("send failed");
+    });
+
+    await handlePushedBgCompletion(
+      { ctx, directory: "/tmp/project", sessionID: "s1", runtime: { sendUserMessage } },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(1);
+    expect(sessionBgStates.get("s1")?.debounceTimer).not.toBeNull();
+  });
+
+  test("drain is skipped when session id is unknown", async () => {
+    trackBgTask(undefined, "task-1");
+    const send = mock(async () => ({
+      success: true,
+      bg_completions: [completion("task-1", "cmd")],
+    }));
+    const { ctx } = harness(send);
+
+    await appendToolResultBgCompletions({ ctx, directory: "/tmp/project", sessionID: undefined }, [
+      { type: "text", text: "normal" },
+    ]);
+
+    expect(send).toHaveBeenCalledTimes(0);
+    expect(sessionBgStates.get("__default__")?.outstandingTaskIds.has("task-1")).toBe(true);
   });
 
   test("push completion lands in pending without wake when active", async () => {

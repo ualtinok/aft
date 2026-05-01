@@ -36,7 +36,7 @@ describe("OpenCode background notifications", () => {
         },
         {
           task_id: "4f5b71c2",
-          status: "timeout",
+          status: "timed_out",
           exit_code: null,
           command: "npm install",
           duration_ms: 30_000,
@@ -265,6 +265,47 @@ describe("OpenCode background notifications", () => {
     expect(text).toContain("- task task-1 (exit 0)");
     expect(text).not.toContain(": npm test");
     expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(0);
+  });
+
+  test("buffers push completion received before task tracking", async () => {
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const promptAsync = mock(async () => {});
+
+    await handlePushedBgCompletion(
+      { ctx, directory: "/tmp/project", sessionID: "s1", client: { session: { promptAsync } } },
+      completion("task-1", "npm test"),
+    );
+    trackBgTask("s1", "task-1");
+    await handleIdleBgCompletions({
+      ctx,
+      directory: "/tmp/project",
+      sessionID: "s1",
+      client: { session: { promptAsync } },
+    });
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = (promptAsync.mock.calls[0][0] as { body: { parts: Array<{ text: string }> } }).body
+      .parts[0].text;
+    expect(text).toContain("- task task-1 (exit 0)");
+  });
+
+  test("failed wake keeps pending completions and retries", async () => {
+    trackBgTask("s1", "task-1");
+    const { ctx } = harness(() => ({ success: true, bg_completions: [] }));
+    const promptAsync = mock(async () => {
+      throw new Error("send failed");
+    });
+
+    await handlePushedBgCompletion(
+      { ctx, directory: "/tmp/project", sessionID: "s1", client: { session: { promptAsync } } },
+      completion("task-1", "npm test"),
+    );
+    await sleep(260);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(sessionBgStates.get("s1")?.pendingCompletions).toHaveLength(1);
+    expect(sessionBgStates.get("s1")?.debounceTimer).not.toBeNull();
   });
 
   test("push completion lands in pending without wake when active", async () => {

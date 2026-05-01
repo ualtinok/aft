@@ -51,7 +51,8 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
 
   test("tool_result delivery appends reminder after another tool result", async () => {
     const { h, bash } = await pluginHarness();
-    const taskId = await spawnBackground(h, bash, "printf done");
+    const sessionID = "pi-bg-session";
+    const taskId = await spawnBackground(h, bash, "printf done", sessionID);
 
     let content: Array<{ type: "text"; text: string }> | undefined;
     await waitUntil(async () => {
@@ -63,7 +64,7 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
             storageDir: h.path(".aft-storage"),
           },
           directory: h.tempDir,
-          sessionID: undefined,
+          sessionID,
         },
         [{ type: "text", text: "tool output" }],
       )) as Array<{ type: "text"; text: string }> | undefined;
@@ -84,7 +85,8 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
 
   test("turn-end wake sends runtime user message", async () => {
     const { h, bash } = await pluginHarness();
-    const taskId = await spawnBackground(h, bash, "printf idle-done");
+    const sessionID = "pi-idle-session";
+    const taskId = await spawnBackground(h, bash, "printf idle-done", sessionID);
     const messages: string[] = [];
 
     await waitUntil(async () => {
@@ -95,7 +97,7 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
           storageDir: h.path(".aft-storage"),
         },
         directory: h.tempDir,
-        sessionID: undefined,
+        sessionID,
         runtime: { sendUserMessage: (message: string) => messages.push(message) },
       });
       await sleep(260);
@@ -109,8 +111,17 @@ maybeDescribe("e2e bg notifications (Pi adapter + bridge + Rust)", () => {
   });
 });
 
-async function spawnBackground(h: Harness, bash: MockToolDef, command: string): Promise<string> {
-  const extCtx: MockExtensionContext = { cwd: h.tempDir, hasUI: false };
+async function spawnBackground(
+  h: Harness,
+  bash: MockToolDef,
+  command: string,
+  sessionID: string,
+): Promise<string> {
+  const extCtx: MockExtensionContext = {
+    cwd: h.tempDir,
+    hasUI: false,
+    sessionManager: { getSessionId: () => sessionID },
+  } as MockExtensionContext;
   const result = await bash.execute(
     `test-bash-${Date.now()}`,
     { command, background: true },
