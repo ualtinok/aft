@@ -130,10 +130,11 @@ export class AftRpcServer {
 
       const { token: _token, ...handlerParams } = params;
 
-      log(`RPC call: ${method} params=${JSON.stringify(handlerParams).slice(0, 200)}`);
+      // Successful RPC calls are intentionally NOT logged. The /aft-status
+      // TUI dialog polls every 1.5s while open, which used to spam the log
+      // with RPC call/result pairs. Errors are still logged (real signal).
       handler(handlerParams)
         .then((result) => {
-          log(`RPC result: ${method} => ${JSON.stringify(result).slice(0, 200)}`);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
         })
