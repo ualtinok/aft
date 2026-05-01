@@ -15,6 +15,32 @@ fn write_temp_file(root: &Path, relative: &str, content: &str) -> PathBuf {
 }
 
 #[test]
+fn read_allows_explicit_ranges_from_large_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.txt");
+    let mut content = String::from("first\nsecond\nthird\n");
+    content.push_str(&"x".repeat(51 * 1024 * 1024));
+    fs::write(&path, content).expect("write large file");
+
+    let mut aft = AftProcess::spawn();
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "read-large-range",
+            "command": "read",
+            "file": path,
+            "start_line": 1,
+            "end_line": 2,
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "read should succeed: {resp:?}");
+    assert_eq!(resp["content"], "1: first\n2: second\n");
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
 fn test_outline_typescript_nested_structure() {
     let mut aft = AftProcess::spawn();
     let file = fixture_path("sample.ts");

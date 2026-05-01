@@ -81,18 +81,6 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    if metadata.len() > MAX_FILE_READ_BYTES {
-        return Response::error(
-            &req.id,
-            "invalid_request",
-            format!(
-                "read: file is too large to load at once ({} bytes > {} bytes). Use start_line/end_line to read sections.",
-                metadata.len(),
-                MAX_FILE_READ_BYTES
-            ),
-        );
-    }
-
     // Parse range parameters
     let limit = req
         .params
@@ -119,6 +107,18 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
             start_line,
             explicit_end_line,
             limit,
+        );
+    }
+
+    if metadata.len() > MAX_FILE_READ_BYTES {
+        return Response::error(
+            &req.id,
+            "invalid_request",
+            format!(
+                "read: file is too large to load at once ({} bytes > {} bytes). Use start_line/end_line to read sections.",
+                metadata.len(),
+                MAX_FILE_READ_BYTES
+            ),
         );
     }
 
