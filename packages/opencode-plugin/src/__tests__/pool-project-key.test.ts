@@ -56,6 +56,20 @@ describe("BridgePool project-key sharing", () => {
       pool.shutdown().catch(() => {});
     }
   });
+
+  test("root-scoped active lookup does not fall back to another project", () => {
+    const pool = new BridgePool(BINARY_PATH, { timeoutMs: 1_000 });
+    try {
+      const projectA = pool.getBridge("/tmp/project-a");
+      const projectB = pool.getBridge("/tmp/project-b");
+      (projectA as { isAlive: () => boolean }).isAlive = () => true;
+      (projectB as { isAlive: () => boolean }).isAlive = () => false;
+
+      expect(pool.getActiveBridgeForRoot("/tmp/project-b")).toBeNull();
+    } finally {
+      pool.shutdown().catch(() => {});
+    }
+  });
 });
 
 describe("projectRootFor", () => {

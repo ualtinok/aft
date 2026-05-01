@@ -89,6 +89,15 @@ export class BridgePool {
     return null;
   }
 
+  /** Get an alive bridge only when it belongs to the requested project root. */
+  getActiveBridgeForRoot(projectRoot: string): BinaryBridge | null {
+    const key = normalizeKey(projectRoot);
+    const entry = this.bridges.get(key);
+    if (!entry?.bridge.isAlive()) return null;
+    entry.lastUsed = Date.now();
+    return entry.bridge;
+  }
+
   /**
    * Get or create the bridge for `projectRoot`.
    *

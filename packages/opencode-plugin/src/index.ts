@@ -459,7 +459,7 @@ const plugin: Plugin = async (input) => {
     const sessionID = (params.sessionID as string) || "rpc";
     // Prefer an already-warm bridge (semantic/trigram indexes loaded) before
     // spawning a cold one just to answer a status query.
-    const bridge = pool.getAnyActiveBridge(input.directory) ?? pool.getBridge(input.directory);
+    const bridge = pool.getActiveBridgeForRoot(input.directory) ?? pool.getBridge(input.directory);
     return await bridge.send("status", { session_id: sessionID });
   });
   // Feature announcement — TUI plugin calls this on startup to show a dialog.
@@ -663,7 +663,7 @@ const plugin: Plugin = async (input) => {
 
       // Prefer an existing active bridge to get warm index status
       const bridge =
-        ctx.pool.getAnyActiveBridge(input.directory) ?? ctx.pool.getBridge(input.directory);
+        ctx.pool.getActiveBridgeForRoot(input.directory) ?? ctx.pool.getBridge(input.directory);
       const response = await bridge.send("status", { session_id: commandInput.sessionID });
       if (response.success === false) {
         throw new Error((response.message as string) || "status failed");

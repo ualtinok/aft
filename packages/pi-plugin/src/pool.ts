@@ -73,6 +73,15 @@ export class BridgePool {
     return null;
   }
 
+  /** Get an alive bridge only when it belongs to the requested directory. */
+  getActiveBridgeForRoot(directory: string): BinaryBridge | null {
+    const key = canonicalKey(directory);
+    const entry = this.bridges.get(key);
+    if (!entry?.bridge.isAlive()) return null;
+    entry.lastUsed = Date.now();
+    return entry.bridge;
+  }
+
   /** Get or create a bridge for the given directory. */
   getBridge(directory: string): BinaryBridge {
     const key = canonicalKey(directory);
