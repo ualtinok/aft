@@ -27,16 +27,24 @@ pub fn set_session(session: Option<String>) {
     });
 }
 
-/// Run `f` with the given session id set on the current thread, clearing it
-/// afterwards (RAII-style).
+struct SessionGuard(Option<String>);
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        set_session(self.0.take());
+    }
+}
+
+/// Run `f` with the given session id set on the current thread, restoring the
+/// previous value afterwards (RAII-style and panic-safe).
 ///
 /// This is the primary entry point for the main request loop: wrap the
 /// dispatch call in `with_session(req.session_id.clone(), || { ... })`.
 pub fn with_session<T>(session: Option<String>, f: impl FnOnce() -> T) -> T {
+    let prev = current_session();
     set_session(session);
-    let result = f();
-    set_session(None);
-    result
+    let _guard = SessionGuard(prev);
+    f()
 }
 
 /// Return the current session id (e.g. `"abcd1234"`), or `None` if no session is set.

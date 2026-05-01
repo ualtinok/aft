@@ -21,11 +21,29 @@ fn with_session_sets_and_clears_thread_local() {
         aft::log_ctx::with_session(Some("inner".to_string()), || {
             assert_eq!(aft::log_ctx::current_session(), Some("inner".to_string()));
         });
-        // After inner with_session clears, we're back to None (not "outer")
-        // because with_session always clears to None, not to the previous value.
-        assert!(aft::log_ctx::current_session().is_none());
+        // After inner with_session drops, the outer session is restored.
+        assert_eq!(aft::log_ctx::current_session(), Some("outer".to_string()));
     });
 
+    assert!(aft::log_ctx::current_session().is_none());
+}
+
+#[test]
+fn with_session_restores_after_panic() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    assert!(aft::log_ctx::current_session().is_none());
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        aft::log_ctx::with_session(Some("panic_session".to_string()), || {
+            assert_eq!(
+                aft::log_ctx::current_session(),
+                Some("panic_session".to_string())
+            );
+            panic!("intentional panic for with_session guard test");
+        });
+    }));
+
+    assert!(result.is_err());
     assert!(aft::log_ctx::current_session().is_none());
 }
 

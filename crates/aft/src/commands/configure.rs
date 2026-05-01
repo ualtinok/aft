@@ -1117,28 +1117,31 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let root_clone = root_path.clone();
         let session_id_for_bg = log_ctx::current_session();
         thread::spawn(move || {
-            log_ctx::set_session(session_id_for_bg);
-            let index = SearchIndex::rebuild_or_refresh(
-                &root_clone,
-                search_index_max_file_size,
-                current_head,
-                baseline,
-            );
-            index.write_to_disk(&cache_dir, index.stored_git_head());
+            log_ctx::with_session(session_id_for_bg, || {
+                let index = SearchIndex::rebuild_or_refresh(
+                    &root_clone,
+                    search_index_max_file_size,
+                    current_head,
+                    baseline,
+                );
+                index.write_to_disk(&cache_dir, index.stored_git_head());
 
-            // Pre-warm symbol cache from indexed files
-            let mut symbol_cache = crate::parser::SymbolCache::new();
-            let mut parser = crate::parser::FileParser::new();
-            for file_entry in &index.files {
-                if let Ok(mtime) = std::fs::metadata(&file_entry.path).and_then(|m| m.modified()) {
-                    if let Ok(symbols) = parser.extract_symbols(&file_entry.path) {
-                        symbol_cache.insert(file_entry.path.clone(), mtime, symbols);
+                // Pre-warm symbol cache from indexed files
+                let mut symbol_cache = crate::parser::SymbolCache::new();
+                let mut parser = crate::parser::FileParser::new();
+                for file_entry in &index.files {
+                    if let Ok(mtime) =
+                        std::fs::metadata(&file_entry.path).and_then(|m| m.modified())
+                    {
+                        if let Ok(symbols) = parser.extract_symbols(&file_entry.path) {
+                            symbol_cache.insert(file_entry.path.clone(), mtime, symbols);
+                        }
                     }
                 }
-            }
-            slog_info!("pre-warmed symbol cache: {} files", symbol_cache.len());
+                slog_info!("pre-warmed symbol cache: {} files", symbol_cache.len());
 
-            let _ = tx.send((index, symbol_cache));
+                let _ = tx.send((index, symbol_cache));
+            });
         });
     }
 
@@ -1162,126 +1165,130 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let tx_progress = tx.clone();
         let session_id_for_bg2 = log_ctx::current_session();
         thread::spawn(move || {
-            log_ctx::set_session(session_id_for_bg2);
-            let build_result =
-                catch_unwind(AssertUnwindSafe(|| -> Result<SemanticIndex, String> {
-                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                        stage: "initializing_embedding_model".to_string(),
-                        files: None,
-                        entries_done: None,
-                        entries_total: None,
-                    });
-                    let mut model =
-                        crate::semantic_index::EmbeddingModel::from_config(&semantic_config)?;
-                    let fingerprint = model.fingerprint(&semantic_config)?;
-                    let fingerprint_key = fingerprint.as_string();
-
-                    if let Some(ref dir) = semantic_storage {
-                        if let Some(cached) = SemanticIndex::read_from_disk(
-                            dir,
-                            &semantic_project_key,
-                            Some(&fingerprint_key),
-                        ) {
-                            let stale_count = cached.count_stale_files();
-                            if stale_count == 0 {
-                                let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                                    stage: "loaded_cached_index".to_string(),
-                                    files: None,
-                                    entries_done: Some(cached.entry_count()),
-                                    entries_total: Some(cached.entry_count()),
-                                });
-                                return Ok(cached);
-                            }
-
-                            slog_info!("semantic index: {} stale files, rebuilding", stale_count);
-                        }
-                    }
-
-                    let filters = build_path_filters(&[], &[]).unwrap_or_default();
-                    let files = walk_project_files(&root_clone, &filters);
-                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                        stage: "scanned_project_files".to_string(),
-                        files: Some(files.len()),
-                        entries_done: None,
-                        entries_total: None,
-                    });
-
-                    // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
-                    // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
-                    // on constrained systems when indexing tens of thousands of files.
-                    const MAX_SEMANTIC_FILES: usize = 10_000;
-                    if files.len() > MAX_SEMANTIC_FILES {
-                        slog_warn!(
-                            "skipping semantic index: {} files exceeds limit of {}. \
-                             Open a specific project directory instead of a large root.",
-                            files.len(),
-                            MAX_SEMANTIC_FILES
-                        );
-                        return Err(format!(
-                            "too many files ({}) for semantic indexing (max {})",
-                            files.len(),
-                            MAX_SEMANTIC_FILES
-                        ));
-                    }
-
-                    let mut embed = |texts: Vec<String>| model.embed(texts);
-
-                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                        stage: "extracting_symbols".to_string(),
-                        files: Some(files.len()),
-                        entries_done: None,
-                        entries_total: None,
-                    });
-                    let mut progress = |done: usize, total: usize| {
+            log_ctx::with_session(session_id_for_bg2, || {
+                let build_result =
+                    catch_unwind(AssertUnwindSafe(|| -> Result<SemanticIndex, String> {
                         let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                            stage: "embedding_symbols".to_string(),
-                            files: Some(files.len()),
-                            entries_done: Some(done),
-                            entries_total: Some(total),
+                            stage: "initializing_embedding_model".to_string(),
+                            files: None,
+                            entries_done: None,
+                            entries_total: None,
                         });
-                    };
-                    let index = SemanticIndex::build_with_progress(
-                        &root_clone,
-                        &files,
-                        &mut embed,
-                        semantic_config.max_batch_size.max(1),
-                        &mut progress,
-                    )?;
-                    let mut index = index;
-                    index.set_fingerprint(fingerprint);
-                    slog_info!(
-                        "built semantic index: {} files, {} entries",
-                        files.len(),
-                        index.len()
-                    );
-                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                        stage: "persisting_index".to_string(),
-                        files: Some(files.len()),
-                        entries_done: Some(index.len()),
-                        entries_total: Some(index.len()),
-                    });
+                        let mut model =
+                            crate::semantic_index::EmbeddingModel::from_config(&semantic_config)?;
+                        let fingerprint = model.fingerprint(&semantic_config)?;
+                        let fingerprint_key = fingerprint.as_string();
 
-                    if let Some(ref dir) = semantic_storage {
-                        index.write_to_disk(dir, &semantic_project_key);
+                        if let Some(ref dir) = semantic_storage {
+                            if let Some(cached) = SemanticIndex::read_from_disk(
+                                dir,
+                                &semantic_project_key,
+                                Some(&fingerprint_key),
+                            ) {
+                                let stale_count = cached.count_stale_files();
+                                if stale_count == 0 {
+                                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                        stage: "loaded_cached_index".to_string(),
+                                        files: None,
+                                        entries_done: Some(cached.entry_count()),
+                                        entries_total: Some(cached.entry_count()),
+                                    });
+                                    return Ok(cached);
+                                }
+
+                                slog_info!(
+                                    "semantic index: {} stale files, rebuilding",
+                                    stale_count
+                                );
+                            }
+                        }
+
+                        let filters = build_path_filters(&[], &[]).unwrap_or_default();
+                        let files = walk_project_files(&root_clone, &filters);
+                        let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                            stage: "scanned_project_files".to_string(),
+                            files: Some(files.len()),
+                            entries_done: None,
+                            entries_total: None,
+                        });
+
+                        // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
+                        // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
+                        // on constrained systems when indexing tens of thousands of files.
+                        const MAX_SEMANTIC_FILES: usize = 10_000;
+                        if files.len() > MAX_SEMANTIC_FILES {
+                            slog_warn!(
+                                "skipping semantic index: {} files exceeds limit of {}. \
+                             Open a specific project directory instead of a large root.",
+                                files.len(),
+                                MAX_SEMANTIC_FILES
+                            );
+                            return Err(format!(
+                                "too many files ({}) for semantic indexing (max {})",
+                                files.len(),
+                                MAX_SEMANTIC_FILES
+                            ));
+                        }
+
+                        let mut embed = |texts: Vec<String>| model.embed(texts);
+
+                        let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                            stage: "extracting_symbols".to_string(),
+                            files: Some(files.len()),
+                            entries_done: None,
+                            entries_total: None,
+                        });
+                        let mut progress = |done: usize, total: usize| {
+                            let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                stage: "embedding_symbols".to_string(),
+                                files: Some(files.len()),
+                                entries_done: Some(done),
+                                entries_total: Some(total),
+                            });
+                        };
+                        let index = SemanticIndex::build_with_progress(
+                            &root_clone,
+                            &files,
+                            &mut embed,
+                            semantic_config.max_batch_size.max(1),
+                            &mut progress,
+                        )?;
+                        let mut index = index;
+                        index.set_fingerprint(fingerprint);
+                        slog_info!(
+                            "built semantic index: {} files, {} entries",
+                            files.len(),
+                            index.len()
+                        );
+                        let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                            stage: "persisting_index".to_string(),
+                            files: Some(files.len()),
+                            entries_done: Some(index.len()),
+                            entries_total: Some(index.len()),
+                        });
+
+                        if let Some(ref dir) = semantic_storage {
+                            index.write_to_disk(dir, &semantic_project_key);
+                        }
+
+                        Ok(index)
+                    }));
+
+                let event = match build_result {
+                    Ok(Ok(index)) => SemanticIndexEvent::Ready(index),
+                    Ok(Err(error)) => {
+                        slog_warn!("failed to build semantic index: {}", error);
+                        SemanticIndexEvent::Failed(error)
                     }
+                    Err(_) => {
+                        let error = "semantic index build panicked".to_string();
+                        slog_warn!("{}", error);
+                        SemanticIndexEvent::Failed(error)
+                    }
+                };
 
-                    Ok(index)
-                }));
-
-            let event = match build_result {
-                Ok(Ok(index)) => SemanticIndexEvent::Ready(index),
-                Ok(Err(error)) => {
-                    slog_warn!("failed to build semantic index: {}", error);
-                    SemanticIndexEvent::Failed(error)
-                }
-                Err(_) => {
-                    let error = "semantic index build panicked".to_string();
-                    slog_warn!("{}", error);
-                    SemanticIndexEvent::Failed(error)
-                }
-            };
-
-            let _ = tx.send(event);
+                let _ = tx.send(event);
+            });
         });
     }
 
