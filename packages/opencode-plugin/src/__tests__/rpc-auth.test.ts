@@ -135,4 +135,35 @@ describe("AFT RPC auth", () => {
       await new Promise<void>((resolve) => legacyServer.close(() => resolve()));
     }
   });
+
+  test("client refreshes cached port and retries once after stale port failure", async () => {
+    const fixture = makeFixture();
+    const staleServer = new AftRpcServer(fixture.storageDir, fixture.directory);
+    staleServer.handle("echo", async () => ({ stale: true }));
+
+    const freshServer = new AftRpcServer(fixture.storageDir, fixture.directory);
+    freshServer.handle("echo", async (params) => ({ fresh: true, params }));
+
+    try {
+      await staleServer.start();
+      const client = new AftRpcClient(fixture.storageDir, fixture.directory);
+      await expect(client.call("echo", { value: "first" })).resolves.toMatchObject({
+        stale: true,
+      });
+
+      staleServer.stop();
+      await freshServer.start();
+
+      const result = await client.call<{ fresh: boolean; params: Record<string, unknown> }>(
+        "echo",
+        { value: "second" },
+      );
+
+      expect(result.fresh).toBe(true);
+      expect(result.params.value).toBe("second");
+    } finally {
+      staleServer.stop();
+      freshServer.stop();
+    }
+  });
 });

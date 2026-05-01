@@ -26,18 +26,51 @@ export class AftRpcClient {
       throw new Error("AFT RPC server not available");
     }
 
-    const response = await this.fetchWithTimeout(`http://127.0.0.1:${info.port}/rpc/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...params, token: info.token }),
-    });
+    return this.callResolved<T>(method, params, info, true);
+  }
+
+  private async callResolved<T>(
+    method: string,
+    params: Record<string, unknown>,
+    info: { port: number; token: string | null },
+    retryOnConnectionFailure: boolean,
+  ): Promise<T> {
+    let response: Response;
+    try {
+      response = await this.fetchWithTimeout(`http://127.0.0.1:${info.port}/rpc/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...params, token: info.token }),
+      });
+    } catch (err) {
+      if (!retryOnConnectionFailure) throw err;
+      return this.retryAfterReset<T>(method, params, err);
+    }
 
     if (!response.ok) {
       const text = await response.text();
+      if (response.status >= 500 && retryOnConnectionFailure) {
+        return this.retryAfterReset<T>(method, params, `HTTP ${response.status}: ${text}`);
+      }
       throw new Error(`RPC ${method} failed (${response.status}): ${text}`);
     }
 
     return (await response.json()) as T;
+  }
+
+  private async retryAfterReset<T>(
+    method: string,
+    params: Record<string, unknown>,
+    reason: unknown,
+  ): Promise<T> {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    warn(`RPC ${method} failed on cached port; retrying after port refresh (${message})`);
+    this.reset();
+    const refreshed = await this.resolvePortInfo();
+    if (!refreshed) {
+      throw new Error("AFT RPC server not available after port refresh");
+    }
+    return this.callResolved<T>(method, params, refreshed, false);
   }
 
   /** Check if the RPC server is reachable. */
