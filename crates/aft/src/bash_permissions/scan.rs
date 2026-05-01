@@ -55,10 +55,13 @@ pub fn scan_with_cwd(command: &str, ctx: &AppContext, cwd: &Path) -> Vec<Permiss
     }
 
     let Some(tree) = parser.parse(command, None) else {
-        return Vec::new();
+        return vec![parse_failed_ask()];
     };
 
     let root = tree.root_node();
+    if root.has_error() {
+        return vec![parse_failed_ask()];
+    }
     let mut command_nodes = Vec::new();
     collect_commands(root, &mut command_nodes);
 
@@ -113,6 +116,14 @@ pub fn scan_with_cwd(command: &str, ctx: &AppContext, cwd: &Path) -> Vec<Permiss
     }
 
     asks
+}
+
+fn parse_failed_ask() -> PermissionAsk {
+    PermissionAsk {
+        kind: PermissionKind::Bash,
+        patterns: vec!["*".to_string()],
+        always: Vec::new(),
+    }
 }
 
 fn collect_commands<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {

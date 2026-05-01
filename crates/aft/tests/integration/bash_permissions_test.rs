@@ -190,3 +190,20 @@ fn background_command_requires_permission_before_spawn() {
 
     assert!(aft.shutdown().success());
 }
+
+#[test]
+fn malformed_bash_requires_full_permission_prompt() {
+    let root = TempDir::new().unwrap();
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &root);
+
+    let response = bash(&mut aft, "malformed", "echo 'unterminated");
+    assert_eq!(response["success"], false, "response: {response:?}");
+    assert_eq!(response["code"], "permission_required");
+    let asks = response["asks"].as_array().unwrap();
+    assert!(asks.iter().any(|ask| {
+        ask["kind"] == "bash" && ask["patterns"].as_array().unwrap().iter().any(|p| p == "*")
+    }));
+
+    assert!(aft.shutdown().success());
+}
