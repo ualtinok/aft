@@ -2598,8 +2598,11 @@ fn extract_html_symbols(source: &str, root: &Node) -> Result<Vec<Symbol>, AftErr
             .iter()
             .find(|(l, _)| *l <= level)
             .map(|(_, s)| s.range.start_line.saturating_sub(1))
-            .unwrap_or(total_lines);
+            .unwrap_or_else(|| total_lines.saturating_sub(1));
         headings[i].1.range.end_line = section_end;
+        if section_end != headings[i].1.range.start_line {
+            headings[i].1.range.end_col = 0;
+        }
     }
 
     // Build hierarchy: assign scope_chain and parent based on heading level

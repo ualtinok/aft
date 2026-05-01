@@ -234,6 +234,45 @@ fn zoom_html_heading_returns_content_with_context() {
     assert!(status.success());
 }
 
+#[test]
+fn zoom_html_last_heading_range_stays_within_file() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "last-heading.html",
+        "<html>\n<body>\n<h1>Last Heading</h1>\n<p>Final paragraph</p>\n</body>\n</html>\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "zoom-html-last",
+            "command": "zoom",
+            "file": file,
+            "symbol": "Last Heading",
+        }),
+    );
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    assert!(
+        resp["content"]
+            .as_str()
+            .unwrap()
+            .contains("Final paragraph"),
+        "last heading should include trailing section content: {resp:?}"
+    );
+    assert!(
+        resp["range"]["end_line"].as_u64().unwrap() <= 6,
+        "end_line should not point past EOF: {resp:?}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
 /// Regression: aft_zoom on an HTML heading must return the full section extent
 /// (heading through the line before the next same-or-shallower heading), not
 /// just the single heading element line.
