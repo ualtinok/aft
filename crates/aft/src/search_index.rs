@@ -18,7 +18,7 @@ use regex_syntax::hir::{Hir, HirKind};
 const DEFAULT_MAX_FILE_SIZE: u64 = 1_048_576;
 const INDEX_MAGIC: &[u8; 8] = b"AFTIDX01";
 const LOOKUP_MAGIC: &[u8; 8] = b"AFTLKP01";
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 const PREVIEW_BYTES: usize = 8 * 1024;
 const EOF_SENTINEL: u8 = 0;
 const MAX_ENTRIES: usize = 10_000_000;
@@ -660,6 +660,7 @@ impl SearchIndex {
                     .map_err(|_| std::io::Error::other("postings blob too large"))?,
             )?;
             postings_writer.write_all(&postings_blob)?;
+            write_crc32(&mut postings_writer, &tmp_postings)?;
             postings_writer.flush()?;
             drop(postings_writer);
 
@@ -677,6 +678,7 @@ impl SearchIndex {
                 write_u32(&mut lookup_writer, count)?;
             }
 
+            write_crc32(&mut lookup_writer, &tmp_lookup)?;
             lookup_writer.flush()?;
             drop(lookup_writer);
 
@@ -696,12 +698,17 @@ impl SearchIndex {
         let postings_path = cache_dir.join("postings.bin");
         let lookup_path = cache_dir.join("lookup.bin");
 
-        let mut postings_reader = BufReader::new(File::open(postings_path).ok()?);
-        let mut lookup_reader = BufReader::new(File::open(lookup_path).ok()?);
+        let mut postings_reader = BufReader::new(File::open(&postings_path).ok()?);
+        let mut lookup_reader = BufReader::new(File::open(&lookup_path).ok()?);
         let postings_len_total =
             usize::try_from(postings_reader.get_ref().metadata().ok()?.len()).ok()?;
         let lookup_len_total =
             usize::try_from(lookup_reader.get_ref().metadata().ok()?.len()).ok()?;
+        if postings_len_total < 4 || lookup_len_total < 4 {
+            return None;
+        }
+        verify_crc32(&postings_path).ok()?;
+        verify_crc32(&lookup_path).ok()?;
 
         let mut magic = [0u8; 8];
         postings_reader.read_exact(&mut magic).ok()?;
@@ -719,13 +726,16 @@ impl SearchIndex {
         if file_count > MAX_ENTRIES {
             return None;
         }
-        let remaining_postings = remaining_bytes(&mut postings_reader, postings_len_total)?;
+        let postings_body_len = postings_len_total.checked_sub(4)?;
+        let lookup_body_len = lookup_len_total.checked_sub(4)?;
+
+        let remaining_postings = remaining_bytes(&mut postings_reader, postings_body_len)?;
         let minimum_file_bytes = file_count.checked_mul(MIN_FILE_ENTRY_BYTES)?;
         if minimum_file_bytes > remaining_postings {
             return None;
         }
 
-        if head_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+        if head_len > remaining_bytes(&mut postings_reader, postings_body_len)? {
             return None;
         }
         let mut head_bytes = vec![0u8; head_len];
@@ -734,7 +744,7 @@ impl SearchIndex {
             .ok()
             .filter(|head| !head.is_empty());
 
-        if root_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+        if root_len > remaining_bytes(&mut postings_reader, postings_body_len)? {
             return None;
         }
         let mut root_bytes = vec![0u8; root_len];
@@ -755,7 +765,7 @@ impl SearchIndex {
             if nanos >= 1_000_000_000 {
                 return None;
             }
-            if path_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+            if path_len > remaining_bytes(&mut postings_reader, postings_body_len)? {
                 return None;
             }
             let mut path_bytes = vec![0u8; path_len];
@@ -780,7 +790,7 @@ impl SearchIndex {
         if postings_len > max_postings_bytes {
             return None;
         }
-        if postings_len > remaining_bytes(&mut postings_reader, postings_len_total)? {
+        if postings_len > remaining_bytes(&mut postings_reader, postings_body_len)? {
             return None;
         }
         let mut postings_blob = vec![0u8; postings_len];
@@ -798,7 +808,7 @@ impl SearchIndex {
         if entry_count > MAX_ENTRIES {
             return None;
         }
-        let remaining_lookup = remaining_bytes(&mut lookup_reader, lookup_len_total)?;
+        let remaining_lookup = remaining_bytes(&mut lookup_reader, lookup_body_len)?;
         let minimum_lookup_bytes = entry_count.checked_mul(LOOKUP_ENTRY_BYTES)?;
         if minimum_lookup_bytes > remaining_lookup {
             return None;
@@ -1718,6 +1728,26 @@ fn write_u64<W: Write>(writer: &mut W, value: u64) -> std::io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
+fn write_crc32(writer: &mut BufWriter<File>, path: &Path) -> std::io::Result<()> {
+    writer.flush()?;
+    let body = std::fs::read(path)?;
+    let checksum = crc32fast::hash(&body);
+    writer.write_all(&checksum.to_le_bytes())
+}
+
+fn verify_crc32(path: &Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let Some((body, stored)) = bytes.split_last_chunk::<4>() else {
+        return Err(std::io::Error::other("search index checksum missing"));
+    };
+    let expected = u32::from_le_bytes(*stored);
+    let actual = crc32fast::hash(body);
+    if actual != expected {
+        return Err(std::io::Error::other("search index checksum mismatch"));
+    }
+    Ok(())
+}
+
 fn remaining_bytes<R: Seek>(reader: &mut R, total_len: usize) -> Option<usize> {
     let pos = usize::try_from(reader.stream_position().ok()?).ok()?;
     total_len.checked_sub(pos)
@@ -1934,6 +1964,26 @@ mod tests {
         assert!(loaded
             .postings
             .contains_key(&pack_trigram(b'a', b'b', b'c')));
+    }
+
+    #[test]
+    fn read_from_disk_rejects_corrupt_postings_checksum() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).expect("create project dir");
+        fs::write(project.join("src.txt"), "abcdef").expect("write source");
+
+        let index = SearchIndex::build(&project);
+        let cache_dir = dir.path().join("cache");
+        index.write_to_disk(&cache_dir, None);
+
+        let postings_path = cache_dir.join("postings.bin");
+        let mut bytes = fs::read(&postings_path).expect("read postings");
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        fs::write(&postings_path, bytes).expect("write corrupted postings");
+
+        assert!(SearchIndex::read_from_disk(&cache_dir).is_none());
     }
 
     #[test]
