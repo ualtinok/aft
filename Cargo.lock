@@ -18,6 +18,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "fastembed",
+ "getrandom 0.3.4",
  "glob",
  "globset",
  "ignore",

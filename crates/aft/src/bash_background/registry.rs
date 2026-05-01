@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -825,21 +825,20 @@ fn detached_shell_command(command: &str, exit_path: &Path) -> Command {
 }
 
 fn random_slug() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mixed = unix_millis_nanos()
-        ^ (std::process::id() as u128).wrapping_mul(0x9E3779B97F4A7C15)
-        ^ (counter as u128).wrapping_mul(0xBF58476D1CE4E5B9);
-    // Use 64 bits (`bgb-` + 16 lowercase hex chars) to keep IDs compact while
-    // avoiding the birthday-collision risk of the old 32-bit suffix.
-    format!("bgb-{:016x}", mixed as u64)
-}
-
-fn unix_millis_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
+    let mut bytes = [0u8; 4];
+    // getrandom is a transitive dependency; use it directly for OS entropy.
+    getrandom::fill(&mut bytes).unwrap_or_else(|_| {
+        // Extremely unlikely fallback: time + pid mix.
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let p = std::process::id();
+        bytes.copy_from_slice(&(t ^ p).to_le_bytes());
+    });
+    // `bgb-` + 8 lowercase hex chars — compact, OS-entropy backed.
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("bgb-{hex}")
 }
 
 #[cfg(test)]
