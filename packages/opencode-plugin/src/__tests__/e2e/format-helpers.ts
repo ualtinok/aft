@@ -11,9 +11,37 @@
  * generation on top.
  */
 
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { symlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { createHarness, type E2EHarness, type PreparedBinary } from "./helpers.js";
+
+/**
+ * Names of real formatters/checkers we try to symlink into the harness's
+ * `node_modules/.bin/` when no shim has been provided. AFT's resolver looks
+ * at `<project_root>/node_modules/.bin/<tool>` first, so this keeps tests
+ * runnable in CI without polluting `PATH`.
+ */
+const REAL_TOOLS = ["biome"] as const;
+
+/**
+ * Walk up from this file looking for a `node_modules/.bin/` that contains
+ * the named tool. In a Bun workspace, package-local `node_modules/.bin/`
+ * only carries package-specific binaries; shared deps like Biome live in
+ * the workspace-root `node_modules/.bin/`. We need to keep walking past
+ * the first matched bin dir if it doesn't have the specific tool.
+ */
+function findToolInWorkspace(tool: string): string | null {
+  let cur = dirname(new URL(import.meta.url).pathname);
+  for (let i = 0; i < 10; i++) {
+    const candidate = join(cur, "node_modules", ".bin", tool);
+    if (existsSync(candidate)) return candidate;
+    const next = resolve(cur, "..");
+    if (next === cur) break;
+    cur = next;
+  }
+  return null;
+}
 
 /**
  * Per-language formatter config installer. Each preset writes the minimum
@@ -169,6 +197,13 @@ export async function createFormatHarness(
   preparedBinary: PreparedBinary,
   preset: FormatPreset,
   shims: FakeFormatterShim[] = [],
+  /**
+   * When true, skip the workspace-tool symlink step (Step 2b). Use this
+   * in tests that explicitly want to verify the `formatter_not_installed`
+   * path — the symlink would otherwise make the real formatter discoverable
+   * and cause `formatted: true` instead.
+   */
+  suppressRealToolSymlinks = false,
 ): Promise<E2EHarness> {
   const harness = await createHarness(preparedBinary, {
     fixtureNames: [],
@@ -181,9 +216,10 @@ export async function createFormatHarness(
   }
 
   // Step 2: Install any fake formatter shims under node_modules/.bin/.
+  const { mkdir, chmod } = await import("node:fs/promises");
+  const binDir = harness.path("node_modules", ".bin");
+  const shimmedNames = new Set(shims.map((s) => s.name));
   if (shims.length > 0) {
-    const { mkdir, chmod } = await import("node:fs/promises");
-    const binDir = harness.path("node_modules", ".bin");
     await mkdir(binDir, { recursive: true });
     for (const shim of shims) {
       const shimPath = join(binDir, shim.name);
@@ -191,6 +227,25 @@ export async function createFormatHarness(
       const body = shim.script.startsWith("#!") ? shim.script : `#!/bin/sh\n${shim.script}`;
       await writeFile(shimPath, body, "utf8");
       await chmod(shimPath, 0o755);
+    }
+  }
+
+  // Step 2b: For real-tool tests (no shim provided), symlink the workspace's
+  //          installed formatter into the harness's node_modules/.bin/ so
+  //          AFT's project-local resolver finds it. This lets CI run the
+  //          real-Biome path without putting node_modules/.bin on PATH.
+  //          Skipped when suppressRealToolSymlinks=true (formatter_not_installed tests).
+  await mkdir(binDir, { recursive: true });
+  for (const tool of suppressRealToolSymlinks ? [] : REAL_TOOLS) {
+    if (shimmedNames.has(tool)) continue; // shim takes precedence
+    const src = findToolInWorkspace(tool);
+    if (!src) continue;
+    const dest = join(binDir, tool);
+    if (existsSync(dest)) continue;
+    try {
+      await symlink(src, dest);
+    } catch {
+      // benign — race with another test or platform without symlinks
     }
   }
 

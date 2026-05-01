@@ -22,7 +22,7 @@ import { type E2EHarness, type PreparedBinary, prepareBinary } from "./helpers.j
 
 const initialBinary = await prepareBinary();
 const maybeDescribe = describe.skipIf(!initialBinary.binaryPath);
-const biomeOnPath = await commandAvailable("biome");
+await commandAvailable("biome"); // unused — kept as a utility reference
 
 const DOCUMENTED_FORMAT_SKIP_REASONS = [
   "unsupported_language",
@@ -177,8 +177,12 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     );
   });
 
-  async function formatHarness(preset: FormatPreset, shims: FakeFormatterShim[] = []) {
-    const h = await createFormatHarness(preparedBinary, preset, shims);
+  async function formatHarness(
+    preset: FormatPreset,
+    shims: FakeFormatterShim[] = [],
+    suppressRealToolSymlinks = false,
+  ) {
+    const h = await createFormatHarness(preparedBinary, preset, shims, suppressRealToolSymlinks);
     harnesses.push(h);
     return h;
   }
@@ -366,13 +370,13 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     });
   });
 
-  test.skipIf(biomeOnPath)(
-    "formatter_not_installed: biome.json auto-detect but no biome on PATH (skipped: biome installed on PATH)",
-    async () => {
-      const h = await formatHarness(BIOME_TS_PRESET);
-      await writeAndExpectSkip(h, "src/missing-biome.ts", TS_INPUT, "formatter_not_installed");
-    },
-  );
+  // suppressRealToolSymlinks=true prevents createFormatHarness from linking
+  // the workspace biome into the harness — this test specifically verifies the
+  // "biome.json present but biome binary absent" path.
+  test("formatter_not_installed: biome.json auto-detect but no biome in harness node_modules", async () => {
+    const h = await formatHarness(BIOME_TS_PRESET, [], true);
+    await writeAndExpectSkip(h, "src/missing-biome.ts", TS_INPUT, "formatter_not_installed");
+  });
 
   test.skipIf(true)(
     "formatter_excluded_path: real biome refuses scratch/ via includes filter (skipped: biome unavailable or too slow in e2e)",
@@ -471,8 +475,8 @@ maybeDescribe("e2e format_on_edit skip reasons", () => {
     );
 
     expect(data.success).toBe(true);
-    expect(Object.hasOwn(data, "formatted")).toBe(true);
-    expect(Object.hasOwn(data, "format_skipped_reason")).toBe(true);
+    expect("formatted" in data).toBe(true);
+    expect("format_skipped_reason" in data).toBe(true);
     expect(data.format_skipped_reason).toBe("no_formatter_configured");
   });
 
