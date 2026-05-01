@@ -268,7 +268,7 @@ fn dynamic(text: &str) -> bool {
 }
 
 fn resolve_existing(path: &Path) -> PathBuf {
-    normalize_path(path)
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

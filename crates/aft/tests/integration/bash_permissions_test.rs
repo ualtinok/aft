@@ -16,6 +16,29 @@ fn configure(aft: &mut AftProcess, root: &TempDir) {
     assert_eq!(response["success"], true, "configure failed: {response:?}");
 }
 
+fn configure_path(aft: &mut AftProcess, root: &std::path::Path) {
+    let response = aft.send(
+        &serde_json::to_string(&json!({
+            "id": "cfg",
+            "command": "configure",
+            "project_root": root,
+            "bash_permissions": true,
+        }))
+        .unwrap(),
+    );
+    assert_eq!(response["success"], true, "configure failed: {response:?}");
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(src: &std::path::Path, dst: &std::path::Path) {
+    std::os::unix::fs::symlink(src, dst).expect("create symlink");
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(src: &std::path::Path, dst: &std::path::Path) {
+    std::os::windows::fs::symlink_dir(src, dst).expect("create symlink");
+}
+
 fn bash(aft: &mut AftProcess, id: &str, command: &str) -> serde_json::Value {
     aft.send(
         &serde_json::to_string(&json!({
@@ -56,13 +79,44 @@ fn rm_outside_project_root_requires_external_directory() {
     let response = bash(&mut aft, "rm", "rm /tmp/foo.txt");
     assert_eq!(response["success"], false, "response: {response:?}");
     assert_eq!(response["code"], "permission_required");
+    assert!(
+        response["asks"].as_array().unwrap().iter().any(|ask| {
+            ask["kind"] == "external_directory"
+                && ask["patterns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.as_str().is_some_and(|p| p.contains("tmp/") && p.ends_with("/*")))
+        }),
+        "response: {response:?}"
+    );
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn symlink_path_resolving_outside_project_requires_permission() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("project");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    create_dir_symlink(&outside, &root.join("link"));
+    std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+    let mut aft = AftProcess::spawn();
+    configure_path(&mut aft, &root);
+
+    let response = bash(&mut aft, "symlink-outside", "rm link/secret.txt");
+    assert_eq!(response["success"], false, "response: {response:?}");
+    assert_eq!(response["code"], "permission_required");
     assert!(response["asks"].as_array().unwrap().iter().any(|ask| {
         ask["kind"] == "external_directory"
             && ask["patterns"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p == "/tmp/*")
+                .any(|p| p.as_str().is_some_and(|p| p.contains("outside")))
     }));
 
     assert!(aft.shutdown().success());
@@ -76,14 +130,17 @@ fn chained_cd_then_rm_uses_subcommand_directory() {
 
     let response = bash(&mut aft, "chain", "cd /tmp && rm foo");
     assert_eq!(response["success"], false, "response: {response:?}");
-    assert!(response["asks"].as_array().unwrap().iter().any(|ask| {
-        ask["kind"] == "external_directory"
-            && ask["patterns"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|p| p == "/tmp/*")
-    }));
+    assert!(
+        response["asks"].as_array().unwrap().iter().any(|ask| {
+            ask["kind"] == "external_directory"
+                && ask["patterns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.as_str().is_some_and(|p| p.contains("tmp/") && p.ends_with("/*")))
+        }),
+        "response: {response:?}"
+    );
 
     assert!(aft.shutdown().success());
 }
