@@ -64,6 +64,7 @@ import { searchTools } from "./tools/search.js";
 import { semanticTools } from "./tools/semantic.js";
 import { structureTools } from "./tools/structure.js";
 import type { PluginContext } from "./types.js";
+import { buildHintsFromConfig } from "./workflow-hints.js";
 
 const STATUS_COMMAND = "aft-status";
 const SENTINEL_PREFIX = "__AFT_STATUS_";
@@ -632,8 +633,44 @@ const plugin: Plugin = async (input) => {
     signal: autoUpdateAbort.signal,
   });
 
+  // Workflow hints: short system-prompt block teaching token-efficient
+  // AFT workflows. Computed from the final tool surface so we never
+  // advertise tools the agent doesn't have. User-only — see config.ts
+  // for the security rationale.
+  // We pass the complement of registered tools (i.e. names that AREN'T in
+  // allTools) so buildHintsFromConfig drops sections for tools the agent
+  // can't actually call.
+  const HINTS_TOOL_NAMES = [
+    "aft_outline",
+    "aft_zoom",
+    "aft_search",
+    "aft_navigate",
+    "grep",
+    "aft_grep",
+    "bash",
+    "aft_bash",
+    "bash_status",
+  ];
+  const registeredTools = new Set(Object.keys(allTools));
+  const hintsAbsentTools = new Set<string>();
+  for (const name of HINTS_TOOL_NAMES) {
+    if (!registeredTools.has(name)) hintsAbsentTools.add(name);
+  }
+  const hintsBlock = buildHintsFromConfig(aftConfig, hintsAbsentTools);
+  if (hintsBlock) {
+    log(`Workflow hints injected (${hintsBlock.length} chars)`);
+  }
+
   return {
     tool: allTools,
+    "experimental.chat.system.transform": async (
+      _input: { sessionID?: string; model: unknown },
+      output: { system: string[] },
+    ) => {
+      if (hintsBlock) {
+        output.system.push(hintsBlock);
+      }
+    },
     event: async (eventInput: { event: { type: string; properties?: unknown } }) => {
       await autoUpdateEventHook(eventInput);
       if (eventInput.event.type !== "session.idle") return;

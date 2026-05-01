@@ -79,6 +79,7 @@ import { registerSafetyTool } from "./tools/safety.js";
 import { registerSemanticTool } from "./tools/semantic.js";
 import { registerStructureTool } from "./tools/structure.js";
 import type { PluginContext } from "./types.js";
+import { registerWorkflowHints } from "./workflow-hints.js";
 
 /** Plugin version from package.json. */
 const PLUGIN_VERSION: string = (() => {
@@ -465,6 +466,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   if (surface.refactor) {
     registerRefactorTool(pi, ctx);
   }
+
+  // Workflow hints: short system-prompt block teaching token-efficient
+  // AFT workflows. Hooked into Pi's `before_agent_start` event with
+  // systemPrompt extension. User-only — config.workflow_hints=false to opt out.
+  registerWorkflowHints(pi, config, surface);
 
   // Slash command: /aft-status
   registerStatusCommand(pi, ctx);

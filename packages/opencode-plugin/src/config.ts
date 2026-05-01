@@ -179,6 +179,15 @@ export const AftConfigSchema = z
     max_callgraph_files: z.number().int().positive().optional(),
     /** Auto-refresh OpenCode's cached @cortexkit/aft-opencode package when a newer channel version exists. */
     auto_update: z.boolean().optional(),
+    /**
+     * Inject a short workflow hints block into the system prompt teaching the
+     * agent token-efficient AFT workflows (e.g. aft_outline+aft_zoom for URLs,
+     * aft_navigate for relationship questions, background bash for long
+     * commands). Default: true. User-only — project config cannot suppress
+     * the hints because that would let a hostile repo silently widen the
+     * agent's bash usage and disable AFT-tool guidance.
+     */
+    workflow_hints: z.boolean().optional(),
   })
   .strict();
 
@@ -702,6 +711,7 @@ function getStrippedTopLevelKeys(override: AftConfig): string[] {
   if (override.url_fetch_allow_private !== undefined) stripped.push("url_fetch_allow_private");
   if (override.max_callgraph_files !== undefined) stripped.push("max_callgraph_files");
   if (override.auto_update !== undefined) stripped.push("auto_update");
+  if (override.workflow_hints !== undefined) stripped.push("workflow_hints");
   return stripped;
 }
 
