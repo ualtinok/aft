@@ -622,5 +622,39 @@ fn transaction_error(
             .collect::<Vec<_>>());
     }
 
+    let code = if rollback_failures.is_empty() {
+        code
+    } else {
+        "transaction_rollback_failed"
+    };
     Response::error_with_data(req_id, code, message, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn transaction_error_uses_rollback_failed_code() {
+        let response = transaction_error(
+            "txn",
+            "transaction_failed",
+            1,
+            &[],
+            &[PathBuf::from("created.ts")],
+            "write failed",
+            &[RollbackFailure {
+                file: "created.ts".to_string(),
+                action: "delete".to_string(),
+                error: "permission denied".to_string(),
+            }],
+        );
+        let json = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(json["success"], false);
+        assert_eq!(json["code"], "transaction_rollback_failed");
+        assert_eq!(json["rollback_failures"].as_array().unwrap().len(), 1);
+    }
 }
