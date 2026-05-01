@@ -365,6 +365,18 @@ fn background_feature_flag_disabled_rejects_spawn() {
     );
     assert_eq!(response["success"], false);
     assert_eq!(response["code"], "feature_disabled");
+    // Regression: error message must reference the user-facing nested config
+    // shape (`experimental.bash.background`), not the flat internal key
+    // (`experimental_bash_background`) that v0.18 migrated away from.
+    let message = response["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("experimental.bash.background"),
+        "feature-disabled message should point at the nested config key, got: {message}"
+    );
+    assert!(
+        !message.contains("experimental_bash_background"),
+        "feature-disabled message must not reference the migrated flat key, got: {message}"
+    );
 
     assert!(aft.shutdown().success());
 }
