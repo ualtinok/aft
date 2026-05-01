@@ -645,9 +645,9 @@ fn background_spawn_honors_timeout() {
 
 // ---------------------------------------------------------------------------
 // Slug format regression — task IDs must be compact, agent-friendly slugs of
-// the form `bgb-{16-hex}`. The earlier `{pid}-{nanos}` format produced IDs
-// like `81607-1777480557085596000` which are noisy in agent output and hard
-// to refer to in chat. Locked in by direct format assertion.
+// the form `bgb-{8-hex}` (4 OS-entropy bytes, hex-encoded). The earlier
+// timestamp-XOR format produced predictable IDs; the earlier 16-char version
+// used non-cryptographic mixing. Locked in by direct format assertion.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -657,7 +657,7 @@ fn background_task_ids_use_short_bgb_slug_format() {
 
     let task_id = spawn_bg(&mut aft, "slug-format", "true");
 
-    // Format: "bgb-" + exactly 16 lowercase hex characters
+    // Format: "bgb-" + exactly 8 lowercase hex characters (4 OS-entropy bytes)
     assert!(
         task_id.starts_with("bgb-"),
         "task_id must start with `bgb-` prefix; got `{task_id}`"
@@ -665,8 +665,8 @@ fn background_task_ids_use_short_bgb_slug_format() {
     let suffix = &task_id["bgb-".len()..];
     assert_eq!(
         suffix.len(),
-        16,
-        "task_id suffix must be exactly 16 hex chars; got `{suffix}` (len={})",
+        8,
+        "task_id suffix must be exactly 8 hex chars; got `{suffix}` (len={})",
         suffix.len()
     );
     assert!(
