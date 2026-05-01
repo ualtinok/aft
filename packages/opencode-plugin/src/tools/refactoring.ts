@@ -129,7 +129,12 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
             break;
         }
 
-        const hints = await queryLspHints(ctx.client, (args.symbol ?? args.name) as string);
+        const hints = await queryLspHints(
+          ctx.client,
+          (args.symbol ?? args.name) as string,
+          undefined,
+          context.sessionID,
+        );
         if (hints) params.lsp_hints = hints;
 
         const response = await callBridge(ctx, context, commandMap[op], params);

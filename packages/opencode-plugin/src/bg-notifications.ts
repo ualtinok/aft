@@ -1,4 +1,4 @@
-import { warn } from "./logger.js";
+import { sessionWarn } from "./logger.js";
 import { getLastUserModel } from "./shared/last-user-model.js";
 import type { PluginContext } from "./types.js";
 
@@ -144,7 +144,10 @@ async function triggerWakeIfPending(
         body,
       });
     } catch (err) {
-      warn(`${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`);
+      sessionWarn(
+        drainContext.sessionID,
+        `${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   });
 }
@@ -192,12 +195,18 @@ async function drainCompletions({ ctx, directory, sessionID }: DrainContext): Pr
     const bridge = ctx.pool.getAnyActiveBridge(directory) ?? ctx.pool.getBridge(directory);
     const response = await bridge.send("bash_drain_completions", { session_id: sessionID });
     if (response.success === false) {
-      warn(`${LOG_PREFIX} drain failed: ${String(response.message ?? "unknown error")}`);
+      sessionWarn(
+        sessionID,
+        `${LOG_PREFIX} drain failed: ${String(response.message ?? "unknown error")}`,
+      );
       return;
     }
     ingestBgCompletions(sessionID, response.bg_completions);
   } catch (err) {
-    warn(`${LOG_PREFIX} drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    sessionWarn(
+      sessionID,
+      `${LOG_PREFIX} drain failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

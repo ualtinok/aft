@@ -1,5 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
-import { warn } from "./logger.js";
+import { sessionWarn } from "./logger.js";
 
 /** Wire format for a single LSP symbol hint sent to the binary. */
 interface LspSymbolHint {
@@ -43,6 +43,7 @@ export async function queryLspHints(
   client: PluginInput["client"],
   symbolName: string,
   directory?: string,
+  sessionId?: string,
 ): Promise<LspHints | undefined> {
   try {
     // Check if any LSP server is connected
@@ -96,7 +97,7 @@ export async function queryLspHints(
 
     return { symbols: hints };
   } catch (err) {
-    warn(`LSP query failed for "${symbolName}": ${(err as Error).message}`);
+    sessionWarn(sessionId, `LSP query failed for "${symbolName}": ${(err as Error).message}`);
     return undefined;
   }
 }

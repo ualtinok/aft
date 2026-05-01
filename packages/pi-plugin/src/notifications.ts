@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { log } from "./logger.js";
+import { log, sessionLog } from "./logger.js";
 
 const WARNING_MARKER = "🔧 AFT: ⚠️";
 const FEATURE_MARKER = "🔧 AFT: ✨";
@@ -29,7 +29,7 @@ type PiNotificationClient = {
   };
 };
 
-function sendIgnoredMessage(client: unknown, _sessionId: string, text: string): boolean {
+function sendIgnoredMessage(client: unknown, sessionId: string, text: string): boolean {
   const typedClient = client as PiNotificationClient;
   if (typeof typedClient.ui?.notify !== "function") return false;
 
@@ -37,7 +37,10 @@ function sendIgnoredMessage(client: unknown, _sessionId: string, text: string): 
     typedClient.ui.notify(text, "warning");
     return true;
   } catch (err) {
-    log(`[aft-pi] notification send failed: ${err instanceof Error ? err.message : String(err)}`);
+    sessionLog(
+      sessionId,
+      `[aft-pi] notification send failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return false;
   }
 }

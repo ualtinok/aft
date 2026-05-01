@@ -82,15 +82,15 @@ export function error(message: string, data?: unknown): void {
  * a session's tool call). Bridge-lifecycle logs (spawn, version, idle) are
  * project-scoped, not session-scoped — use `log`/`warn`/`error` for those.
  */
-export function sessionLog(sessionId: string, message: string, data?: unknown): void {
+export function sessionLog(sessionId: string | undefined, message: string, data?: unknown): void {
   write("INFO", message, data, sessionId);
 }
 
-export function sessionWarn(sessionId: string, message: string, data?: unknown): void {
+export function sessionWarn(sessionId: string | undefined, message: string, data?: unknown): void {
   write("WARN", message, data, sessionId);
 }
 
-export function sessionError(sessionId: string, message: string, data?: unknown): void {
+export function sessionError(sessionId: string | undefined, message: string, data?: unknown): void {
   write("ERROR", message, data, sessionId);
 }
 

@@ -17,7 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { log } from "./logger.js";
+import { sessionLog } from "./logger.js";
 import { getLastUserModel } from "./shared/last-user-model.js";
 
 // --- TUI toast helper ---
@@ -216,7 +216,8 @@ async function sendIgnoredMessage(
       return true;
     }
   } catch (err) {
-    log(
+    sessionLog(
+      sessionId,
       `[aft-plugin] notification send failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
@@ -285,7 +286,7 @@ export async function sendWarning(opts: NotificationOptions, message: string): P
   if (!sessionId) return;
 
   const text = `${WARNING_MARKER} ${message}`;
-  log(`[aft-plugin] sending warning to session ${sessionId}`);
+  sessionLog(sessionId, `[aft-plugin] sending warning to session ${sessionId}`);
   await sendIgnoredMessage(opts.client, sessionId, text);
 }
 
@@ -373,7 +374,7 @@ export async function sendFeatureAnnouncement(
     if (!sessionId) return;
 
     const text = [`${FEATURE_MARKER} v${version}:`, ...features.map((f) => `  • ${f}`)].join("\n");
-    log(`[aft-plugin] sending feature announcement for v${version}`);
+    sessionLog(sessionId, `[aft-plugin] sending feature announcement for v${version}`);
     await sendIgnoredMessage(opts.client, sessionId, text);
   }
 
@@ -529,7 +530,7 @@ export async function cleanupWarnings(opts: NotificationOptions): Promise<void> 
 
   if (warningIds.length === 0) return;
 
-  log(`[aft-plugin] cleaning up ${warningIds.length} stale warning(s)`);
+  sessionLog(sessionId, `[aft-plugin] cleaning up ${warningIds.length} stale warning(s)`);
   for (const id of warningIds) {
     await deleteMessage(effectiveServerUrl, sessionId, id);
   }

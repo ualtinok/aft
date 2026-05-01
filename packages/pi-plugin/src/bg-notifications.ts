@@ -1,4 +1,4 @@
-import { warn } from "./logger.js";
+import { sessionWarn } from "./logger.js";
 import type { PluginContext } from "./types.js";
 
 export interface BgCompletion {
@@ -131,7 +131,10 @@ async function triggerWakeIfPending(
       // interrupt. `steer` would interrupt mid-stream which is wrong here.
       drainContext.runtime.sendUserMessage(reminder, { deliverAs: "followUp" });
     } catch (err) {
-      warn(`${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`);
+      sessionWarn(
+        drainContext.sessionID ?? "",
+        `${LOG_PREFIX} wake send failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   });
 }
@@ -164,12 +167,18 @@ async function drainCompletions({ ctx, directory, sessionID }: DrainContext): Pr
     const params = sessionID ? { session_id: sessionID } : {};
     const response = await bridge.send("bash_drain_completions", params);
     if (response.success === false) {
-      warn(`${LOG_PREFIX} drain failed: ${String(response.message ?? "unknown error")}`);
+      sessionWarn(
+        sessionID ?? "",
+        `${LOG_PREFIX} drain failed: ${String(response.message ?? "unknown error")}`,
+      );
       return;
     }
     ingestBgCompletions(sessionID, response.bg_completions);
   } catch (err) {
-    warn(`${LOG_PREFIX} drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    sessionWarn(
+      sessionID ?? "",
+      `${LOG_PREFIX} drain failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
