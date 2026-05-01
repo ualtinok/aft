@@ -46,6 +46,19 @@ const OUTLINE_EXTENSIONS = new Set([
 
 const z = tool.schema;
 
+interface ZoomBatchSymbolResult {
+  name: string;
+  success: boolean;
+  content?: string;
+  error?: string;
+}
+
+interface ZoomBatchResult {
+  complete: boolean;
+  symbols: ZoomBatchSymbolResult[];
+  text: string;
+}
+
 /**
  * Tool definitions for code reading commands: outline + zoom.
  */
@@ -197,10 +210,13 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             (args.symbols as string[]).map((sym) => {
               const params: Record<string, unknown> = { file, symbol: sym };
               if (args.contextLines !== undefined) params.context_lines = args.contextLines;
-              return callBridge(ctx, context, "zoom", params);
+              return callBridge(ctx, context, "zoom", params).catch((err) => ({
+                success: false,
+                message: err instanceof Error ? err.message : String(err),
+              }));
             }),
           );
-          return JSON.stringify(results);
+          return JSON.stringify(formatZoomBatchResult(args.symbols as string[], results), null, 2);
         }
 
         // Single symbol mode
@@ -216,6 +232,45 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
       },
     },
   };
+}
+
+/** Exported for regression tests. */
+export function formatZoomBatchResult(
+  symbols: string[],
+  responses: Record<string, unknown>[],
+): ZoomBatchResult {
+  const entries = symbols.map((name, index): ZoomBatchSymbolResult => {
+    const response = responses[index] ?? { success: false, message: "missing zoom response" };
+    if (response.success === false) {
+      const message =
+        typeof response.message === "string" && response.message.length > 0
+          ? response.message
+          : "zoom failed";
+      return { name, success: false, error: message };
+    }
+
+    return { name, success: true, content: zoomResponseContent(response) };
+  });
+  const complete = entries.every((entry) => entry.success);
+  const lines: string[] = [];
+  if (!complete) {
+    lines.push("Incomplete zoom results: one or more symbols failed.");
+  }
+  for (const entry of entries) {
+    if (entry.success) {
+      lines.push(`Symbol "${entry.name}":\n${entry.content ?? ""}`.trimEnd());
+    } else {
+      lines.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
+    }
+  }
+  return { complete, symbols: entries, text: lines.join("\n\n") };
+}
+
+function zoomResponseContent(response: Record<string, unknown>): string {
+  if (typeof response.content === "string") return response.content;
+  if (typeof response.text === "string") return response.text;
+  const { success: _success, ...rest } = response;
+  return JSON.stringify(rest, null, 2);
 }
 
 /** Recursively discover source files under a directory, skipping common noise directories */

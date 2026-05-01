@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  formatZoomBatchResult,
   renderOutlineCall,
   renderOutlineResult,
   renderZoomCall,
@@ -80,5 +81,31 @@ describe("reading renderers", () => {
 
     expect(error).toContain("symbol not found");
     expect(empty).toContain("No outline available");
+  });
+
+  test("batched zoom keeps successes visible when another symbol fails", () => {
+    const batch = formatZoomBatchResult(
+      ["run", "Missing"],
+      [
+        { success: true, content: "export function run() {}" },
+        { success: false, message: "symbol not found" },
+      ],
+    );
+    const rendered = renderToString(
+      renderZoomResult(
+        makeResult(batch.text, batch),
+        { filePath: "sample.ts", symbols: ["run", "Missing"] },
+        mockTheme,
+        makeContext({ filePath: "sample.ts", symbols: ["run", "Missing"] }),
+      ),
+    );
+
+    expect(batch.complete).toBe(false);
+    expect(batch.text).toContain("Incomplete zoom results");
+    expect(batch.text).toContain("export function run() {}");
+    expect(batch.text).toContain('Symbol "Missing" not found: symbol not found');
+    expect(rendered).toContain("Incomplete zoom results");
+    expect(rendered).toContain("export function run() {}");
+    expect(rendered).toContain("symbol not found");
   });
 });

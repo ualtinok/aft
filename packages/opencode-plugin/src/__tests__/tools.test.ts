@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { BridgePool } from "../pool.js";
 import { aftPrefixedTools } from "../tools/hoisted.js";
-import { readingTools } from "../tools/reading.js";
+import { formatZoomBatchResult, readingTools } from "../tools/reading.js";
 import { refactoringTools } from "../tools/refactoring.js";
 import { safetyTools } from "../tools/safety.js";
 import type { PluginContext } from "../types.js";
@@ -97,6 +97,25 @@ describe("Tool round-trips", () => {
     expect(text).toContain("E fn"); // exported function
     expect(text).toContain("E cls"); // exported class
     expect(text).toContain("- fn"); // internal function (internalHelper)
+  });
+
+  test("batched zoom surfaces both successes and per-symbol failures", () => {
+    const batch = formatZoomBatchResult(
+      ["greet", "Missing"],
+      [
+        { success: true, content: "export function greet() {}" },
+        { success: false, message: "symbol not found" },
+      ],
+    );
+
+    expect(batch.complete).toBe(false);
+    expect(batch.symbols).toEqual([
+      { name: "greet", success: true, content: "export function greet() {}" },
+      { name: "Missing", success: false, error: "symbol not found" },
+    ]);
+    expect(batch.text).toContain("Incomplete zoom results");
+    expect(batch.text).toContain("export function greet() {}");
+    expect(batch.text).toContain('Symbol "Missing" not found: symbol not found');
   });
 
   test("write tool creates a temp file and returns syntax_valid", async () => {

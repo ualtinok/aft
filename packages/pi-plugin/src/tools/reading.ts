@@ -56,6 +56,19 @@ export interface ReadingSurface {
   zoom: boolean;
 }
 
+interface ZoomBatchSymbolResult {
+  name: string;
+  success: boolean;
+  content?: string;
+  error?: string;
+}
+
+interface ZoomBatchResult {
+  complete: boolean;
+  symbols: ZoomBatchSymbolResult[];
+  text: string;
+}
+
 /** Exported for renderer unit tests. */
 export function buildOutlineSections(text: string, theme: Theme): string[] {
   const trimmed = text.trim();
@@ -72,6 +85,33 @@ export function buildZoomSections(
   payload: unknown,
   theme: Theme,
 ): string[] {
+  const batch = asRecord(payload);
+  if (Array.isArray(batch?.symbols)) {
+    const header = batch.complete === false ? [theme.fg("warning", "Incomplete zoom results")] : [];
+    const items = batch.symbols as unknown[];
+    return [
+      ...header,
+      ...items.map((item) => {
+        const record = asRecord(item);
+        if (!record) return theme.fg("muted", "No zoom result available.");
+        const name = asString(record.name) ?? "(unknown symbol)";
+        if (record.success === false) {
+          return theme.fg(
+            "error",
+            `Symbol "${name}" not found: ${asString(record.error) ?? "zoom failed"}`,
+          );
+        }
+        const content = asString(record.content);
+        return [
+          `${theme.fg("accent", name)} ${theme.fg("muted", shortenPath(args.filePath))}`,
+          content,
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }),
+    ];
+  }
+
   const items = Array.isArray(payload) ? payload : payload ? [payload] : [];
   if (items.length === 0) return [theme.fg("muted", "No zoom result available.")];
 
@@ -273,7 +313,7 @@ export function registerReadingTools(
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
 
-        // Multi-symbol: fire in parallel and JSON-stringify the array.
+        // Multi-symbol: fire in parallel and preserve per-symbol failures.
         // Uses callBridge (not bridge.send directly) so each parallel request
         // carries Pi's native session_id — otherwise multi-symbol zoom would
         // bypass per-session undo/checkpoint scoping.
@@ -282,10 +322,14 @@ export function registerReadingTools(
             params.symbols.map((sym) => {
               const req: Record<string, unknown> = { file: params.filePath, symbol: sym };
               if (params.contextLines !== undefined) req.context_lines = params.contextLines;
-              return callBridge(bridge, "zoom", req, extCtx);
+              return callBridge(bridge, "zoom", req, extCtx).catch((err) => ({
+                success: false,
+                message: err instanceof Error ? err.message : String(err),
+              }));
             }),
           );
-          return textResult(JSON.stringify(results, null, 2));
+          const batch = formatZoomBatchResult(params.symbols, results);
+          return textResult(batch.text, batch);
         }
 
         const req: Record<string, unknown> = { file: params.filePath };
@@ -302,6 +346,45 @@ export function registerReadingTools(
       },
     });
   }
+}
+
+/** Exported for regression tests. */
+export function formatZoomBatchResult(
+  symbols: string[],
+  responses: Record<string, unknown>[],
+): ZoomBatchResult {
+  const entries = symbols.map((name, index): ZoomBatchSymbolResult => {
+    const response = responses[index] ?? { success: false, message: "missing zoom response" };
+    if (response.success === false) {
+      const message =
+        typeof response.message === "string" && response.message.length > 0
+          ? response.message
+          : "zoom failed";
+      return { name, success: false, error: message };
+    }
+
+    return { name, success: true, content: zoomResponseContent(response) };
+  });
+  const complete = entries.every((entry) => entry.success);
+  const lines: string[] = [];
+  if (!complete) {
+    lines.push("Incomplete zoom results: one or more symbols failed.");
+  }
+  for (const entry of entries) {
+    if (entry.success) {
+      lines.push(`Symbol "${entry.name}":\n${entry.content ?? ""}`.trimEnd());
+    } else {
+      lines.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
+    }
+  }
+  return { complete, symbols: entries, text: lines.join("\n\n") };
+}
+
+function zoomResponseContent(response: Record<string, unknown>): string {
+  if (typeof response.content === "string") return response.content;
+  if (typeof response.text === "string") return response.text;
+  const { success: _success, ...rest } = response;
+  return JSON.stringify(rest, null, 2);
 }
 
 /**
