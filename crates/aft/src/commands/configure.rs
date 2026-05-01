@@ -39,11 +39,7 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn validate_storage_dir(
-    raw: &str,
-    project_root: &Path,
-    restrict_to_project_root: bool,
-) -> Result<PathBuf, String> {
+fn validate_storage_dir(raw: &str) -> Result<PathBuf, String> {
     let storage_dir = PathBuf::from(raw);
     if !storage_dir.is_absolute() {
         return Err("configure: storage_dir must be an absolute path".to_string());
@@ -55,19 +51,6 @@ fn validate_storage_dir(
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err("configure: storage_dir must not escape via '..' traversal".to_string());
-    }
-
-    if restrict_to_project_root && !normalized.starts_with(project_root) {
-        return Err(format!(
-            "configure: storage_dir must be inside project_root when restrict_to_project_root is true: {}",
-            normalized.display()
-        ));
-    } else if !restrict_to_project_root && !normalized.starts_with(project_root) {
-        log::warn!(
-            "configure: storage_dir {} is outside project_root {}",
-            normalized.display(),
-            project_root.display()
-        );
     }
 
     Ok(normalized)
@@ -999,8 +982,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         ctx.config_mut().search_index_max_file_size = v;
     }
     if let Some(v) = params.get("storage_dir").and_then(|v| v.as_str()) {
-        let restrict_to_project_root = ctx.config().restrict_to_project_root;
-        let storage_dir = match validate_storage_dir(v, &root_path, restrict_to_project_root) {
+        let storage_dir = match validate_storage_dir(v) {
             Ok(path) => path,
             Err(error) => {
                 return Response::error(&req.id, "invalid_request", error);
@@ -1400,8 +1382,7 @@ mod tests {
 
     #[test]
     fn validate_storage_dir_requires_absolute_paths() {
-        let project_root = std::env::temp_dir();
-        assert!(validate_storage_dir("relative/cache", &project_root, false).is_err());
+        assert!(validate_storage_dir("relative/cache").is_err());
     }
 
     #[test]
@@ -1409,7 +1390,7 @@ mod tests {
         let base = std::env::temp_dir();
         let path = base.join("aft-config-test").join("..").join("cache");
         assert_eq!(
-            validate_storage_dir(path.to_str().unwrap(), &base, false).unwrap(),
+            validate_storage_dir(path.to_str().unwrap()).unwrap(),
             base.join("cache")
         );
     }
@@ -1417,8 +1398,7 @@ mod tests {
     #[test]
     fn validate_storage_dir_rejects_relative_with_dotdot() {
         // Relative paths with .. are rejected (not absolute)
-        let project_root = std::env::temp_dir();
-        assert!(validate_storage_dir("../../../etc/passwd", &project_root, false).is_err());
+        assert!(validate_storage_dir("../../../etc/passwd").is_err());
     }
 
     #[test]
@@ -1428,8 +1408,7 @@ mod tests {
         path.push("..");
         path.push("..");
         path.push("cache");
-        let project_root = PathBuf::from(std::path::MAIN_SEPARATOR.to_string());
-        assert!(validate_storage_dir(path.to_str().unwrap(), &project_root, false).is_ok());
+        assert!(validate_storage_dir(path.to_str().unwrap()).is_ok());
     }
 
     #[test]

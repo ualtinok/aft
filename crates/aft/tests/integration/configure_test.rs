@@ -54,39 +54,6 @@ fn configure_accepts_boolean_validate_on_edit() {
 }
 
 #[test]
-fn configure_rejects_external_storage_dir_when_restricted() {
-    let dir = tempfile::tempdir().unwrap();
-    let project_root = dir.path().join("project");
-    let storage_dir = dir.path().join("storage");
-    std::fs::create_dir_all(&project_root).unwrap();
-
-    let mut aft = AftProcess::spawn();
-    let configure = aft.send(
-        &json!({
-            "id": "cfg-storage-restricted",
-            "command": "configure",
-            "project_root": project_root,
-            "restrict_to_project_root": true,
-            "storage_dir": storage_dir,
-        })
-        .to_string(),
-    );
-
-    assert_eq!(
-        configure["success"], false,
-        "configure should fail: {configure:?}"
-    );
-    assert_eq!(configure["code"], "invalid_request");
-    assert!(configure["message"]
-        .as_str()
-        .unwrap()
-        .contains("storage_dir must be inside project_root"));
-
-    let shutdown = aft.shutdown();
-    assert!(shutdown.success());
-}
-
-#[test]
 fn configure_warns_for_missing_formatter_and_checker_tools() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("app.ts"), "const x = 1;\n").unwrap();
