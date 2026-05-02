@@ -10,12 +10,13 @@
  *   node scripts/version-sync.mjs --from-tag       # read from GITHUB_REF_NAME (e.g. v0.2.0)
  *   node scripts/version-sync.mjs 0.2.0 --dry-run  # preview changes without writing
  *
- * Updates 9 locations:
+ * Updates 10 locations:
  *   1-5. npm/{platform}/package.json  → version field
- *   6.   aft-opencode/package.json → version field + all optionalDependencies versions
- *   7.   aft-pi/package.json → version field + all optionalDependencies versions
- *   8.   aft-cli/package.json → version field
- *   9.   Cargo.toml → version field
+ *   6.   aft-bridge/package.json → version field
+ *   7.   aft-opencode/package.json → version field + all optionalDependencies versions + aft-bridge dep
+ *   8.   aft-pi/package.json → version field + all optionalDependencies versions + aft-bridge dep
+ *   9.   aft-cli/package.json → version field
+ *   10.  Cargo.toml → version field
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -94,6 +95,16 @@ function updateJsonFile(filePath, version, updates, dryRun) {
     }
   }
 
+  // Update internal @cortexkit/aft-* dependencies (e.g. aft-bridge in plugins)
+  if (updates?.internalDeps && pkg.dependencies) {
+    for (const [dep, oldVer] of Object.entries(pkg.dependencies)) {
+      if (dep.startsWith("@cortexkit/aft-") && oldVer !== version) {
+        changes.push(`  dependencies["${dep}"]: ${oldVer} → ${version}`);
+        pkg.dependencies[dep] = version;
+      }
+    }
+  }
+
   if (changes.length === 0) {
     return { path: filePath, changes: ["  (already at target version)"] };
   }
@@ -145,19 +156,27 @@ for (const dir of PLATFORM_DIRS) {
   results.push(updateJsonFile(filePath, version, {}, dryRun));
 }
 
-// 6: @cortexkit/aft-opencode
+// 6: @cortexkit/aft-bridge (shared transport)
+const bridgePath = join(root, "packages", "aft-bridge", "package.json");
+results.push(updateJsonFile(bridgePath, version, {}, dryRun));
+
+// 7: @cortexkit/aft-opencode
 const corePath = join(root, "packages", "opencode-plugin", "package.json");
-results.push(updateJsonFile(corePath, version, { optionalDependencies: true }, dryRun));
+results.push(
+  updateJsonFile(corePath, version, { optionalDependencies: true, internalDeps: true }, dryRun),
+);
 
-// 7: @cortexkit/aft-pi
+// 8: @cortexkit/aft-pi
 const piPath = join(root, "packages", "pi-plugin", "package.json");
-results.push(updateJsonFile(piPath, version, { optionalDependencies: true }, dryRun));
+results.push(
+  updateJsonFile(piPath, version, { optionalDependencies: true, internalDeps: true }, dryRun),
+);
 
-// 8: @cortexkit/aft (unified CLI)
+// 9: @cortexkit/aft (unified CLI)
 const cliPath = join(root, "packages", "aft-cli", "package.json");
 results.push(updateJsonFile(cliPath, version, {}, dryRun));
 
-// 9: Cargo.toml
+// 10: Cargo.toml
 const cargoPath = join(root, "crates", "aft", "Cargo.toml");
 results.push(updateCargoToml(cargoPath, version, dryRun));
 

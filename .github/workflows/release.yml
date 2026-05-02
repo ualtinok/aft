@@ -251,6 +251,14 @@ jobs:
       - name: Validate packages
         run: node scripts/validate-packages.mjs
 
+      - name: Install bridge dependencies
+        run: bun install
+        working-directory: packages/aft-bridge
+
+      - name: Build aft-bridge
+        run: bun run build
+        working-directory: packages/aft-bridge
+
       - name: Install plugin dependencies
         run: bun install
         working-directory: packages/opencode-plugin
@@ -281,6 +289,14 @@ jobs:
           for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
             npm publish --access public --provenance "packages/npm/$pkg"
           done
+
+      # aft-bridge MUST publish before the plugins, because @cortexkit/aft-opencode
+      # and @cortexkit/aft-pi depend on it. Plugins publish from local builds, so
+      # there's no install-time race here, but consumers installing @latest will
+      # need aft-bridge resolvable on npm.
+      - name: Publish @cortexkit/aft-bridge
+        run: npm publish --access public --provenance
+        working-directory: packages/aft-bridge
 
       - name: Publish @cortexkit/aft-opencode
         run: npm publish --access public --provenance

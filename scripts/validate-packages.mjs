@@ -3,14 +3,16 @@
 /**
  * validate-packages.mjs
  *
- * Validates all 8 AFT npm package.json files:
+ * Validates all 9 AFT npm package.json files:
  * - 5 platform packages under npm/{platform}/
+ * - @cortexkit/aft-bridge (aft-bridge — shared transport)
  * - @cortexkit/aft-opencode (opencode-plugin)
  * - @cortexkit/aft-pi (pi-plugin)
  * - @cortexkit/aft (aft-cli)
  *
  * Checks: os/cpu fields match directory, preferUnplugged, bin field,
- * optionalDependencies in core, version alignment, required fields.
+ * optionalDependencies in core, plugins' aft-bridge dep version,
+ * version alignment, required fields.
  *
  * Exit 0 = all pass. Exit 1 = failures printed to stderr.
  */
@@ -84,6 +86,32 @@ for (const { dir, os, cpu } of PLATFORMS) {
   }
 
   if (pkg.version) platformVersions.push({ name: label, version: pkg.version });
+}
+
+// --- Validate @cortexkit/aft-bridge ---
+
+const bridgePath = join(root, "packages", "aft-bridge", "package.json");
+const bridge = readPkg(bridgePath);
+
+if (bridge) {
+  const label = "@cortexkit/aft-bridge";
+
+  if (!bridge.name) fail(label, "missing 'name'");
+  if (!bridge.version) fail(label, "missing 'version'");
+  if (bridge.name && bridge.name !== "@cortexkit/aft-bridge") {
+    fail(label, `name should be '@cortexkit/aft-bridge', got '${bridge.name}'`);
+  }
+  if (!bridge.main) fail(label, "missing 'main'");
+  if (!bridge.types) fail(label, "missing 'types'");
+  if (!bridge.license) fail(label, "missing 'license'");
+  if (!bridge.repository || typeof bridge.repository !== "object" || !bridge.repository.url) {
+    fail(label, "missing 'repository' with 'url'");
+  }
+  if (bridge.bin) {
+    fail(label, "must not declare 'bin' (library package, not a CLI)");
+  }
+
+  if (bridge.version) platformVersions.push({ name: label, version: bridge.version });
 }
 
 // --- Validate @cortexkit/aft-opencode ---
@@ -211,6 +239,26 @@ if (pi?.version && pi.optionalDependencies) {
   }
 }
 
+// Plugins must depend on @cortexkit/aft-bridge at the matching version. Without
+// this check, version-sync drift would let a plugin publish with a stale bridge
+// dep that doesn't exist on npm yet (the failure mode that motivated wiring).
+function checkBridgeDep(label, pkg) {
+  if (!pkg?.dependencies || !pkg.version) return;
+  const bridgeDep = pkg.dependencies["@cortexkit/aft-bridge"];
+  if (!bridgeDep) {
+    fail(label, "dependencies missing '@cortexkit/aft-bridge'");
+    return;
+  }
+  if (bridgeDep !== pkg.version) {
+    fail(
+      "version-alignment",
+      `${label} dependencies['@cortexkit/aft-bridge'] is '${bridgeDep}' but ${label} version is '${pkg.version}'`,
+    );
+  }
+}
+checkBridgeDep("@cortexkit/aft-opencode", core);
+checkBridgeDep("@cortexkit/aft-pi", pi);
+
 // --- Report ---
 
 if (errors.length > 0) {
@@ -221,12 +269,13 @@ if (errors.length > 0) {
   console.error(`\n${errors.length} error(s) found.`);
   process.exit(1);
 } else {
-  const count = PLATFORMS.length + 3; // platform packages + opencode + pi + cli
+  const count = PLATFORMS.length + 4; // platform packages + bridge + opencode + pi + cli
   console.log(`✓ All ${count} packages validated successfully.`);
   console.log(`  Versions aligned at ${platformVersions[0]?.version || "unknown"}`);
   console.log("  Platform os/cpu fields correct");
   console.log("  preferUnplugged set on all platform packages");
   console.log("  optionalDependencies complete in @cortexkit/aft-opencode and @cortexkit/aft-pi");
+  console.log("  @cortexkit/aft-bridge dep version aligned in plugin packages");
   console.log("  bin, license, repository fields present in @cortexkit/aft and @cortexkit/aft-pi");
   process.exit(0);
 }
