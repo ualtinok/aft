@@ -151,9 +151,12 @@ async function triggerWakeIfPending(
       // ends — semantically what bg-bash idle-wake wants anyway, since
       // background completion is information for the next turn, not an
       // interrupt. `steer` would interrupt mid-stream which is wrong here.
-      // Unlike OpenCode, Pi's public extension API does not expose session
-      // message model/variant metadata here, so there is no equivalent
-      // getLastUserModel() pinning to apply for bg-completion wakes.
+      // Unlike OpenCode, Pi's `sendUserMessage` does not accept any model or
+      // variant fields — it just queues a content string into the active
+      // session. The next assistant turn uses Pi's currently-selected model
+      // (set via `runtime.setModel`), so there is no per-message override
+      // for us to thread through, and therefore no equivalent of OpenCode's
+      // `getLastAssistantModel()` cache-preserving fix to apply here.
       drainContext.runtime.sendUserMessage(reminder, { deliverAs: "followUp" });
     },
     (err) => {

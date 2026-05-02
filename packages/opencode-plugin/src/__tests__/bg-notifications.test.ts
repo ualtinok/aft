@@ -13,14 +13,14 @@ import {
   sessionBgStates,
   trackBgTask,
 } from "../bg-notifications.js";
-import { __resetLastUserModelCacheForTests } from "../shared/last-user-model.js";
+import { __resetLastAssistantModelCacheForTests } from "../shared/last-assistant-model.js";
 import type { PluginContext } from "../types.js";
 
 type BridgeResponse = Record<string, unknown>;
 
 afterEach(() => {
   __resetBgNotificationStateForTests();
-  __resetLastUserModelCacheForTests();
+  __resetLastAssistantModelCacheForTests();
 });
 
 describe("OpenCode background notifications", () => {
@@ -169,7 +169,7 @@ describe("OpenCode background notifications", () => {
     expect(payload.body.parts[0].text).not.toContain(": npm test");
   });
 
-  test("turn-end wake forwards last user model + variant to preserve prefix cache", async () => {
+  test("turn-end wake forwards last assistant model + variant to preserve prefix cache", async () => {
     trackBgTask("s1", "task-1");
     const { ctx } = harness(() => ({
       success: true,
@@ -178,13 +178,15 @@ describe("OpenCode background notifications", () => {
     const promptAsync = mock(async () => {});
     const messages = mock(async () => ({
       data: [
+        { info: { role: "user" } },
         {
           info: {
-            role: "user",
-            model: { providerID: "anthropic", modelID: "claude-opus-4-7", variant: "thinking" },
+            role: "assistant",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+            variant: "thinking",
           },
         },
-        { info: { role: "assistant" } },
       ],
     }));
 
@@ -212,7 +214,7 @@ describe("OpenCode background notifications", () => {
     expect(payload.body.variant).toBe("thinking");
   });
 
-  test("turn-end wake omits model/variant when no user history is reachable", async () => {
+  test("turn-end wake omits model/variant when no assistant history is reachable", async () => {
     trackBgTask("s1", "task-1");
     const { ctx } = harness(() => ({
       success: true,
@@ -220,7 +222,7 @@ describe("OpenCode background notifications", () => {
     }));
     const promptAsync = mock(async () => {});
 
-    // No `messages` on the client — getLastUserModel falls through to null,
+    // No `messages` on the client — getLastAssistantModel falls through to null,
     // and the wake should still go out without forging a fake model.
     await handleIdleBgCompletions({
       ctx,

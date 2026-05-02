@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { sessionLog } from "./logger.js";
-import { getLastUserModel } from "./shared/last-user-model.js";
+import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 
 // --- TUI toast helper ---
 
@@ -192,11 +192,12 @@ async function sendIgnoredMessage(
       };
     };
 
-    // Pass the last user message's model + variant explicitly so OpenCode's
-    // createUserMessage doesn't fall back to agent.variant or undefined and
-    // bust the provider prefix cache. See shared/last-user-model.ts for the
-    // reasoning — the same fix applies to all three sendIgnoredMessage paths.
-    const lastModel = await getLastUserModel(client, sessionId);
+    // Pass the last assistant message's model + variant explicitly so
+    // OpenCode's createUserMessage doesn't fall back to agent.variant or
+    // undefined and bust the provider prefix cache. See
+    // shared/last-assistant-model.ts for the reasoning — the same fix
+    // applies to all three sendIgnoredMessage paths.
+    const lastModel = await getLastAssistantModel(client, sessionId);
     const body: Record<string, unknown> = {
       noReply: true,
       parts: [{ type: "text", text, ignored: true }],

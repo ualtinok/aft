@@ -1,5 +1,5 @@
 import { sessionWarn } from "./logger.js";
-import { getLastUserModel } from "./shared/last-user-model.js";
+import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import type { PluginContext } from "./types.js";
 
 export interface BgCompletion {
@@ -149,10 +149,11 @@ async function triggerWakeIfPending(
       if (typeof client.session?.promptAsync !== "function") {
         throw new Error("client.session.promptAsync is unavailable");
       }
-      // Pass the last user message's model + variant explicitly so OpenCode's
-      // createUserMessage doesn't fall back to agent.variant or undefined and
-      // bust the provider prefix cache for the next assistant turn.
-      const lastModel = await getLastUserModel(client, drainContext.sessionID);
+      // Pass the last assistant message's model + variant explicitly so
+      // OpenCode's createUserMessage doesn't fall back to agent.variant or
+      // undefined and bust the provider prefix cache for the next assistant
+      // turn. See shared/last-assistant-model.ts for the reasoning.
+      const lastModel = await getLastAssistantModel(client, drainContext.sessionID);
       const body: Record<string, unknown> = {
         noReply: false,
         parts: [{ type: "text", text: reminder }],
