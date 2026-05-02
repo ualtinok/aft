@@ -100,6 +100,7 @@ fn main() {
     log::info!("stdin closed, shutting down");
 }
 
+#[cfg(unix)]
 fn install_signal_detach_handler(registry: BgTaskRegistry) {
     let signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGINT,
@@ -121,6 +122,13 @@ fn install_signal_detach_handler(registry: BgTaskRegistry) {
             std::process::exit(128 + signal);
         }
     });
+}
+
+#[cfg(not(unix))]
+fn install_signal_detach_handler(_registry: BgTaskRegistry) {
+    // signal_hook::iterator is Unix-only; Windows does not have POSIX signals.
+    // Background bash tasks on Windows will be cleaned up by OS process
+    // termination rather than an explicit detach on SIGTERM/SIGINT.
 }
 
 fn attach_bg_completions(
