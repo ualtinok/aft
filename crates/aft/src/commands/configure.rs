@@ -1089,6 +1089,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
     *ctx.search_index().borrow_mut() = None;
     *ctx.search_index_rx().borrow_mut() = None;
+    let symbol_cache_generation = ctx.reset_symbol_cache();
     *ctx.semantic_index().borrow_mut() = None;
     *ctx.semantic_index_rx().borrow_mut() = None;
     *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Disabled;
@@ -1111,12 +1112,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
 
         let (tx, rx): (
-            crossbeam_channel::Sender<(SearchIndex, crate::parser::SymbolCache)>,
-            crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>,
+            crossbeam_channel::Sender<SearchIndex>,
+            crossbeam_channel::Receiver<SearchIndex>,
         ) = unbounded();
         *ctx.search_index_rx().borrow_mut() = Some(rx);
 
         let root_clone = root_path.clone();
+        let symbol_cache = ctx.symbol_cache();
         let session_id_for_bg = log_ctx::current_session();
         thread::spawn(move || {
             log_ctx::with_session(session_id_for_bg, || {
@@ -1129,20 +1131,19 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                 index.write_to_disk(&cache_dir, index.stored_git_head());
 
                 // Pre-warm symbol cache from indexed files
-                let mut symbol_cache = crate::parser::SymbolCache::new();
-                let mut parser = crate::parser::FileParser::new();
+                let mut warmed_files = 0usize;
+                let mut parser = crate::parser::FileParser::with_symbol_cache_generation(
+                    symbol_cache,
+                    Some(symbol_cache_generation),
+                );
                 for file_entry in &index.files {
-                    if let Ok(mtime) =
-                        std::fs::metadata(&file_entry.path).and_then(|m| m.modified())
-                    {
-                        if let Ok(symbols) = parser.extract_symbols(&file_entry.path) {
-                            symbol_cache.insert(file_entry.path.clone(), mtime, symbols);
-                        }
+                    if parser.extract_symbols(&file_entry.path).is_ok() {
+                        warmed_files += 1;
                     }
                 }
-                slog_info!("pre-warmed symbol cache: {} files", symbol_cache.len());
+                slog_info!("pre-warmed symbol cache: {} files", warmed_files);
 
-                let _ = tx.send((index, symbol_cache));
+                let _ = tx.send(index);
             });
         });
     }

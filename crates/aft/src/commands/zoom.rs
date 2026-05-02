@@ -319,7 +319,7 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
     let known_names: Vec<&str> = all_symbols.iter().map(|s| s.name.as_str()).collect();
 
     // Parse AST for call extraction (use resolved file for cross-file re-exports)
-    let mut parser = FileParser::new();
+    let mut parser = FileParser::with_symbol_cache(ctx.symbol_cache());
     let (tree, lang) = match parser.parse(resolved_file_path) {
         Ok(r) => r,
         Err(e) => {

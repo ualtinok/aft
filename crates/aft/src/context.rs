@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::language::LanguageProvider;
 use crate::lsp::manager::LspManager;
 use crate::lsp::registry::is_config_file_path_with_custom;
+use crate::parser::{SharedSymbolCache, SymbolCache};
 use crate::protocol::{ProgressFrame, PushFrame};
 
 pub type ProgressSender = Arc<Box<dyn Fn(PushFrame) + Send + Sync>>;
@@ -227,8 +228,8 @@ pub struct AppContext {
     config: RefCell<Config>,
     callgraph: RefCell<Option<CallGraph>>,
     search_index: RefCell<Option<SearchIndex>>,
-    search_index_rx:
-        RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>,
+    search_index_rx: RefCell<Option<crossbeam_channel::Receiver<SearchIndex>>>,
+    symbol_cache: SharedSymbolCache,
     semantic_index: RefCell<Option<SemanticIndex>>,
     semantic_index_rx: RefCell<Option<crossbeam_channel::Receiver<SemanticIndexEvent>>>,
     semantic_index_status: RefCell<SemanticIndexStatus>,
@@ -245,6 +246,11 @@ impl AppContext {
     pub fn new(provider: Box<dyn LanguageProvider>, config: Config) -> Self {
         let progress_sender = Arc::new(Mutex::new(None));
         let stdout_writer = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
+        let symbol_cache = provider
+            .as_any()
+            .downcast_ref::<crate::parser::TreeSitterProvider>()
+            .map(|provider| provider.symbol_cache())
+            .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(SymbolCache::new())));
         AppContext {
             provider,
             backup: RefCell::new(BackupStore::new()),
@@ -253,6 +259,7 @@ impl AppContext {
             callgraph: RefCell::new(None),
             search_index: RefCell::new(None),
             search_index_rx: RefCell::new(None),
+            symbol_cache,
             semantic_index: RefCell::new(None),
             semantic_index_rx: RefCell::new(None),
             semantic_index_status: RefCell::new(SemanticIndexStatus::Disabled),
@@ -328,12 +335,22 @@ impl AppContext {
         &self.search_index
     }
 
-    /// Access the search-index build receiver (returns index + pre-warmed symbol cache).
-    pub fn search_index_rx(
-        &self,
-    ) -> &RefCell<Option<crossbeam_channel::Receiver<(SearchIndex, crate::parser::SymbolCache)>>>
-    {
+    /// Access the search-index build receiver.
+    pub fn search_index_rx(&self) -> &RefCell<Option<crossbeam_channel::Receiver<SearchIndex>>> {
         &self.search_index_rx
+    }
+
+    /// Access the shared symbol cache.
+    pub fn symbol_cache(&self) -> SharedSymbolCache {
+        Arc::clone(&self.symbol_cache)
+    }
+
+    /// Clear the shared symbol cache and return the new active generation.
+    pub fn reset_symbol_cache(&self) -> u64 {
+        self.symbol_cache
+            .write()
+            .map(|mut cache| cache.reset())
+            .unwrap_or(0)
     }
 
     /// Access the semantic search index.
@@ -723,21 +740,14 @@ impl AppContext {
 
     /// Symbol cache statistics from the language provider.
     pub fn symbol_cache_stats(&self) -> serde_json::Value {
-        if let Some(tsp) = self
-            .provider
-            .as_any()
-            .downcast_ref::<crate::parser::TreeSitterProvider>()
-        {
-            let (local, warm) = tsp.symbol_cache_stats();
-            serde_json::json!({
-                "local_entries": local,
-                "warm_entries": warm,
-            })
-        } else {
-            serde_json::json!({
-                "local_entries": 0,
-                "warm_entries": 0,
-            })
-        }
+        let entries = self
+            .symbol_cache
+            .read()
+            .map(|cache| cache.len())
+            .unwrap_or(0);
+        serde_json::json!({
+            "local_entries": entries,
+            "warm_entries": 0,
+        })
     }
 }

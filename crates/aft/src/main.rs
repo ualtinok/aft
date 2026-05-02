@@ -356,6 +356,12 @@ fn drain_watcher_events(ctx: &AppContext) {
         return;
     }
 
+    if let Ok(mut symbol_cache) = ctx.symbol_cache().write() {
+        for path in &changed {
+            symbol_cache.invalidate(path);
+        }
+    }
+
     // Phase 2: invalidate each changed file in the call graph
     let mut graph_ref = ctx.callgraph().borrow_mut();
     if let Some(graph) = graph_ref.as_mut() {
@@ -407,18 +413,8 @@ fn drain_search_index_events(ctx: &AppContext) {
         latest
     };
 
-    if let Some((index, symbol_cache)) = latest {
+    if let Some(index) = latest {
         *ctx.search_index().borrow_mut() = Some(index);
-        // Merge pre-warmed symbol cache into the provider's parser
-        if symbol_cache.len() > 0 {
-            if let Some(tsp) = ctx
-                .provider()
-                .as_any()
-                .downcast_ref::<aft::parser::TreeSitterProvider>()
-            {
-                tsp.merge_warm_cache(symbol_cache);
-            }
-        }
     }
 }
 

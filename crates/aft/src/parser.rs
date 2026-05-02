@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::SystemTime;
 
 use streaming_iterator::StreamingIterator;
@@ -458,17 +458,20 @@ struct CachedSymbols {
 }
 
 /// Shared symbol cache that can be pre-warmed in a background thread
-/// and merged into the main thread. Thread-safe for building, then
-/// transferred to the single-threaded main loop.
+/// and read by all parser instances.
 #[derive(Clone, Default)]
 pub struct SymbolCache {
     entries: HashMap<PathBuf, CachedSymbols>,
+    generation: u64,
 }
+
+pub type SharedSymbolCache = Arc<RwLock<SymbolCache>>;
 
 impl SymbolCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -477,16 +480,48 @@ impl SymbolCache {
         self.entries.insert(path, CachedSymbols { mtime, symbols });
     }
 
-    /// Merge another cache into this one (newer entries win by mtime).
-    pub fn merge(&mut self, other: SymbolCache) {
-        for (path, entry) in other.entries {
-            match self.entries.get(&path) {
-                Some(existing) if existing.mtime >= entry.mtime => {}
-                _ => {
-                    self.entries.insert(path, entry);
-                }
-            }
+    /// Insert symbols only when the caller still belongs to the active cache generation.
+    pub fn insert_for_generation(
+        &mut self,
+        generation: u64,
+        path: PathBuf,
+        mtime: SystemTime,
+        symbols: Vec<Symbol>,
+    ) -> bool {
+        if self.generation != generation {
+            return false;
         }
+        self.insert(path, mtime, symbols);
+        true
+    }
+
+    /// Return cached symbols when the file mtime still matches.
+    pub fn get(&self, path: &Path, mtime: SystemTime) -> Option<Vec<Symbol>> {
+        self.entries
+            .get(path)
+            .and_then(|cached| (cached.mtime == mtime).then(|| cached.symbols.clone()))
+    }
+
+    /// Invalidate cached symbols for a specific file.
+    pub fn invalidate(&mut self, path: &Path) {
+        self.entries.remove(path);
+    }
+
+    /// Clear all entries and advance the generation to ignore stale background writers.
+    pub fn reset(&mut self) -> u64 {
+        self.entries.clear();
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    /// Current generation token.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether the cache has an entry for a file.
+    pub fn contains_key(&self, path: &Path) -> bool {
+        self.entries.contains_key(path)
     }
 
     /// Number of cached entries.
@@ -500,19 +535,31 @@ impl SymbolCache {
 pub struct FileParser {
     cache: HashMap<PathBuf, CachedTree>,
     parsers: HashMap<LangId, Parser>,
-    symbol_cache: HashMap<PathBuf, CachedSymbols>,
-    /// Shared pre-warmed cache from background indexing
-    warm_cache: Option<SymbolCache>,
+    symbol_cache: SharedSymbolCache,
+    symbol_cache_generation: Option<u64>,
 }
 
 impl FileParser {
     /// Create a new `FileParser` with an empty parse cache.
     pub fn new() -> Self {
+        Self::with_symbol_cache(Arc::new(RwLock::new(SymbolCache::new())))
+    }
+
+    /// Create a new `FileParser` backed by a shared symbol cache.
+    pub fn with_symbol_cache(symbol_cache: SharedSymbolCache) -> Self {
+        Self::with_symbol_cache_generation(symbol_cache, None)
+    }
+
+    /// Create a new `FileParser` backed by a shared symbol cache generation.
+    pub fn with_symbol_cache_generation(
+        symbol_cache: SharedSymbolCache,
+        symbol_cache_generation: Option<u64>,
+    ) -> Self {
         Self {
             cache: HashMap::new(),
             parsers: HashMap::new(),
-            symbol_cache: HashMap::new(),
-            warm_cache: None,
+            symbol_cache,
+            symbol_cache_generation,
         }
     }
 
@@ -535,19 +582,17 @@ impl FileParser {
         }
     }
 
-    /// Attach a pre-warmed symbol cache from background indexing.
-    pub fn set_warm_cache(&mut self, cache: SymbolCache) {
-        self.warm_cache = Some(cache);
-    }
-
-    /// Number of entries in the local symbol cache.
+    /// Number of entries in the shared symbol cache.
     pub fn symbol_cache_len(&self) -> usize {
-        self.symbol_cache.len()
+        self.symbol_cache
+            .read()
+            .map(|cache| cache.len())
+            .unwrap_or(0)
     }
 
-    /// Number of entries in the warm (pre-warmed) symbol cache.
-    pub fn warm_cache_len(&self) -> usize {
-        self.warm_cache.as_ref().map_or(0, |c| c.len())
+    /// Shared symbol cache backing this parser.
+    pub fn symbol_cache(&self) -> SharedSymbolCache {
+        Arc::clone(&self.symbol_cache)
     }
 
     /// Parse a file, returning the tree and detected language. Uses cache if
@@ -622,20 +667,16 @@ impl FileParser {
                 path: format!("{}: {}", path.display(), e),
             })?;
 
-        // Return cached symbols if file hasn't changed (local cache first, then warm cache)
-        if let Some(cached) = self.symbol_cache.get(&canon) {
-            if cached.mtime == current_mtime {
-                return Ok(cached.symbols.clone());
-            }
-        }
-        if let Some(warm) = &self.warm_cache {
-            if let Some(cached) = warm.entries.get(&canon) {
-                if cached.mtime == current_mtime {
-                    // Promote to local cache for future lookups
-                    self.symbol_cache.insert(canon, cached.clone());
-                    return Ok(cached.symbols.clone());
-                }
-            }
+        // Return cached symbols if file hasn't changed.
+        if let Some(symbols) = self
+            .symbol_cache
+            .read()
+            .map_err(|_| AftError::ParseError {
+                message: "symbol cache lock poisoned".to_string(),
+            })?
+            .get(&canon, current_mtime)
+        {
+            return Ok(symbols);
         }
 
         let source = std::fs::read_to_string(path).map_err(|e| AftError::FileNotFound {
@@ -648,20 +689,26 @@ impl FileParser {
         };
 
         // Cache the result
-        self.symbol_cache.insert(
-            canon,
-            CachedSymbols {
-                mtime: current_mtime,
-                symbols: symbols.clone(),
-            },
-        );
+        let mut symbol_cache = self
+            .symbol_cache
+            .write()
+            .map_err(|_| AftError::ParseError {
+                message: "symbol cache lock poisoned".to_string(),
+            })?;
+        if let Some(generation) = self.symbol_cache_generation {
+            symbol_cache.insert_for_generation(generation, canon, current_mtime, symbols.clone());
+        } else {
+            symbol_cache.insert(canon, current_mtime, symbols.clone());
+        }
 
         Ok(symbols)
     }
 
     /// Invalidate cached symbols for a specific file (e.g., after an edit).
     pub fn invalidate_symbols(&mut self, path: &Path) {
-        self.symbol_cache.remove(path);
+        if let Ok(mut symbol_cache) = self.symbol_cache.write() {
+            symbol_cache.invalidate(path);
+        }
         self.cache.remove(path);
     }
 }
@@ -2832,24 +2879,26 @@ struct ReExportTarget {
 impl TreeSitterProvider {
     /// Create a new `TreeSitterProvider` backed by a fresh `FileParser`.
     pub fn new() -> Self {
+        Self::with_symbol_cache(Arc::new(RwLock::new(SymbolCache::new())))
+    }
+
+    /// Create a new `TreeSitterProvider` backed by a shared symbol cache.
+    pub fn with_symbol_cache(symbol_cache: SharedSymbolCache) -> Self {
         Self {
-            parser: RefCell::new(FileParser::new()),
+            parser: RefCell::new(FileParser::with_symbol_cache(symbol_cache)),
         }
     }
 
-    /// Merge a pre-warmed symbol cache into the parser.
-    /// Called from the main loop when the background indexer completes.
-    pub fn merge_warm_cache(&self, cache: SymbolCache) {
-        let mut parser = self.parser.borrow_mut();
-        parser.set_warm_cache(cache);
+    /// Return shared symbol cache entries for status reporting.
+    pub fn symbol_cache_len(&self) -> usize {
+        let parser = self.parser.borrow();
+        parser.symbol_cache_len()
     }
 
-    /// Return (local_cache_entries, warm_cache_entries) for status reporting.
-    pub fn symbol_cache_stats(&self) -> (usize, usize) {
+    /// Shared symbol cache backing this provider.
+    pub fn symbol_cache(&self) -> SharedSymbolCache {
         let parser = self.parser.borrow();
-        let local = parser.symbol_cache_len();
-        let warm = parser.warm_cache_len();
-        (local, warm)
+        parser.symbol_cache()
     }
 
     fn resolve_symbol_inner(
@@ -4277,7 +4326,7 @@ mod tests {
         assert_eq!(symbols1[0].name, symbols2[0].name);
 
         // Verify cache is populated
-        assert!(parser.symbol_cache.contains_key(&file));
+        assert!(parser.symbol_cache.read().unwrap().contains_key(&file));
     }
 
     #[test]
@@ -4312,10 +4361,10 @@ mod tests {
 
         let mut parser = FileParser::new();
         parser.extract_symbols(&file).unwrap();
-        assert!(parser.symbol_cache.contains_key(&file));
+        assert!(parser.symbol_cache.read().unwrap().contains_key(&file));
 
         parser.invalidate_symbols(&file);
-        assert!(!parser.symbol_cache.contains_key(&file));
+        assert!(!parser.symbol_cache.read().unwrap().contains_key(&file));
         // Parse tree cache should also be cleared
         assert!(!parser.cache.contains_key(&file));
     }
@@ -4342,7 +4391,7 @@ mod tests {
         assert!(py_syms.iter().any(|s| s.name == "py_fn"));
 
         // All should be cached now
-        assert_eq!(parser.symbol_cache.len(), 3);
+        assert_eq!(parser.symbol_cache.read().unwrap().len(), 3);
 
         // Re-extract should return same results from cache
         let rs_syms2 = parser.extract_symbols(&rs_file).unwrap();

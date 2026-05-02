@@ -228,7 +228,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 && v6.segments()[2] == 0 && v6.segments()[3] == 0
                 && v6.segments()[4] == 0 && v6.segments()[5] == 0xffff
                 && {
-                    let [a, b, c, d] = v6.segments()[6..8] else { return false; };
+                    let [a, b] = v6.segments()[6..8] else { return false; };
                     let ipv4 = Ipv4Addr::new((a >> 8) as u8, (a & 0xff) as u8, (b >> 8) as u8, (b & 0xff) as u8);
                     is_private_ip(&IpAddr::V4(ipv4))
                 })
