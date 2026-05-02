@@ -2,9 +2,9 @@
  * Shared helpers used by every Pi tool wrapper.
  */
 
+import type { BinaryBridge, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import type { AgentToolResult, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { ingestBgCompletions } from "../bg-notifications.js";
-import type { BinaryBridge, BridgeRequestOptions } from "../bridge.js";
 import type { PluginContext } from "../types.js";
 
 /**

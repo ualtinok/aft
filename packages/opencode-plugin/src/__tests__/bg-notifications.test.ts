@@ -516,7 +516,7 @@ function harness(
   };
   const ctx = {
     pool: {
-      getAnyActiveBridge: () => bridge,
+      getActiveBridgeForRoot: () => bridge,
       getBridge: () => bridge,
     },
     client: {},

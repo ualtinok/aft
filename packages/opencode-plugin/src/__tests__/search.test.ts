@@ -1,7 +1,7 @@
 /// <reference path="../bun-test.d.ts" />
 import { describe, expect, test } from "bun:test";
+import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
-import type { BridgePool } from "../pool.js";
 import { searchTools } from "../tools/search.js";
 import type { PluginContext } from "../types.js";
 

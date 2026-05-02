@@ -1,11 +1,13 @@
+/// <reference path="../bun-test.d.ts" />
+
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BridgePool } from "../pool.js";
+import { BridgePool } from "@cortexkit/aft-bridge";
 
 describe("Pi BridgePool", () => {
-  test("getAnyActiveBridge prefers the bridge for the requested directory", () => {
+  test("getActiveBridgeForRoot returns the bridge when it is alive for the requested root", () => {
     const pool = new BridgePool("/tmp/aft", { timeoutMs: 1_000 });
     try {
       const projectA = pool.getBridge("/tmp/project-a");
@@ -13,13 +15,15 @@ describe("Pi BridgePool", () => {
       (projectA as any).isAlive = () => true;
       (projectB as any).isAlive = () => true;
 
-      expect(pool.getAnyActiveBridge("/tmp/project-b")).toBe(projectB);
+      // Returns the correct bridge when alive for the root
+      expect(pool.getActiveBridgeForRoot("/tmp/project-b")).toBe(projectB);
+      expect(pool.getActiveBridgeForRoot("/tmp/project-a")).toBe(projectA);
     } finally {
       pool.shutdown().catch(() => {});
     }
   });
 
-  test("getAnyActiveBridge falls back to another alive bridge", () => {
+  test("getActiveBridgeForRoot returns null when bridge for root is not alive", () => {
     const pool = new BridgePool("/tmp/aft", { timeoutMs: 1_000 });
     try {
       const projectA = pool.getBridge("/tmp/project-a");
@@ -27,7 +31,9 @@ describe("Pi BridgePool", () => {
       (projectA as any).isAlive = () => true;
       (projectB as any).isAlive = () => false;
 
-      expect(pool.getAnyActiveBridge("/tmp/project-b")).toBe(projectA);
+      // Does NOT fall back to projectA — returns null when projectB is dead
+      expect(pool.getActiveBridgeForRoot("/tmp/project-b")).toBeNull();
+      expect(pool.getActiveBridgeForRoot("/tmp/project-a")).toBe(projectA);
     } finally {
       pool.shutdown().catch(() => {});
     }

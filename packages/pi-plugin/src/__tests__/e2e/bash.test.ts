@@ -11,7 +11,7 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BridgePool } from "../../pool.js";
+import { BridgePool } from "@cortexkit/aft-bridge";
 import { registerBashTool } from "../../tools/bash.js";
 import type { PluginContext } from "../../types.js";
 import {

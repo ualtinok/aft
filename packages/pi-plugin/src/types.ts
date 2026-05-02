@@ -1,5 +1,5 @@
+import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { AftConfig } from "./config.js";
-import type { BridgePool } from "./pool.js";
 
 /**
  * Shared context passed to every tool wrapper.

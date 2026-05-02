@@ -5,7 +5,7 @@ import type { ChildProcess } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BridgePool } from "../../pool.js";
+import { BridgePool } from "@cortexkit/aft-bridge";
 import { createHarness, type Harness, type PreparedBinary, prepareBinary } from "./helpers.js";
 
 const initialBinary = await prepareBinary();

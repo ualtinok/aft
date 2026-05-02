@@ -1,10 +1,12 @@
+/// <reference path="../bun-test.d.ts" />
+
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PLATFORM_ASSET_MAP } from "../platform.js";
+import { PLATFORM_ASSET_MAP } from "@cortexkit/aft-bridge";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const tempRoots = new Set<string>();
@@ -46,12 +48,13 @@ describe("downloadBinary error paths", () => {
     const result = runDownloaderScript(`
       Object.defineProperty(process, "platform", { value: "plan9" });
       Object.defineProperty(process, "arch", { value: "x64" });
-      const { downloadBinary } = await import("./src/downloader.ts");
+      const { downloadBinary } = await import("@cortexkit/aft-bridge");
       console.log(String(await downloadBinary("v1.2.3")));
     `);
 
     expect(result.stdout).toBe("null");
-    expect(result.stderr).toContain("[aft-plugin] Unsupported platform: plan9-x64");
+    // No host logger registered in subprocess — falls back to [aft-bridge] prefix
+    expect(result.stderr).toContain("Unsupported platform: plan9-x64");
   });
 
   test("returns null and logs HTTP download failures", () => {
@@ -65,7 +68,7 @@ describe("downloadBinary error paths", () => {
           }
           return new Response("bad", { status: 502, statusText: "Bad Gateway" });
         };
-        const { downloadBinary } = await import("./src/downloader.ts");
+        const { downloadBinary } = await import("@cortexkit/aft-bridge");
         console.log(String(await downloadBinary("v9.9.9")));
       `,
       { XDG_CACHE_HOME: cacheRoot },
@@ -89,7 +92,7 @@ describe("downloadBinary error paths", () => {
           }
           return new Response("binary payload", { status: 200 });
         };
-        const { downloadBinary } = await import("./src/downloader.ts");
+        const { downloadBinary } = await import("@cortexkit/aft-bridge");
         console.log(String(await downloadBinary("v1.0.0")));
       `,
       { XDG_CACHE_HOME: cacheRoot },
@@ -113,7 +116,7 @@ describe("downloadBinary error paths", () => {
           }
           return new Response("binary payload", { status: 200 });
         };
-        const { downloadBinary } = await import("./src/downloader.ts");
+        const { downloadBinary } = await import("@cortexkit/aft-bridge");
         console.log(String(await downloadBinary("v2.0.0")));
       `,
       { XDG_CACHE_HOME: cacheRoot },
@@ -138,7 +141,7 @@ describe("downloadBinary error paths", () => {
           }
           return new Response("binary payload", { status: 200 });
         };
-        const { downloadBinary } = await import("./src/downloader.ts");
+        const { downloadBinary } = await import("@cortexkit/aft-bridge");
         console.log(String(await downloadBinary("v3.0.0")));
       `,
       { XDG_CACHE_HOME: cacheRoot },

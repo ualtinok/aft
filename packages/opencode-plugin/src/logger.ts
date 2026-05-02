@@ -102,3 +102,22 @@ export function sessionError(sessionId: string | undefined, message: string, dat
 export function getLogFilePath(): string {
   return logFile;
 }
+
+/**
+ * Adapter that exposes this logger as a {@link import("@cortexkit/aft-bridge").Logger}
+ * for the shared bridge package. The bridge package never knows about this log
+ * file or the `[aft-plugin]` tag — it just calls `log/warn/error` and we map
+ * its `LogMeta.sessionId` into our internal session-prefix shape.
+ */
+export const bridgeLogger = {
+  log(message: string, meta?: { sessionId?: string }) {
+    sessionLog(meta?.sessionId, message);
+  },
+  warn(message: string, meta?: { sessionId?: string }) {
+    sessionWarn(meta?.sessionId, message);
+  },
+  error(message: string, meta?: { sessionId?: string }) {
+    sessionError(meta?.sessionId, message);
+  },
+  getLogFilePath: () => logFile,
+};

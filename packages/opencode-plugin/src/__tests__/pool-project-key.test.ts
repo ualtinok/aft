@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { BridgePool } from "../pool.js";
+import { BridgePool } from "@cortexkit/aft-bridge";
 import { projectRootFor } from "../tools/_shared.js";
 
 const BINARY_PATH = resolve(import.meta.dir, "../../../../target/debug/aft");

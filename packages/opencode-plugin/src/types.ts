@@ -1,6 +1,6 @@
+import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { AftConfig } from "./config.js";
-import type { BridgePool } from "./pool.js";
 
 interface ShellEnvPluginHost {
   trigger?: (

@@ -18,8 +18,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { BinaryBridge, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import { ingestBgCompletions } from "../bg-notifications.js";
-import type { BinaryBridge, BridgeRequestOptions } from "../bridge.js";
 import type { PluginContext } from "../types.js";
 
 /**

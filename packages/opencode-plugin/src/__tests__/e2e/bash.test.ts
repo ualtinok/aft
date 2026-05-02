@@ -3,8 +3,8 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { BridgePool } from "../../pool.js";
 import { createBashTool } from "../../tools/bash.js";
 import type { PluginContext } from "../../types.js";
 import {

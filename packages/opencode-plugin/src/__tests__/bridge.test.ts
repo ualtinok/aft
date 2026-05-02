@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { BinaryBridge, compareSemver } from "../bridge.js";
+import { BinaryBridge, compareSemver } from "@cortexkit/aft-bridge";
 
 const BINARY_PATH = resolve(import.meta.dir, "../../../../target/debug/aft");
 const PROJECT_CWD = resolve(import.meta.dir, "../../../..");
@@ -267,8 +267,9 @@ describe("BinaryBridge lifecycle", () => {
       }
       expect(caught).not.toBeNull();
       const msg = caught?.message ?? "";
-      // Agent gets a concise, actionable error
-      expect(msg).toContain("[aft-plugin] Binary crashed");
+      // Agent gets a concise, actionable error (prefix is the bridge default
+      // when no errorPrefix is provided to BinaryBridge directly in tests)
+      expect(msg).toContain("Binary crashed");
       expect(msg).toContain("(see ");
       // Agent does NOT get the stderr tail dumped into the rejection
       expect(msg).not.toContain("fatal: semantic index corrupted");

@@ -4,9 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { consumeToolMetadata } from "../metadata-store.js";
-import type { BridgePool } from "../pool.js";
 import { hoistedTools } from "../tools/hoisted.js";
 import type { PluginContext } from "../types.js";
 

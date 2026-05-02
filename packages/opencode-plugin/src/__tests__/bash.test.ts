@@ -1,10 +1,9 @@
 /// <reference path="../bun-test.d.ts" />
 import { describe, expect, mock, test } from "bun:test";
 import { resolve } from "node:path";
+import type { BridgePool, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import { type ToolContext, tool } from "@opencode-ai/plugin";
-import type { BridgeRequestOptions } from "../bridge.js";
 import { consumeToolMetadata } from "../metadata-store.js";
-import type { BridgePool } from "../pool.js";
 import { createBashKillTool, createBashStatusTool, createBashTool } from "../tools/bash.js";
 import type { PluginContext } from "../types.js";
 

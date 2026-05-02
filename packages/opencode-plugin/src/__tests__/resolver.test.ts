@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { findBinarySync, platformKey } from "../resolver.js";
+import { findBinarySync, platformKey } from "@cortexkit/aft-bridge";
 
 // ---------------------------------------------------------------------------
 // platformKey() — pure mapping, no side effects

@@ -1,6 +1,7 @@
 /// <reference path="../../bun-test.d.ts" />
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
 import {
   __resetBgNotificationStateForTests,
@@ -8,7 +9,6 @@ import {
   handleIdleBgCompletions,
   trackBgTask,
 } from "../../bg-notifications.js";
-import { BridgePool } from "../../pool.js";
 import { createBashTool } from "../../tools/bash.js";
 import type { PluginContext } from "../../types.js";
 import {

@@ -3,8 +3,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync } from "node
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { log, warn } from "./active-logger.js";
 import { ensureBinary, getCacheDir, getCachedBinaryPath } from "./downloader.js";
-import { log, warn } from "./logger.js";
 import { PLATFORM_ARCH_MAP } from "./platform.js";
 
 /**
@@ -88,22 +88,31 @@ export function platformKey(
  * 3. PATH lookup via `which aft` (or `where aft` on Windows)
  * 4. ~/.cargo/bin/aft (Rust cargo install location)
  *
- * Returns the absolute path to the first binary found, or null if none found.
+ * @param expectedVersion Optional version (without `v` prefix) — when set, the
+ *   versioned cache for that version is checked first. Hosts that ship in
+ *   lock-step with the binary should pass their own package version so a
+ *   freshly downloaded binary is picked up before fallback resolution.
+ * @returns Absolute path to the first binary found, or null if none found.
  */
-export function findBinarySync(): string | null {
+export function findBinarySync(expectedVersion?: string): string | null {
   const ext = process.platform === "win32" ? ".exe" : "";
 
-  // 1. Check versioned cache for the plugin's own version first
-  const pluginVersion = (() => {
-    try {
-      const req = createRequire(import.meta.url);
-      return `v${(req("../package.json") as { version: string }).version}`;
-    } catch {
-      return null;
-    }
-  })();
+  // 1. Check versioned cache for the requested version (or this package's own
+  // version as a fallback so direct callers without a host still benefit from
+  // the cache).
+  const pluginVersion =
+    expectedVersion ??
+    (() => {
+      try {
+        const req = createRequire(import.meta.url);
+        return (req("../package.json") as { version: string }).version;
+      } catch {
+        return null;
+      }
+    })();
   if (pluginVersion) {
-    const versionCached = getCachedBinaryPath(pluginVersion);
+    const tag = pluginVersion.startsWith("v") ? pluginVersion : `v${pluginVersion}`;
+    const versionCached = getCachedBinaryPath(tag);
     if (versionCached) return versionCached;
   }
 
@@ -154,9 +163,9 @@ export function findBinarySync(): string | null {
  * Returns the absolute path to the binary.
  * Throws a descriptive error with install instructions if all sources fail.
  */
-export async function findBinary(): Promise<string> {
+export async function findBinary(expectedVersion?: string): Promise<string> {
   // Try synchronous resolution first (fast path)
-  const syncResult = findBinarySync();
+  const syncResult = findBinarySync(expectedVersion);
   if (syncResult) {
     log(`Resolved binary: ${syncResult}`);
     return syncResult;

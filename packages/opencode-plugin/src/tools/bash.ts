@@ -1,7 +1,7 @@
+import type { BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { trackBgTask } from "../bg-notifications.js";
-import type { BridgeRequestOptions } from "../bridge.js";
 import { storeToolMetadata } from "../metadata-store.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";

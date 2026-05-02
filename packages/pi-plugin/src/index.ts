@@ -33,6 +33,13 @@
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  BridgePool,
+  ensureOnnxRuntime,
+  findBinary,
+  getManualInstallHint,
+  setActiveLogger,
+} from "@cortexkit/aft-bridge";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   appendToolResultBgCompletions,
@@ -46,7 +53,7 @@ import {
   resolveExperimentalConfigForConfigure,
   resolveLspConfigForConfigure,
 } from "./config.js";
-import { log, warn } from "./logger.js";
+import { bridgeLogger, log, warn } from "./logger.js";
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
   abortInFlightGithubInstalls,
@@ -60,9 +67,10 @@ import {
   deliverConfigureWarnings,
   sendFeatureAnnouncement,
 } from "./notifications.js";
-import { ensureOnnxRuntime, getManualInstallHint } from "./onnx-runtime.js";
-import { BridgePool } from "./pool.js";
-import { findBinary } from "./resolver.js";
+
+// Register our logger with @cortexkit/aft-bridge before any bridge code runs.
+setActiveLogger(bridgeLogger);
+
 import { registerShutdownCleanup } from "./shutdown-hooks.js";
 import { resolveSessionId } from "./tools/_shared.js";
 import { registerAstTools } from "./tools/ast.js";
@@ -387,6 +395,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const pool = new BridgePool(
     binaryPath,
     {
+      errorPrefix: "[aft-pi]",
       minVersion: PLUGIN_VERSION,
       onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
         if (!sessionId || !client) return;

@@ -2,8 +2,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { BgCompletion } from "./bg-notifications.js";
-import { error, getLogFilePath, log, sessionWarn, warn } from "./logger.js";
+import { error, getLogFilePath, log, sessionWarn, warn } from "./active-logger.js";
+import type { BgCompletion } from "./protocol.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
@@ -102,11 +102,19 @@ interface PendingRequest {
   onProgress?: (chunk: { kind: "stdout" | "stderr"; text: string }) => void;
 }
 
-interface ConfigureWarningsContext {
+/** Single configure-time warning produced by the Rust side. */
+export interface ConfigureWarning {
+  code?: string;
+  message: string;
+  [key: string]: unknown;
+}
+
+/** Context passed to {@link BridgeOptions.onConfigureWarnings} after the first successful configure. */
+export interface ConfigureWarningsContext {
   projectRoot: string;
   sessionId?: string;
   client?: unknown;
-  warnings: unknown[];
+  warnings: ConfigureWarning[];
 }
 
 export interface BridgeOptions {
@@ -125,6 +133,12 @@ export interface BridgeOptions {
     completion: BashCompletedPayload,
     bridge: BinaryBridge,
   ) => void | Promise<void>;
+  /**
+   * Prefix for user-facing error messages thrown by the bridge (e.g. timeout,
+   * stdin-write, configure-failure errors). Hosts pass their own tag so the
+   * agent and operators see consistent attribution. Defaults to `[aft-bridge]`.
+   */
+  errorPrefix?: string;
 }
 
 export interface BashCompletedPayload extends BgCompletion {
@@ -194,6 +208,7 @@ export class BinaryBridge {
     | ((completion: BashCompletedPayload, bridge: BinaryBridge) => void | Promise<void>)
     | undefined;
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
+  private errorPrefix: string;
 
   constructor(
     binaryPath: string,
@@ -210,6 +225,7 @@ export class BinaryBridge {
     this.onVersionMismatch = options?.onVersionMismatch;
     this.onConfigureWarnings = options?.onConfigureWarnings;
     this.onBashCompletion = options?.onBashCompletion;
+    this.errorPrefix = options?.errorPrefix ?? "[aft-bridge]";
   }
 
   /** Number of times the binary has been restarted after a crash. */
@@ -236,7 +252,7 @@ export class BinaryBridge {
     options?: SendOptions,
   ): Promise<Record<string, unknown>> {
     if (this._shuttingDown) {
-      throw new Error(`[aft-plugin] Bridge is shutting down, cannot send "${command}"`);
+      throw new Error(`${this.errorPrefix} Bridge is shutting down, cannot send "${command}"`);
     }
 
     if (Object.hasOwn(params, "id")) {
@@ -262,7 +278,7 @@ export class BinaryBridge {
               });
               if (configResult.success === false) {
                 throw new Error(
-                  `[aft-plugin] Configure failed: ${configResult.message ?? "unknown error"}`,
+                  `${this.errorPrefix} Configure failed: ${configResult.message ?? "unknown error"}`,
                 );
               }
               // Large-repo warning is emitted by the Rust side via log::warn!
@@ -274,7 +290,7 @@ export class BinaryBridge {
               // errors as best-effort, so the bridge may have died without throwing.
               if (!this.isAlive()) {
                 throw new Error(
-                  `[aft-plugin] Bridge died during version check. Check logs: ${getLogFilePath()}`,
+                  `${this.errorPrefix} Bridge died during version check. Check logs: ${getLogFilePath()}`,
                 );
               }
               this.configured = true;
@@ -341,7 +357,7 @@ export class BinaryBridge {
         }
         reject(
           new Error(
-            `[aft-plugin] Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms`,
+            `${this.errorPrefix} Request "${command}" (id=${id}) timed out after ${effectiveTimeoutMs}ms`,
           ),
         );
         // Kill the hung process so the next request gets a fresh bridge —
@@ -358,7 +374,7 @@ export class BinaryBridge {
       if (!this.process?.stdin?.writable) {
         this.pending.delete(id);
         clearTimeout(timer);
-        reject(new Error(`[aft-plugin] stdin not writable for command "${command}"`));
+        reject(new Error(`${this.errorPrefix} stdin not writable for command "${command}"`));
         return;
       }
 
@@ -368,7 +384,7 @@ export class BinaryBridge {
           if (entry) {
             this.pending.delete(id);
             clearTimeout(entry.timer);
-            entry.reject(new Error(`[aft-plugin] Failed to write to stdin: ${err.message}`));
+            entry.reject(new Error(`${this.errorPrefix} Failed to write to stdin: ${err.message}`));
           }
         }
       });
@@ -402,7 +418,7 @@ export class BinaryBridge {
   async shutdown(): Promise<void> {
     this._shuttingDown = true;
     this.clearRestartResetTimer();
-    this.rejectAllPending(new Error("[aft-plugin] Bridge shutting down"));
+    this.rejectAllPending(new Error(`${this.errorPrefix} Bridge shutting down`));
 
     if (this.process) {
       const proc = this.process;
@@ -554,7 +570,7 @@ export class BinaryBridge {
         this.process = null;
         this.configured = false;
         this.clearRestartResetTimer();
-        this.rejectAllPending(new Error(`[aft-plugin] Binary killed by ${signal}`));
+        this.rejectAllPending(new Error(`${this.errorPrefix} Binary killed by ${signal}`));
         return;
       }
       this.handleCrash();
@@ -705,7 +721,7 @@ export class BinaryBridge {
 
     this.rejectAllPending(
       new Error(
-        `[aft-plugin] Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""} (see ${getLogFilePath()})`,
+        `${this.errorPrefix} Binary crashed (restarts: ${this._restartCount})${cause ? `: ${cause.message}` : ""} (see ${getLogFilePath()})`,
       ),
     );
 

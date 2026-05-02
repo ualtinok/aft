@@ -14,7 +14,7 @@
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { error, log, warn } from "./logger.js";
+import { error, log, warn } from "./active-logger.js";
 import { PLATFORM_ASSET_MAP } from "./platform.js";
 
 const REPO = "cortexkit/aft";

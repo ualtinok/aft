@@ -11,7 +11,7 @@ import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_pr
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { BinaryBridge, compareSemver } from "../bridge.js";
+import { BinaryBridge, compareSemver } from "@cortexkit/aft-bridge";
 
 const PROJECT_CWD = resolve(import.meta.dir, "../../../..");
 

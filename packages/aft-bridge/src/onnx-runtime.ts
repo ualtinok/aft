@@ -56,7 +56,7 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { error, log, warn } from "./logger.js";
+import { error, log, warn } from "./active-logger.js";
 
 const ORT_VERSION = "1.24.4";
 const ORT_REPO = "microsoft/onnxruntime";

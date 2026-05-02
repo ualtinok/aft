@@ -3,7 +3,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { BinaryBridge, type BridgeOptions } from "../../bridge.js";
+import { BinaryBridge, type BridgeOptions } from "@cortexkit/aft-bridge";
 
 const TARGET_DEBUG_BINARY = resolve(import.meta.dir, "../../../../../target/debug/aft");
 const FALLBACK_BINARY = resolve(homedir(), ".cargo/bin/aft");

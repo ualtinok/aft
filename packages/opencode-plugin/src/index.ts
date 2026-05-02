@@ -2,8 +2,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  BridgePool,
+  ensureBinary,
+  ensureOnnxRuntime,
+  findBinary,
+  getManualInstallHint,
+  isOrtAutoDownloadSupported,
+  setActiveLogger,
+} from "@cortexkit/aft-bridge";
 import type { Plugin } from "@opencode-ai/plugin";
-
 import {
   appendInTurnBgCompletions,
   extractSessionID,
@@ -16,9 +24,14 @@ import {
   resolveExperimentalConfigForConfigure,
   resolveLspConfigForConfigure,
 } from "./config.js";
-import { ensureBinary } from "./downloader.js";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker/index.js";
-import { error, log, warn } from "./logger.js";
+import { bridgeLogger, error, log, warn } from "./logger.js";
+
+// Register our logger with @cortexkit/aft-bridge before any bridge code runs.
+// Module side-effect: import order matters because BridgePool / BinaryBridge
+// internals call the active-logger helpers (log/warn/error) from constructors.
+setActiveLogger(bridgeLogger);
+
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
   abortInFlightGithubInstalls,
@@ -37,13 +50,6 @@ import {
   sendFeatureAnnouncement,
   sendWarning,
 } from "./notifications.js";
-import {
-  ensureOnnxRuntime,
-  getManualInstallHint,
-  isOrtAutoDownloadSupported,
-} from "./onnx-runtime.js";
-import { BridgePool } from "./pool.js";
-import { findBinary } from "./resolver.js";
 import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import { clearSharedBridgePool, setSharedBridgePool } from "./shared/runtime.js";
@@ -361,6 +367,7 @@ const plugin: Plugin = async (input) => {
   const pool = new BridgePool(
     binaryPath,
     {
+      errorPrefix: "[aft-plugin]",
       minVersion: PLUGIN_VERSION,
       onVersionMismatch: (binaryVersion, minVersion) => {
         if (versionUpgradeAttempted === binaryVersion) {
