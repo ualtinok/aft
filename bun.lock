@@ -16,7 +16,7 @@
     },
     "packages/aft-bridge": {
       "name": "@cortexkit/aft-bridge",
-      "version": "0.18.4",
+      "version": "0.18.5",
       "devDependencies": {
         "@types/node": "^22.0.0",
         "typescript": "^5.8.0",
@@ -24,7 +24,7 @@
     },
     "packages/aft-cli": {
       "name": "@cortexkit/aft",
-      "version": "0.18.4",
+      "version": "0.18.5",
       "bin": {
         "aft": "dist/index.js",
       },
@@ -39,10 +39,10 @@
     },
     "packages/opencode-plugin": {
       "name": "@cortexkit/aft-opencode",
-      "version": "0.18.4",
+      "version": "0.18.5",
       "dependencies": {
         "@clack/prompts": "^1.2.0",
-        "@cortexkit/aft-bridge": "0.18.4",
+        "@cortexkit/aft-bridge": "0.18.5",
         "@opencode-ai/plugin": "^1.2.26",
         "@opencode-ai/sdk": "^1.2.26",
         "comment-json": "^4.6.2",
@@ -54,11 +54,11 @@
         "typescript": "^5.8.0",
       },
       "optionalDependencies": {
-        "@cortexkit/aft-darwin-arm64": "0.18.4",
-        "@cortexkit/aft-darwin-x64": "0.18.4",
-        "@cortexkit/aft-linux-arm64": "0.18.4",
-        "@cortexkit/aft-linux-x64": "0.18.4",
-        "@cortexkit/aft-win32-x64": "0.18.4",
+        "@cortexkit/aft-darwin-arm64": "0.18.5",
+        "@cortexkit/aft-darwin-x64": "0.18.5",
+        "@cortexkit/aft-linux-arm64": "0.18.5",
+        "@cortexkit/aft-linux-x64": "0.18.5",
+        "@cortexkit/aft-win32-x64": "0.18.5",
       },
       "peerDependencies": {
         "@opencode-ai/plugin": ">=1.2.0",
@@ -66,9 +66,9 @@
     },
     "packages/pi-plugin": {
       "name": "@cortexkit/aft-pi",
-      "version": "0.18.4",
+      "version": "0.18.5",
       "dependencies": {
-        "@cortexkit/aft-bridge": "0.18.4",
+        "@cortexkit/aft-bridge": "0.18.5",
         "@sinclair/typebox": "^0.34.33",
         "comment-json": "^5.0.0",
         "diff": "^8.0.4",
@@ -82,11 +82,11 @@
         "typescript": "^5.8.0",
       },
       "optionalDependencies": {
-        "@cortexkit/aft-darwin-arm64": "0.18.4",
-        "@cortexkit/aft-darwin-x64": "0.18.4",
-        "@cortexkit/aft-linux-arm64": "0.18.4",
-        "@cortexkit/aft-linux-x64": "0.18.4",
-        "@cortexkit/aft-win32-x64": "0.18.4",
+        "@cortexkit/aft-darwin-arm64": "0.18.5",
+        "@cortexkit/aft-darwin-x64": "0.18.5",
+        "@cortexkit/aft-linux-arm64": "0.18.5",
+        "@cortexkit/aft-linux-x64": "0.18.5",
+        "@cortexkit/aft-win32-x64": "0.18.5",
       },
       "peerDependencies": {
         "@mariozechner/pi-coding-agent": "*",
@@ -193,19 +193,9 @@
 
     "@cortexkit/aft-bridge": ["@cortexkit/aft-bridge@workspace:packages/aft-bridge"],
 
-    "@cortexkit/aft-darwin-arm64": ["@cortexkit/aft-darwin-arm64@0.18.4", "", { "os": "darwin", "cpu": "arm64", "bin": { "aft": "bin/aft" } }, "sha512-v2SVeRC/6lKCfEYrrrJMfiPRFY/vOVIWBDsV/y3VFr71l72d90y9yWkORCTbSH/D8vyKo3OZLkk7P/3bA16WZQ=="],
-
-    "@cortexkit/aft-darwin-x64": ["@cortexkit/aft-darwin-x64@0.18.4", "", { "os": "darwin", "cpu": "x64", "bin": { "aft": "bin/aft" } }, "sha512-GbNiX2WEtLPSZfPR6gj+QGJ/l695Ny75fMcS6F8ThJ4qY8YAxiUTK4Qrx45b8Nquvkdig6lblWrphYua4TKhSg=="],
-
-    "@cortexkit/aft-linux-arm64": ["@cortexkit/aft-linux-arm64@0.18.4", "", { "os": "linux", "cpu": "arm64", "bin": { "aft": "bin/aft" } }, "sha512-2kphdVgzu9S+W/gFnFLEAVoAu63YD3dL4LLU2iwI+JdTLmSs+JRMdjrgQfezUkDJ5FoDLtfll5SRUnsmgG5aBA=="],
-
-    "@cortexkit/aft-linux-x64": ["@cortexkit/aft-linux-x64@0.18.4", "", { "os": "linux", "cpu": "x64", "bin": { "aft": "bin/aft" } }, "sha512-mUFeMTT9OohuLjDpRtQhGSHQ/0tD6oV6vNHt5QCkzVXgfNfThGj/rxqG8KMgrpNgMEOVJBIoqyGOJ8Y/21mnAg=="],
-
     "@cortexkit/aft-opencode": ["@cortexkit/aft-opencode@workspace:packages/opencode-plugin"],
 
     "@cortexkit/aft-pi": ["@cortexkit/aft-pi@workspace:packages/pi-plugin"],
-
-    "@cortexkit/aft-win32-x64": ["@cortexkit/aft-win32-x64@0.18.4", "", { "os": "win32", "cpu": "x64", "bin": { "aft": "bin/aft.exe" } }, "sha512-XHjyIK9bXO2jRxuZoKqAxravD6XsvHjYKYfBG1SJeDm+3hIzKVc/hsMgilugQUbFD9B5yDr+dC0bw4ViTJ7Cqw=="],
 
     "@google/genai": ["@google/genai@1.50.1", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-YbkX7H9+1Pt8wOt7DDREy8XSoiL6fRDzZQRyaVBarFf8MR3zHGqVdvM4cLbDXqPhxqvegZShgfxb8kw9C7YhAQ=="],
 

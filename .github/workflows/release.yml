@@ -294,8 +294,22 @@ jobs:
       # and @cortexkit/aft-pi depend on it. Plugins publish from local builds, so
       # there's no install-time race here, but consumers installing @latest will
       # need aft-bridge resolvable on npm.
+      #
+      # Tolerate `already published` so a re-run of the same tag (or the
+      # initial bootstrap publish that claims the package name with a
+      # token before Trusted Publishing is configured) doesn't fail the
+      # whole release. Mirrors the crates.io publish step above.
       - name: Publish @cortexkit/aft-bridge
-        run: npm publish --access public --provenance
+        run: |
+          set +e
+          out=$(npm publish --access public --provenance 2>&1)
+          ec=$?
+          echo "$out"
+          if [ $ec -ne 0 ] && echo "$out" | grep -q "cannot publish over the previously published versions"; then
+            echo "::notice::aft-bridge version already published; treating as success"
+            exit 0
+          fi
+          exit $ec
         working-directory: packages/aft-bridge
 
       - name: Publish @cortexkit/aft-opencode
