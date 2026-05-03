@@ -18,7 +18,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { sessionLog } from "./logger.js";
-import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 
 // --- TUI toast helper ---
 
@@ -192,21 +191,20 @@ async function sendIgnoredMessage(
       };
     };
 
-    // Pass the last assistant message's model + variant explicitly so
-    // OpenCode's createUserMessage doesn't fall back to agent.variant or
-    // undefined and bust the provider prefix cache. See
-    // shared/last-assistant-model.ts for the reasoning — the same fix
-    // applies to all three sendIgnoredMessage paths.
-    const lastModel = await getLastAssistantModel(client, sessionId);
-    const body: Record<string, unknown> = {
-      noReply: true,
-      parts: [{ type: "text", text, ignored: true }],
+    // `noReply: true` means OpenCode appends this as a synthetic user
+    // message and does NOT trigger an assistant turn. No LLM call
+    // happens, so model/variant/agent passthrough is unnecessary here.
+    // Keeping the body minimal also avoids OpenCode-side crashes that
+    // surfaced when we passed model/agent on this path. Cache-preserving
+    // model/variant forwarding belongs ONLY on wake-style calls
+    // (noReply: false), which live in bg-notifications.ts.
+    const promptInput = {
+      path: { id: sessionId },
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text, ignored: true }],
+      },
     };
-    if (lastModel) {
-      body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
-      if (lastModel.variant) body.variant = lastModel.variant;
-    }
-    const promptInput = { path: { id: sessionId }, body };
 
     if (typeof c.session?.prompt === "function") {
       await Promise.resolve(c.session.prompt(promptInput));

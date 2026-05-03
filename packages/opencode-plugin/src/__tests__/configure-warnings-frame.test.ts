@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleConfigureWarningsForSession } from "../index.js";
+import { handleConfigureWarningsForSession } from "../configure-warnings.js";
 
 const tempRoots = new Set<string>();
 

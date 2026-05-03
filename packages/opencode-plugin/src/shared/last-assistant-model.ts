@@ -1,47 +1,162 @@
 /**
- * Cache-busting fix: every PromptInput we send to OpenCode starts a new
- * assistant turn (via `noReply: false`) or stores a new user message
- * (via `noReply: true`). OpenCode's `createUserMessage` (in
- * `packages/opencode/src/session/prompt.ts`) only preserves the model
- * variant if we pass it explicitly — otherwise it falls back to
- * `agent.variant` or undefined, silently switching the next assistant
- * turn off the variant the previous assistant used. That switch evicts
- * the provider's prefix cache on every notification.
+ * Cache-busting fix for prompt prefix cache eviction.
  *
- * We pin to the **last assistant message's** model + variant rather
- * than the last user message's, because:
+ * PROBLEM: Every PromptInput we send to OpenCode (notifications, idle
+ * wakeups, ignored messages) creates a new user message. OpenCode's
+ * `createUserMessage` resolves variant relative to the chosen agent. If
+ * we don't pass model/variant, defaults take over and bust the provider
+ * prefix cache that the previous assistant turn warmed.
  *
- * 1. The provider cache key is tied to what the assistant was actually
- *    using, not what the user typed last. A user can switch model
- *    mid-conversation; the prior assistant turn was already keyed to
- *    the old model, and that's what subsequent provider requests
- *    should preserve until a *real* user message changes it.
- * 2. Assistant messages reliably store both providerID/modelID
- *    (top-level, required) and variant (top-level, optional). User
- *    messages have a different shape (`info.model.{providerID, modelID,
- *    variant}`) and may not always carry it.
+ * APPROACH: Mirror what `opencode-xtra` does in production. Read recent
+ * messages from `client.session.messages()`, prefer the most recent
+ * assistant message, fall back to any role, MERGE across messages so
+ * partial fields (e.g. agent set on user message but not assistant) are
+ * filled in, and read BOTH the flat shape (`info.providerID`) used by
+ * AssistantMessage and the nested shape (`info.model.providerID`) used
+ * by UserMessage.
  *
- * Results are memoised per session for a short window so a batch of
- * warnings or bg-completions only hits the messages API once.
+ * IMPORTANT: This context is only meaningful for callers that DO trigger
+ * LLM inference (e.g. background-bash idle wakes with `noReply: false`).
+ * Callers using `noReply: true` (one-off ignored messages, warnings,
+ * announcements) never trigger inference, so they don't need model or
+ * variant — the model/variant pass-through there is unnecessary AND has
+ * been observed to crash OpenCode under some configurations. Limit
+ * model/variant pass-through to wake-style calls.
  */
 
-interface SessionMessageInfo {
-  id?: string;
-  role?: string;
-  modelID?: string;
-  providerID?: string;
+export interface ResolvedPromptContext {
+  agent?: string;
+  model?: { providerID: string; modelID: string };
   variant?: string;
 }
 
-interface SessionMessage {
-  info?: SessionMessageInfo;
+interface RawInfo {
+  role?: string;
+  agent?: string;
+  variant?: string;
+  providerID?: string;
+  modelID?: string;
+  model?: { providerID?: string; modelID?: string; variant?: string };
 }
 
-interface OpenCodeClientShape {
-  session?: {
-    messages?: (input: { path: { id: string } }) => Promise<{ data?: SessionMessage[] }>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function extractMessages(response: unknown): unknown[] {
+  if (Array.isArray(response)) return response;
+  if (isRecord(response) && Array.isArray(response.data)) return response.data;
+  return [];
+}
+
+function getRole(message: unknown): string | undefined {
+  if (!isRecord(message) || !isRecord(message.info)) return undefined;
+  return typeof message.info.role === "string" ? message.info.role : undefined;
+}
+
+function extractFromMessage(message: unknown): ResolvedPromptContext | null {
+  if (!isRecord(message) || !isRecord(message.info)) return null;
+  const info = message.info as RawInfo;
+  const modelInfo = isRecord(info.model) ? info.model : undefined;
+
+  const agent = typeof info.agent === "string" ? info.agent : undefined;
+  const providerID =
+    typeof modelInfo?.providerID === "string"
+      ? modelInfo.providerID
+      : typeof info.providerID === "string"
+        ? info.providerID
+        : undefined;
+  const modelID =
+    typeof modelInfo?.modelID === "string"
+      ? modelInfo.modelID
+      : typeof info.modelID === "string"
+        ? info.modelID
+        : undefined;
+  const variant =
+    typeof modelInfo?.variant === "string"
+      ? modelInfo.variant
+      : typeof info.variant === "string"
+        ? info.variant
+        : undefined;
+
+  if (!agent && (!providerID || !modelID) && !variant) return null;
+  const out: ResolvedPromptContext = {};
+  if (agent) out.agent = agent;
+  if (providerID && modelID) out.model = { providerID, modelID };
+  if (variant) out.variant = variant;
+  return out;
+}
+
+function mergeContexts(
+  base: ResolvedPromptContext,
+  patch: ResolvedPromptContext,
+): ResolvedPromptContext {
+  return {
+    agent: base.agent ?? patch.agent,
+    model: base.model ?? patch.model,
+    variant: base.variant ?? patch.variant,
   };
 }
+
+function isComplete(ctx: ResolvedPromptContext): boolean {
+  return Boolean(ctx.agent && ctx.model && ctx.variant);
+}
+
+/**
+ * Read recent messages from the OpenCode session and resolve the most
+ * recent assistant prompt context. Falls back to user messages if no
+ * assistant has the field. Merges across messages so partial fields are
+ * filled in. Returns null if no usable context is found.
+ *
+ * Mirrors `resolveSessionPromptParams` in `opencode-xtra` (the working
+ * reference implementation).
+ */
+export async function resolvePromptContext(
+  client: unknown,
+  sessionId: string,
+): Promise<ResolvedPromptContext | null> {
+  if (!client || !sessionId) return null;
+  const c = client as {
+    session?: {
+      messages?: (input: { path: { id: string } }) => Promise<{ data?: unknown[] } | unknown[]>;
+    };
+  };
+  if (typeof c.session?.messages !== "function") return null;
+
+  let messages: unknown[] = [];
+  try {
+    const response = await c.session.messages({ path: { id: sessionId } });
+    messages = extractMessages(response);
+  } catch {
+    return null;
+  }
+  if (messages.length === 0) return null;
+
+  // Pass 1: prefer the most recent assistant, merge older assistants to
+  // fill missing fields.
+  let result: ResolvedPromptContext = {};
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (getRole(messages[i]) !== "assistant") continue;
+    const ctx = extractFromMessage(messages[i]);
+    if (!ctx) continue;
+    result = mergeContexts(result, ctx);
+    if (isComplete(result)) return result;
+  }
+
+  // Pass 2: fall back to any role (covers user messages, which carry
+  // model nested under `info.model`).
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const ctx = extractFromMessage(messages[i]);
+    if (!ctx) continue;
+    result = mergeContexts(result, ctx);
+    if (isComplete(result)) return result;
+  }
+
+  if (!result.agent && !result.model && !result.variant) return null;
+  return result;
+}
+
+// --- Compatibility shim for any older caller still using this name ---
 
 export interface LastAssistantModel {
   providerID: string;
@@ -49,79 +164,16 @@ export interface LastAssistantModel {
   variant?: string;
 }
 
-interface CacheEntry {
-  expiresAt: number;
-  model: LastAssistantModel | null;
-}
-
-const CACHE_TTL_MS = 5_000;
-const CACHE_MAX_ENTRIES = 100;
-const cache = new Map<string, CacheEntry>();
-
-/**
- * Returns the most recent assistant message's model + variant for the
- * session, or `null` when the session has no assistant messages or the
- * client doesn't expose `session.messages`. Result is cached for
- * {@link CACHE_TTL_MS} ms per session — long enough to coalesce a
- * batch of notifications, short enough that an actual mid-session
- * model change is picked up promptly.
- */
+/** @deprecated Use {@link resolvePromptContext} which also returns agent. */
 export async function getLastAssistantModel(
   client: unknown,
   sessionId: string,
 ): Promise<LastAssistantModel | null> {
-  const now = Date.now();
-  const cached = cache.get(sessionId);
-  if (cached && cached.expiresAt > now) {
-    cache.delete(sessionId);
-    cache.set(sessionId, cached);
-    return cached.model;
-  }
-  if (cached) cache.delete(sessionId);
-
-  const c = client as OpenCodeClientShape;
-  const fetcher = c?.session?.messages;
-  if (typeof fetcher !== "function") {
-    return null;
-  }
-
-  let messages: SessionMessage[];
-  try {
-    const result = await fetcher({ path: { id: sessionId } });
-    messages = result?.data ?? [];
-  } catch {
-    // Don't cache failures — a transient API error shouldn't pin the
-    // session's variant resolution to "unknown" for 5 s.
-    return null;
-  }
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const info = messages[i]?.info;
-    if (info?.role !== "assistant") continue;
-    if (!info.providerID || !info.modelID) continue;
-    const resolved: LastAssistantModel = {
-      providerID: info.providerID,
-      modelID: info.modelID,
-      ...(info.variant ? { variant: info.variant } : {}),
-    };
-    setCache(sessionId, resolved);
-    return resolved;
-  }
-
-  return null;
-}
-
-function setCache(sessionId: string, model: LastAssistantModel | null): void {
-  if (cache.has(sessionId)) cache.delete(sessionId);
-  cache.set(sessionId, { expiresAt: Date.now() + CACHE_TTL_MS, model });
-  while (cache.size > CACHE_MAX_ENTRIES) {
-    const oldest = cache.keys().next().value;
-    if (typeof oldest !== "string") break;
-    cache.delete(oldest);
-  }
-}
-
-/** Test-only: drop the cache so unit tests can simulate fresh sessions. */
-export function __resetLastAssistantModelCacheForTests(): void {
-  cache.clear();
+  const ctx = await resolvePromptContext(client, sessionId);
+  if (!ctx?.model) return null;
+  return {
+    providerID: ctx.model.providerID,
+    modelID: ctx.model.modelID,
+    ...(ctx.variant ? { variant: ctx.variant } : {}),
+  };
 }

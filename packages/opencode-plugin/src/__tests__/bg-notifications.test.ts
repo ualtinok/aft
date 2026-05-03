@@ -13,15 +13,30 @@ import {
   sessionBgStates,
   trackBgTask,
 } from "../bg-notifications.js";
-import { __resetLastAssistantModelCacheForTests } from "../shared/last-assistant-model.js";
 import type { PluginContext } from "../types.js";
 
 type BridgeResponse = Record<string, unknown>;
 
 afterEach(() => {
   __resetBgNotificationStateForTests();
-  __resetLastAssistantModelCacheForTests();
 });
+
+/**
+ * Make a fake `client.session.messages` that returns the given message
+ * shape. Used by tests that exercise prompt-context resolution which the
+ * wake path performs against the real OpenCode messages API.
+ */
+function clientWithMessages(
+  promptAsync: (input: unknown) => Promise<void>,
+  messages: unknown[],
+) {
+  return {
+    session: {
+      promptAsync,
+      messages: async () => ({ data: messages }),
+    },
+  };
+}
 
 describe("OpenCode background notifications", () => {
   test("formats system reminder bullets with status and duration (no output, no preview block)", () => {
@@ -169,32 +184,32 @@ describe("OpenCode background notifications", () => {
     expect(payload.body.parts[0].text).not.toContain(": npm test");
   });
 
-  test("turn-end wake forwards last assistant model + variant to preserve prefix cache", async () => {
+  test("turn-end wake forwards resolved agent + model + variant to preserve prefix cache", async () => {
+    // Simulate a session with a real assistant message — the wake resolver
+    // reads from client.session.messages() and forwards model/variant.
     trackBgTask("s1", "task-1");
     const { ctx } = harness(() => ({
       success: true,
       bg_completions: [completion("task-1", "npm test")],
     }));
     const promptAsync = mock(async () => {});
-    const messages = mock(async () => ({
-      data: [
-        { info: { role: "user" } },
-        {
-          info: {
-            role: "assistant",
-            providerID: "anthropic",
-            modelID: "claude-opus-4-7",
-            variant: "thinking",
-          },
+    const client = clientWithMessages(promptAsync, [
+      {
+        info: {
+          role: "assistant",
+          agent: "build",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-7",
+          variant: "thinking",
         },
-      ],
-    }));
+      },
+    ]);
 
     await handleIdleBgCompletions({
       ctx,
       directory: "/tmp/project",
       sessionID: "s1",
-      client: { session: { promptAsync, messages } },
+      client,
     });
     await sleep(260);
 
@@ -203,10 +218,12 @@ describe("OpenCode background notifications", () => {
       body: {
         noReply: boolean;
         parts: Array<{ text: string }>;
+        agent?: string;
         model?: { providerID: string; modelID: string };
         variant?: string;
       };
     };
+    expect(payload.body.agent).toBe("build");
     expect(payload.body.model).toEqual({
       providerID: "anthropic",
       modelID: "claude-opus-4-7",
@@ -214,7 +231,7 @@ describe("OpenCode background notifications", () => {
     expect(payload.body.variant).toBe("thinking");
   });
 
-  test("turn-end wake omits model/variant when no assistant history is reachable", async () => {
+  test("turn-end wake omits model/variant when no prior message provides one", async () => {
     trackBgTask("s1", "task-1");
     const { ctx } = harness(() => ({
       success: true,
@@ -222,13 +239,15 @@ describe("OpenCode background notifications", () => {
     }));
     const promptAsync = mock(async () => {});
 
-    // No `messages` on the client — getLastAssistantModel falls through to null,
-    // and the wake should still go out without forging a fake model.
+    // Empty session — no prior messages, so the resolver returns null and
+    // the wake should go out without forging a fake model.
+    const client = clientWithMessages(promptAsync, []);
+
     await handleIdleBgCompletions({
       ctx,
       directory: "/tmp/project",
       sessionID: "s1",
-      client: { session: { promptAsync } },
+      client,
     });
     await sleep(260);
 
@@ -237,10 +256,12 @@ describe("OpenCode background notifications", () => {
       body: {
         noReply: boolean;
         parts: Array<{ text: string }>;
+        agent?: unknown;
         model?: unknown;
         variant?: unknown;
       };
     };
+    expect(payload.body.agent).toBeUndefined();
     expect(payload.body.model).toBeUndefined();
     expect(payload.body.variant).toBeUndefined();
   });

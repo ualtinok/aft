@@ -129,7 +129,14 @@ function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
   return warnings.filter(isConfigureWarning);
 }
 
-export async function handleConfigureWarningsForSession(context: {
+// IMPORTANT: NOT exported as a named export — only via the __test__
+// namespace at the bottom. Pi's extension loader is different from
+// OpenCode's, but OpenCode's plugin loader walks every top-level
+// function export and treats them all as plugin entrypoints, which
+// crashed our OpenCode-side plugin. Keeping both packages' surface
+// shape identical avoids cross-contamination if shared utilities ever
+// move between them.
+async function handleConfigureWarningsForSession(context: {
   projectRoot: string;
   sessionId?: string | null;
   client?: unknown;

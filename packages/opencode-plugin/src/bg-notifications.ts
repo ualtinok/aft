@@ -1,5 +1,5 @@
 import { sessionWarn } from "./logger.js";
-import { getLastAssistantModel } from "./shared/last-assistant-model.js";
+import { resolvePromptContext } from "./shared/last-assistant-model.js";
 import type { PluginContext } from "./types.js";
 
 export interface BgCompletion {
@@ -149,19 +149,27 @@ async function triggerWakeIfPending(
       if (typeof client.session?.promptAsync !== "function") {
         throw new Error("client.session.promptAsync is unavailable");
       }
-      // Pass the last assistant message's model + variant explicitly so
-      // OpenCode's createUserMessage doesn't fall back to agent.variant or
-      // undefined and bust the provider prefix cache for the next assistant
-      // turn. See shared/last-assistant-model.ts for the reasoning.
-      const lastModel = await getLastAssistantModel(client, drainContext.sessionID);
+      // Pass the previous turn's prompt context (agent + model + variant)
+      // explicitly. OpenCode's `createUserMessage` resolves variant
+      // relative to the chosen agent's model — passing model alone makes
+      // OpenCode pick the default agent and its model match check fails,
+      // bypassing our variant. This call uses noReply: false so it DOES
+      // trigger an assistant turn — preserving cache here matters.
+      // Mirrors the resolution `opencode-xtra` uses for its
+      // background-agent notifications. See shared/last-assistant-model.ts.
+      const promptContext = await resolvePromptContext(client, drainContext.sessionID);
       const body: Record<string, unknown> = {
         noReply: false,
         parts: [{ type: "text", text: reminder }],
       };
-      if (lastModel) {
-        body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
-        if (lastModel.variant) body.variant = lastModel.variant;
+      if (promptContext?.agent) body.agent = promptContext.agent;
+      if (promptContext?.model) {
+        body.model = {
+          providerID: promptContext.model.providerID,
+          modelID: promptContext.model.modelID,
+        };
       }
+      if (promptContext?.variant) body.variant = promptContext.variant;
       await client.session.promptAsync({
         path: { id: drainContext.sessionID },
         body,

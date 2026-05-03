@@ -92,49 +92,17 @@ function throwSentinel(command: string): never {
   throw new Error(`${SENTINEL_PREFIX}${command.toUpperCase().replace(/-/g, "_")}_HANDLED__`);
 }
 
-function isConfigureWarning(value: unknown): value is ConfigureWarning {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const warning = value as Record<string, unknown>;
-  return (
-    (warning.kind === "formatter_not_installed" ||
-      warning.kind === "checker_not_installed" ||
-      warning.kind === "lsp_binary_missing") &&
-    typeof warning.hint === "string"
-  );
-}
-
-function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
-  return warnings.filter(isConfigureWarning);
-}
-
-export async function handleConfigureWarningsForSession(context: {
-  projectRoot: string;
-  sessionId?: string | null;
-  client?: unknown;
-  warnings: unknown[];
-  fallbackClient: unknown;
-  storageDir: string;
-  pluginVersion: string;
-}): Promise<void> {
-  if (!context.sessionId) {
-    warn(
-      `[configure] deferred warnings for ${context.projectRoot} arrived without session_id; skipping notification`,
-    );
-    return;
-  }
-  const validWarnings = coerceConfigureWarnings(context.warnings);
-  if (validWarnings.length === 0) return;
-  await deliverConfigureWarnings(
-    {
-      client: context.client ?? context.fallbackClient,
-      sessionId: context.sessionId,
-      storageDir: context.storageDir,
-      pluginVersion: context.pluginVersion,
-      projectRoot: context.projectRoot,
-    },
-    validWarnings,
-  );
-}
+// IMPORTANT — index.ts must export ONLY the plugin function as default.
+// OpenCode's plugin loader (`getLegacyPlugins` in
+// `~/Work/OSS/opencode/packages/opencode/src/plugin/index.ts`) walks
+// `Object.values(mod)` and rejects any non-function top-level export
+// with `TypeError: Plugin export is not a function`. Function exports
+// (other than the default plugin) get treated as additional plugin
+// entrypoints, called with OpenCode's plugin input, and their return
+// value pushed into the hooks array — `undefined` returns then crash
+// the host on every `hook.config?.(cfg)` / `hook.provider?.(...)` /
+// etc. iteration. Helpers stay in sibling modules.
+import { handleConfigureWarningsForSession } from "./configure-warnings.js";
 
 async function sendIgnoredMessage(client: unknown, sessionID: string, text: string): Promise<void> {
   const typedClient = client as {
@@ -849,6 +817,11 @@ const plugin: Plugin = async (input) => {
       );
     },
     config: async (config) => {
+      // Defensive guard: if OpenCode passes undefined or a non-object,
+      // skip silently rather than crashing the plugin loader. The crash
+      // surface here was responsible for `S.provider`/`z.config` errors
+      // when this hook ran with an unexpected argument.
+      if (!config || typeof config !== "object") return;
       // Register /aft-status for Desktop command palette.
       // In TUI mode, the TUI plugin also registers it via api.command.register()
       // which takes priority for dialog rendering.
