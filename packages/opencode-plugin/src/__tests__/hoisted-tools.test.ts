@@ -157,7 +157,7 @@ describe("Hoisted tool execute handlers", () => {
     );
   });
 
-  test("delete throws the Rust error response when deletion fails", async () => {
+  test("delete throws when every file in the batch fails", async () => {
     tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
     sdkCtx = createMockSdkContext(tmpDir);
 
@@ -166,9 +166,59 @@ describe("Hoisted tool execute handlers", () => {
       return { success: false, message: "Cannot delete protected file" };
     });
 
-    await expect(tools.aft_delete.execute({ filePath: "locked.ts" }, sdkCtx)).rejects.toThrow(
-      "Cannot delete protected file",
-    );
+    await expect(
+      tools.aft_delete.execute({ files: ["locked.ts", "also-locked.ts"] }, sdkCtx),
+    ).rejects.toThrow("Cannot delete protected file");
+  });
+
+  test("delete returns partial-success payload when some files fail", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const responses = [
+      { success: true },
+      { success: false, message: "permission denied", code: "permission_denied" },
+      { success: true },
+    ];
+    let callIndex = 0;
+    const { tools } = createMockHoistedHarness(async (command) => {
+      expect(command).toBe("delete_file");
+      const response = responses[callIndex++];
+      if (!response) throw new Error("unexpected extra delete_file call");
+      return response;
+    });
+
+    const raw = await tools.aft_delete.execute({ files: ["a.ts", "blocked.ts", "c.ts"] }, sdkCtx);
+    const parsed = JSON.parse(raw);
+    expect(parsed.success).toBe(true);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.deleted).toHaveLength(2);
+    expect(parsed.deleted[0]).toContain("a.ts");
+    expect(parsed.deleted[1]).toContain("c.ts");
+    expect(parsed.skipped_files).toEqual([
+      expect.objectContaining({ reason: "permission denied" }),
+    ]);
+    expect(parsed.skipped_files[0].file).toContain("blocked.ts");
+  });
+
+  test("delete reports complete=true when every file succeeds", async () => {
+    tmpDir = await mkdtemp(resolve(tmpdir(), "aft-hoisted-"));
+    sdkCtx = createMockSdkContext(tmpDir);
+
+    const { tools } = createMockHoistedHarness(async (command) => {
+      expect(command).toBe("delete_file");
+      return { success: true };
+    });
+
+    const raw = await tools.aft_delete.execute({ files: ["a.ts", "b.ts"] }, sdkCtx);
+    const parsed = JSON.parse(raw);
+    expect(parsed).toEqual({
+      success: true,
+      complete: true,
+      deleted: expect.any(Array),
+      skipped_files: [],
+    });
+    expect(parsed.deleted).toHaveLength(2);
   });
 
   test("move throws the Rust error response when rename fails", async () => {

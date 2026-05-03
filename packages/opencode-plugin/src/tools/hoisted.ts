@@ -1420,32 +1420,66 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
 // ---------------------------------------------------------------------------
 
 const DELETE_DESCRIPTION =
-  "Delete a file with backup.\n\n" +
-  "The file content is backed up before deletion — use aft_safety undo to recover if needed.";
+  "Delete one or more files with backup.\n\n" +
+  "Each file is backed up before deletion — use aft_safety undo to recover any of them.\n\n" +
+  "Returns: { success, complete, deleted: [paths], skipped_files: [{file, reason}] }. " +
+  "Partial success is allowed: files that can be deleted are deleted; files that fail " +
+  "(missing, permission denied, etc.) are reported in skipped_files. " +
+  "`complete: false` indicates at least one file was skipped.";
 
 function createDeleteTool(ctx: PluginContext): ToolDefinition {
   return {
     description: DELETE_DESCRIPTION,
     args: {
-      filePath: z.string().describe("Path to file to delete"),
+      files: z
+        .array(z.string())
+        .min(1)
+        .describe(
+          "Paths to delete (one or more). Single-file callers pass a single-element array.",
+        ),
     },
     execute: async (args, context): Promise<string> => {
-      const filePath = path.isAbsolute(args.filePath as string)
-        ? (args.filePath as string)
-        : path.resolve(context.directory, args.filePath as string);
+      const inputs = args.files as string[];
+      const absolutePaths = inputs.map((f) =>
+        path.isAbsolute(f) ? f : path.resolve(context.directory, f),
+      );
 
       await context.ask({
         permission: "edit",
-        patterns: [filePath],
+        patterns: absolutePaths,
         always: ["*"],
-        metadata: { action: "delete" },
+        metadata: { action: "delete", count: absolutePaths.length },
       });
 
-      const result = await callBridge(ctx, context, "delete_file", { file: filePath });
-      if (result.success === false) {
-        throw new Error((result.message as string) || "delete failed");
+      const deleted: string[] = [];
+      const skipped: Array<{ file: string; reason: string }> = [];
+      for (const filePath of absolutePaths) {
+        const result = await callBridge(ctx, context, "delete_file", { file: filePath });
+        if (result.success === false) {
+          skipped.push({
+            file: filePath,
+            reason: (result.message as string) || (result.code as string) || "delete failed",
+          });
+        } else {
+          deleted.push(filePath);
+        }
       }
-      return JSON.stringify(result);
+
+      // Refuse a fully-failed batch with a real error so the agent surface
+      // doesn't silently render "completed" for nothing-actually-deleted.
+      if (deleted.length === 0 && skipped.length > 0) {
+        throw new Error(
+          `delete failed for all ${skipped.length} file(s):\n` +
+            skipped.map((entry) => `  ${entry.file}: ${entry.reason}`).join("\n"),
+        );
+      }
+
+      return JSON.stringify({
+        success: true,
+        complete: skipped.length === 0,
+        deleted,
+        skipped_files: skipped,
+      });
     },
   };
 }

@@ -145,19 +145,25 @@ async function triggerWakeIfPending(
     state,
     async (reminder) => {
       // Pi rejects sendUserMessage with "Agent is already processing" when
-      // the agent is mid-turn unless we pass `deliverAs`. Even though we gate
-      // on `isActive?.()` above, a turn can start between that check and the
-      // debounced send. `followUp` queues the wake after the current turn
-      // ends — semantically what bg-bash idle-wake wants anyway, since
-      // background completion is information for the next turn, not an
-      // interrupt. `steer` would interrupt mid-stream which is wrong here.
-      // Unlike OpenCode, Pi's `sendUserMessage` does not accept any model or
-      // variant fields — it just queues a content string into the active
-      // session. The next assistant turn uses Pi's currently-selected model
-      // (set via `runtime.setModel`), so there is no per-message override
-      // for us to thread through, and therefore no equivalent of OpenCode's
-      // `getLastAssistantModel()` cache-preserving fix to apply here.
-      drainContext.runtime.sendUserMessage(reminder, { deliverAs: "followUp" });
+      // the agent is mid-turn unless we pass `deliverAs`. Use `steer`:
+      // Pi delivers steering messages after the current tool batch finishes
+      // and BEFORE the next LLM call (see agent-session.ts steer() docs:
+      // "Delivered after the current assistant turn finishes executing its
+      // tool calls, before the next LLM call"). That's exactly when we
+      // want a background-bash completion to land — the agent sees the
+      // result and can incorporate it into the very next thinking step
+      // instead of writing a conclusion that didn't know the build/test
+      // had finished.
+      //
+      // `followUp` would queue until the entire turn ends, which is too
+      // late for tool-loop scenarios where the agent is actively working
+      // on a problem that depends on the bash result.
+      //
+      // Unlike OpenCode, Pi's `sendUserMessage` does not accept any model
+      // or variant fields — it just queues a content string. The next
+      // turn uses Pi's currently-selected model, so there is no per-message
+      // override for us to thread through.
+      drainContext.runtime.sendUserMessage(reminder, { deliverAs: "steer" });
     },
     (err) => {
       sessionWarn(

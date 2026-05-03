@@ -23,7 +23,7 @@ fn compress_tsc(output: &str) -> String {
         .collect();
 
     if error_lines.is_empty() {
-        return "No errors. (compressed by aft)".to_string();
+        return "No errors. [cmpaft]".to_string();
     }
 
     let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();

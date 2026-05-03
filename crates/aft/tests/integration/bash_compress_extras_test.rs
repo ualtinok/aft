@@ -144,7 +144,7 @@ fn tsc_groups_errors_by_file_and_handles_clean_output() {
     assert!(compressed.contains("Found 57 errors in 23 files"));
 
     let clean = TscCompressor.compress("tsc --noEmit", "Project build started\nCompiling...\n");
-    assert_eq!(clean, "No errors. (compressed by aft)");
+    assert_eq!(clean, "No errors. [cmpaft]");
 
     let ratio = compressed.len() as f32 / output.len() as f32;
     assert!(ratio < 0.45, "ratio was {ratio}");

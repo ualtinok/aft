@@ -6,7 +6,7 @@
 import type { AgentToolResult, ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, textResult } from "./_shared.js";
+import { bridgeFor, callBridge, resolveSessionId, textResult } from "./_shared.js";
 import {
   accentPath,
   type RenderContextLike,
@@ -17,7 +17,10 @@ import {
 } from "./render-helpers.js";
 
 const DeleteParams = Type.Object({
-  filePath: Type.String({ description: "Path to file to delete" }),
+  files: Type.Array(Type.String(), {
+    description: "Paths to delete (one or more). Single-file callers pass a single-element array.",
+    minItems: 1,
+  }),
 });
 
 const MoveParams = Type.Object({
@@ -38,12 +41,12 @@ export function renderFsCall(
   context: RenderContextLike,
 ) {
   if (toolName === "aft_delete") {
-    return renderToolCall(
-      "delete",
-      accentPath(theme, (args as Static<typeof DeleteParams>).filePath),
-      theme,
-      context,
-    );
+    const files = (args as Static<typeof DeleteParams>).files;
+    const summary =
+      files.length === 1
+        ? accentPath(theme, files[0])
+        : `${theme.fg("accent", String(files.length))} ${theme.fg("muted", "files")}`;
+    return renderToolCall("delete", summary, theme, context);
   }
 
   const moveArgs = args as Static<typeof MoveParams>;
@@ -68,11 +71,27 @@ export function renderFsResult(
   }
 
   if (toolName === "aft_delete") {
-    const filePath = shortenPath((args as Static<typeof DeleteParams>).filePath);
-    return renderSections(
-      [`${theme.fg("success", "✓ deleted")} ${theme.fg("accent", filePath)}`],
-      context,
-    );
+    const files = (args as Static<typeof DeleteParams>).files;
+    const data = (result?.details ?? {}) as {
+      deleted?: string[];
+      skipped_files?: Array<{ file: string; reason: string }>;
+      complete?: boolean;
+    };
+    const deletedPaths = data.deleted ?? files;
+    const skipped = data.skipped_files ?? [];
+    const lines: string[] = [];
+    for (const entry of deletedPaths) {
+      lines.push(`${theme.fg("success", "✓ deleted")} ${theme.fg("accent", shortenPath(entry))}`);
+    }
+    for (const entry of skipped) {
+      lines.push(
+        `${theme.fg("error", "✗ skipped")} ${theme.fg("accent", shortenPath(entry.file))} ${theme.fg("muted", `(${entry.reason})`)}`,
+      );
+    }
+    if (lines.length === 0) {
+      lines.push(theme.fg("muted", "(no files deleted)"));
+    }
+    return renderSections([lines.join("\n")], context);
   }
 
   const moveArgs = args as Static<typeof MoveParams>;
@@ -91,7 +110,8 @@ export function registerFsTools(pi: ExtensionAPI, ctx: PluginContext, surface: F
       name: "aft_delete",
       label: "delete",
       description:
-        "Delete a file with backup. The file content is backed up before deletion — use `aft_safety undo` to recover.",
+        "Delete one or more files with backup. Each file is backed up before deletion — use `aft_safety undo` to recover any of them. " +
+        "Returns { success, complete, deleted, skipped_files }: partial success is allowed; files that fail are reported in skipped_files.",
       parameters: DeleteParams,
       async execute(
         _toolCallId: string,
@@ -101,8 +121,43 @@ export function registerFsTools(pi: ExtensionAPI, ctx: PluginContext, surface: F
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
-        const response = await callBridge(bridge, "delete_file", { file: params.filePath }, extCtx);
-        return textResult(`Deleted ${params.filePath}`, response);
+        const sessionId = resolveSessionId(extCtx);
+        const deleted: string[] = [];
+        const skipped: Array<{ file: string; reason: string }> = [];
+        // Use bridge.send directly (not the throwing callBridge wrapper) so
+        // a single-file failure doesn't abort the rest of the batch.
+        for (const filePath of params.files) {
+          const response = await bridge.send("delete_file", {
+            file: filePath,
+            ...(sessionId ? { session_id: sessionId } : {}),
+          });
+          if (response.success === false) {
+            skipped.push({
+              file: filePath,
+              reason: (response.message as string) || (response.code as string) || "delete failed",
+            });
+          } else {
+            deleted.push(filePath);
+          }
+        }
+        // Refuse a fully-failed batch with an error so renderers don't show
+        // "completed" for nothing-actually-deleted.
+        if (deleted.length === 0 && skipped.length > 0) {
+          throw new Error(
+            `delete failed for all ${skipped.length} file(s):\n` +
+              skipped.map((entry) => `  ${entry.file}: ${entry.reason}`).join("\n"),
+          );
+        }
+        const summary =
+          deleted.length === 1 && skipped.length === 0
+            ? `Deleted ${deleted[0]}`
+            : `Deleted ${deleted.length}/${params.files.length} file(s)`;
+        return textResult(summary, {
+          success: true,
+          complete: skipped.length === 0,
+          deleted,
+          skipped_files: skipped,
+        });
       },
       renderCall(args, theme, context) {
         return renderFsCall("aft_delete", args, theme, context);

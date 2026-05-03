@@ -93,7 +93,7 @@ maybeDescribe("e2e honest reporting surfaces", () => {
     );
     await writeFile(h.path("outline-mixed", "bad.ts"), "export function bad( {\n", "utf8");
 
-    const output = await tools.aft_outline.execute({ directory: "outline-mixed" }, sdkCtx);
+    const output = await tools.aft_outline.execute({ target: "outline-mixed" }, sdkCtx);
 
     expect(output).toContain("good.ts");
     expect(output).toContain("good");

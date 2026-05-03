@@ -96,7 +96,7 @@ maybeDescribe("aft_safety (real bridge)", () => {
     // skip and report instead.
     await harness.callTool("write", { filePath: "cp-keeper.ts", content: "stays\n" });
     await harness.callTool("write", { filePath: "cp-doomed.ts", content: "soon\n" });
-    await harness.callTool("aft_delete", { filePath: "cp-doomed.ts" });
+    await harness.callTool("aft_delete", { files: ["cp-doomed.ts"] });
 
     // No explicit files → uses tracked-file set, which still contains cp-doomed.ts.
     const result = await harness.callTool("aft_safety", {

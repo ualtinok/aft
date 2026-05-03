@@ -178,7 +178,7 @@ Here's a typical agent workflow:
 
 ```json
 // aft_outline
-{ "filePath": "src/auth/session.ts" }
+{ "target": "src/auth/session.ts" }
 ```
 
 ```
@@ -359,7 +359,7 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `aft_outline` | Structural outline of a file, files, or directory | `filePath`, `files[]`, `directory` |
+| `aft_outline` | Structural outline of a file, directory, files, or URL | `target` (string or array) |
 | `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]` |
 | `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
 | `aft_conflicts` | Show all git merge conflicts with line-numbered regions | *(none)* |
@@ -370,7 +370,7 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `aft_delete` | Delete a file with backup | `filePath` |
+| `aft_delete` | Delete one or more files with backup | `files` |
 | `aft_move` | Move or rename a file with backup | `filePath`, `destination` |
 | `aft_navigate` | Call graph and data-flow navigation | `op`, `filePath`, `symbol`, `depth` |
 | `aft_transform` | Structural code transforms (members, derives, decorators) | `op`, `filePath`, `container`, `target` |
@@ -672,21 +672,32 @@ that extension. See [CLI Commands](#cli-commands).
 ### aft_outline
 
 Returns all top-level symbols in a file with their kind, name, line range, visibility, and nested
-`members` (methods in classes, sub-headings in Markdown). Accepts a single `filePath`, a `files`
-array, or a `directory` to outline all source files recursively.
+`members` (methods in classes, sub-headings in Markdown). Takes a single `target` parameter that
+auto-detects what to outline:
+
+- **File path** → outline that file with signatures
+- **Directory path** → recursively outline all source files (capped at 200)
+- **Array of paths** → batch-outline multiple specific files
+- **URL** (OpenCode only, `http://`/`https://`) → fetch and outline a remote HTML/Markdown document
 
 For **Markdown** files (`.md`, `.mdx`): returns heading hierarchy with section ranges — each
 heading becomes a symbol you can read by name.
 
 ```json
+// Outline a single file
+{ "target": "src/server.ts" }
+
 // Outline two files at once
-{ "files": ["src/server.ts", "src/router.ts"] }
+{ "target": ["src/server.ts", "src/router.ts"] }
 
 // Outline all source files in a directory
-{ "directory": "src/auth" }
+{ "target": "src/auth" }
+
+// Outline a remote document (OpenCode)
+{ "target": "https://docs.example.com/api.md" }
 ```
 
-In `files` and `directory` modes, files that fail to parse or whose language is unsupported
+In multi-file and directory modes, files that fail to parse or whose language is unsupported
 are listed under `skipped_files` with a per-file `reason` (e.g. `parse_error`,
 `unsupported_language`) instead of being silently dropped from the result.
 
@@ -884,14 +895,21 @@ Parameters: `query` (required — natural language description), `topK` (optiona
 
 ### aft_delete
 
-Delete a file with an in-memory backup. The backup survives for the session and can be restored
-via `aft_safety`.
+Delete one or more files with per-file backups. Each backup survives for the session and can
+be restored via `aft_safety`. Single-file callers pass a single-element array.
 
 ```json
-{ "filePath": "src/deprecated/old-utils.ts" }
+{ "files": ["src/deprecated/old-utils.ts"] }
 ```
 
-Returns `{ file, deleted, backup_id }` on success.
+```json
+{ "files": ["dist/foo.js", "dist/bar.js", "dist/baz.js"] }
+```
+
+Returns `{ success, complete, deleted: [paths], skipped_files: [{file, reason}] }`. Partial
+success is allowed: files that can be deleted are deleted; files that fail (missing,
+permission denied, etc.) are reported in `skipped_files` and `complete: false`. If every
+file fails the call throws an error.
 
 ---
 
@@ -1135,8 +1153,12 @@ The schema is identical across harnesses. Only file location differs.
   // trace_data, impact). Projects above this size return "project_too_large"
   // with guidance to open a specific subdirectory. Does not affect grep,
   // glob, read, edit, or any other tool.
-  // Default: 20000 (covers typical monorepos; rejects OS-wide roots like ~/Work).
-  "max_callgraph_files": 20000,
+  // Default: 5000. Measured cost: ~1ms per source file for the reverse-index
+  // build, so 5000 ≈ 5–10s on cold start. The previous 20000 default exceeded
+  // the bridge timeout on real ~7K-file projects, surfacing as bridge restart
+  // instead of `project_too_large`. Raise this if you have patience and want
+  // call-graph navigation on bigger projects.
+  "max_callgraph_files": 5000,
 
   // Language servers used for post-edit diagnostics.
   //
@@ -1341,8 +1363,8 @@ If you point AFT at a very large directory (monorepo root, `~/Work`, `/home`, et
 features guard against unbounded work to keep the bridge responsive:
 
 - **Call-graph ops** (`callers`, `trace_to`, `trace_data`, `impact`) return `project_too_large`
-  above `max_callgraph_files` (default 20,000). The plugin logs a warning at startup when this
-  threshold is exceeded so you know before making a tool call.
+  above `max_callgraph_files` (default 5,000 — the empirical limit before the reverse-index build
+  exceeds the bridge timeout on real workloads). Raise it in your config if you have patience.
 - **Semantic indexing** is skipped above 10,000 source files.
 - **`grep`, `glob`, `read`, `edit`, and other tools** work at any size.
 

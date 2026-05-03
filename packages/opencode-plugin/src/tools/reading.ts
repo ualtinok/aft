@@ -67,43 +67,28 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
     aft_outline: {
       description:
         "Structural outline of source code, documentation files, or remote URLs. For code, returns symbols (functions, classes, types) with line ranges. For Markdown and HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\n" +
-        "Provide exactly ONE of: 'filePath', 'files', 'directory', or 'url'.",
+        "Pass a single `target`:\n" +
+        "  • file path → outline that file (with signatures)\n" +
+        "  • directory path → outline all source files under it (recursively, up to 200 files)\n" +
+        "  • URL (http:// or https://) → fetch and outline a remote HTML/Markdown document\n" +
+        "  • array of paths → outline multiple files in one call",
       args: {
-        filePath: z.string().optional().describe("Path to a single file to outline"),
-        files: z
-          .array(z.string())
-          .optional()
-          .describe("Array of file paths to outline in one call"),
-        directory: z
-          .string()
-          .optional()
-          .describe("Directory to outline recursively (200 file limit)"),
-        url: z
-          .string()
-          .optional()
-          .describe("HTTP/HTTPS URL of an HTML or Markdown document to fetch and outline"),
+        target: z
+          .union([z.string(), z.array(z.string())])
+          .describe(
+            "What to outline: a file path, directory path, URL, or array of file paths. The mode is auto-detected: URLs by `http://`/`https://` prefix, directories by stat, arrays as multi-file.",
+          ),
       },
       execute: async (args, context): Promise<string> => {
-        const filesArg = Array.isArray(args.files) ? (args.files as unknown[]) : undefined;
-        const hasFilePath = typeof args.filePath === "string" && args.filePath.length > 0;
-        const hasFiles = (filesArg?.length ?? 0) > 0;
-        const hasDirectory = typeof args.directory === "string" && args.directory.length > 0;
-        const hasUrl = typeof args.url === "string" && args.url.length > 0;
-
-        // Mutual exclusion: exactly one of filePath, files, directory, url
-        const provided = [hasFilePath, hasFiles, hasDirectory, hasUrl].filter(Boolean).length;
-        if (provided === 0) {
-          throw new Error("Provide exactly one of 'filePath', 'files', 'directory', or 'url'");
-        }
-        if (provided > 1) {
-          throw new Error(
-            "Provide exactly ONE of 'filePath', 'files', 'directory', or 'url' — not multiple",
-          );
-        }
+        const target = args.target;
+        const hasUrl =
+          typeof target === "string" &&
+          (target.startsWith("http://") || target.startsWith("https://"));
+        const isArray = Array.isArray(target) && target.length > 0;
 
         // URL mode: fetch to temp file, then outline the cached copy
         if (hasUrl) {
-          const cachedPath = await fetchUrlToTempFile(args.url as string, ctx.storageDir, {
+          const cachedPath = await fetchUrlToTempFile(target as string, ctx.storageDir, {
             allowPrivate: ctx.config.url_fetch_allow_private === true,
           });
           const response = await callBridge(ctx, context, "outline", { file: cachedPath });
@@ -113,29 +98,40 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           return response.text as string;
         }
 
-        // Directory mode: discover source files recursively and batch outline
-        // Also auto-detect when filePath is a directory and route here
-        let dirArg = typeof args.directory === "string" ? args.directory : undefined;
-        if (!dirArg && typeof args.filePath === "string" && !Array.isArray(args.files)) {
-          try {
-            const { stat } = await import("node:fs/promises");
-            const resolved = resolve(context.directory, args.filePath);
-            const st = await stat(resolved);
-            if (st.isDirectory()) {
-              dirArg = args.filePath;
-            }
-          } catch {
-            // Not a directory or doesn't exist — fall through to normal file handling
+        // Multi-file mode
+        if (isArray) {
+          const response = await callBridge(ctx, context, "outline", {
+            files: target as string[],
+          });
+          if (response.success === false) {
+            throw new Error((response.message as string) || "outline failed");
           }
+          return formatOutlineText(response);
         }
 
-        if (dirArg) {
-          const dirPath = resolve(context.directory, dirArg);
+        // String mode: stat to disambiguate file vs directory
+        if (typeof target !== "string" || target.length === 0) {
+          throw new Error("'target' must be a non-empty string or array of strings");
+        }
+
+        let isDirectory = false;
+        try {
+          const { stat } = await import("node:fs/promises");
+          const resolved = resolve(context.directory, target);
+          const st = await stat(resolved);
+          isDirectory = st.isDirectory();
+        } catch {
+          // Path doesn't exist locally — fall through to single-file mode and
+          // let Rust report the real error with its preferred shape.
+        }
+
+        if (isDirectory) {
+          const dirPath = resolve(context.directory, target);
           const files = await discoverSourceFiles(dirPath);
           if (files.length === 0) {
             return JSON.stringify({
               success: false,
-              message: `No source files found under ${dirArg}`,
+              message: `No source files found under ${target}`,
             });
           }
           const response = await callBridge(ctx, context, "outline", { files });
@@ -145,14 +141,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           return formatOutlineText(response);
         }
 
-        if (Array.isArray(args.files) && args.files.length > 0) {
-          const response = await callBridge(ctx, context, "outline", { files: args.files });
-          if (response.success === false) {
-            throw new Error((response.message as string) || "outline failed");
-          }
-          return formatOutlineText(response);
-        }
-        const response = await callBridge(ctx, context, "outline", { file: args.filePath });
+        const response = await callBridge(ctx, context, "outline", { file: target });
         if (response.success === false) {
           throw new Error((response.message as string) || "outline failed");
         }

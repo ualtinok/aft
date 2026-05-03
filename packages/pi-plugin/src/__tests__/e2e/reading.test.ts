@@ -22,42 +22,36 @@ maybeDescribe("aft_outline + aft_zoom (real bridge)", () => {
   });
 
   test("outline single file — sample.ts lists functions and class", async () => {
-    const result = await harness.callTool("aft_outline", { filePath: "sample.ts" });
+    const result = await harness.callTool("aft_outline", { target: "sample.ts" });
     const text = harness.text(result);
     expect(text).toContain("funcA");
     expect(text).toContain("funcB");
     expect(text).toContain("SampleService");
   });
 
-  test("outline batched files", async () => {
+  test("outline batched files via array target", async () => {
     const result = await harness.callTool("aft_outline", {
-      files: [harness.path("sample.ts"), harness.path("imports.ts")],
+      target: [harness.path("sample.ts"), harness.path("imports.ts")],
     });
     const text = harness.text(result);
     expect(text).toContain("sample.ts");
     expect(text).toContain("imports.ts");
   });
 
-  test("outline directory", async () => {
-    const result = await harness.callTool("aft_outline", { directory: "." });
+  test("outline directory via target", async () => {
+    const result = await harness.callTool("aft_outline", { target: "." });
     const text = harness.text(result);
     expect(text).toContain("sample.ts");
     // Go file should be included
     expect(text).toContain("sample.go");
   });
 
-  test("outline rejects multiple exclusive params", async () => {
-    await expect(
-      harness.callTool("aft_outline", { filePath: "sample.ts", directory: "." }),
-    ).rejects.toThrow(/Provide exactly ONE/);
+  test("outline rejects empty string target", async () => {
+    await expect(harness.callTool("aft_outline", { target: "" })).rejects.toThrow(/non-empty/);
   });
 
-  test("outline rejects no params", async () => {
-    await expect(harness.callTool("aft_outline", {})).rejects.toThrow(/Provide exactly one/);
-  });
-
-  test("outline auto-detects directory passed as filePath", async () => {
-    const result = await harness.callTool("aft_outline", { filePath: "directory" });
+  test("outline auto-detects directory passed as string target", async () => {
+    const result = await harness.callTool("aft_outline", { target: "directory" });
     const text = harness.text(result);
     // Directory mode returned (tree output) — real content depends on fixture
     expect(text.length).toBeGreaterThan(0);

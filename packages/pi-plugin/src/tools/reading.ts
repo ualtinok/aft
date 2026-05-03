@@ -25,17 +25,10 @@ import {
 } from "./render-helpers.js";
 
 const OutlineParams = Type.Object({
-  filePath: Type.Optional(
-    Type.String({
-      description: "Path to a single file to outline. Directories are auto-detected.",
-    }),
-  ),
-  files: Type.Optional(
-    Type.Array(Type.String(), { description: "Array of file paths to outline in one call" }),
-  ),
-  directory: Type.Optional(
-    Type.String({ description: "Directory to outline recursively (200 file cap)" }),
-  ),
+  target: Type.Union([Type.String(), Type.Array(Type.String())], {
+    description:
+      "What to outline: a file path, directory path, or array of file paths. The mode is auto-detected: directories by stat, arrays as multi-file. Directory walks cap at 200 files.",
+  }),
 });
 
 const ZoomParams = Type.Object({
@@ -179,13 +172,11 @@ export function renderOutlineCall(
   theme: Theme,
   context: RenderContextLike,
 ) {
-  const summary = args.filePath
-    ? accentPath(theme, args.filePath)
-    : args.directory
-      ? `${theme.fg("muted", "dir")} ${accentPath(theme, args.directory)}`
-      : args.files && args.files.length > 0
-        ? theme.fg("accent", `${args.files.length} files`)
-        : undefined;
+  const summary = Array.isArray(args.target)
+    ? theme.fg("accent", `${args.target.length} files`)
+    : typeof args.target === "string"
+      ? accentPath(theme, args.target)
+      : undefined;
   return renderToolCall("outline", summary, theme, context);
 }
 
@@ -234,7 +225,7 @@ export function registerReadingTools(
       name: "aft_outline",
       label: "outline",
       description:
-        "Structural outline of source code or Markdown. For code, returns symbols (functions, classes, types) with line ranges. For Markdown/HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\nProvide exactly ONE of: `filePath`, `files`, or `directory`.",
+        "Structural outline of source code or Markdown. For code, returns symbols (functions, classes, types) with line ranges. For Markdown/HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\nPass a single `target`:\n  • file path → outline that file (with signatures)\n  • directory path → outline source files under it (recursively, up to 200 files)\n  • array of paths → outline multiple files in one call",
       parameters: OutlineParams,
       async execute(
         _toolCallId: string,
@@ -244,48 +235,46 @@ export function registerReadingTools(
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
-        const hasFilePath = typeof params.filePath === "string" && params.filePath.length > 0;
-        const hasFiles = Array.isArray(params.files) && params.files.length > 0;
-        const hasDirectory = typeof params.directory === "string" && params.directory.length > 0;
+        const target = params.target;
+        const isArray = Array.isArray(target) && target.length > 0;
 
-        const provided = [hasFilePath, hasFiles, hasDirectory].filter(Boolean).length;
-        if (provided === 0) {
-          throw new Error("Provide exactly one of 'filePath', 'files', or 'directory'");
-        }
-        if (provided > 1) {
-          throw new Error(
-            "Provide exactly ONE of 'filePath', 'files', or 'directory' — not multiple",
+        // Multi-file mode
+        if (isArray) {
+          const response = await callBridge(
+            bridge,
+            "outline",
+            { files: target as string[] },
+            extCtx,
           );
+          return textResult(formatOutlineText(response));
         }
 
-        // Auto-detect directory passed as filePath.
-        let dirArg = hasDirectory ? params.directory : undefined;
-        if (!dirArg && hasFilePath) {
-          try {
-            const resolved = resolve(extCtx.cwd, params.filePath as string);
-            const st = await stat(resolved);
-            if (st.isDirectory()) dirArg = params.filePath;
-          } catch {
-            // not a dir or missing — fall through
-          }
+        if (typeof target !== "string" || target.length === 0) {
+          throw new Error("'target' must be a non-empty string or array of strings");
         }
 
-        if (dirArg) {
-          const dirPath = resolve(extCtx.cwd, dirArg);
+        // Stat to disambiguate file vs directory
+        let isDirectory = false;
+        try {
+          const resolved = resolve(extCtx.cwd, target);
+          const st = await stat(resolved);
+          isDirectory = st.isDirectory();
+        } catch {
+          // path doesn't exist locally — fall through to single-file mode and let
+          // Rust report the real error
+        }
+
+        if (isDirectory) {
+          const dirPath = resolve(extCtx.cwd, target);
           const files = await discoverSourceFiles(dirPath);
           if (files.length === 0) {
-            return textResult(`No source files found under ${dirArg}`);
+            return textResult(`No source files found under ${target}`);
           }
           const response = await callBridge(bridge, "outline", { files }, extCtx);
           return textResult(formatOutlineText(response));
         }
 
-        if (hasFiles) {
-          const response = await callBridge(bridge, "outline", { files: params.files }, extCtx);
-          return textResult(formatOutlineText(response));
-        }
-
-        const response = await callBridge(bridge, "outline", { file: params.filePath }, extCtx);
+        const response = await callBridge(bridge, "outline", { file: target }, extCtx);
         return textResult(formatOutlineText(response));
       },
       renderCall(args, theme, context) {

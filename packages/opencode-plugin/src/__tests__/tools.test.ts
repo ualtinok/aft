@@ -78,7 +78,7 @@ describe("Tool round-trips", () => {
     createBridge();
     const tools = readingTools(createPluginContext(pool));
 
-    const text = await tools.aft_outline.execute({ filePath: FIXTURE_FILE }, sdkCtx);
+    const text = await tools.aft_outline.execute({ target: FIXTURE_FILE }, sdkCtx);
 
     // Output is now tree-formatted text, not JSON
     expect(typeof text).toBe("string");

@@ -117,7 +117,7 @@ describe("Pi background notifications", () => {
     // The wake path must always pass `followUp` so a turn that starts
     // between our isActive check and the debounced send still queues
     // cleanly instead of throwing.
-    expect(sendUserMessage.mock.calls[0][1]).toEqual({ deliverAs: "followUp" });
+    expect(sendUserMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer" });
   });
 
   test("push completion lands in pending and wakes when idle", async () => {

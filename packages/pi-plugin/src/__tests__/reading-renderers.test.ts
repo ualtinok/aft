@@ -17,7 +17,7 @@ import { makeContext, makeResult, mockTheme, renderToString } from "./render-tes
 describe("reading renderers", () => {
   test("renderOutlineCall and renderZoomCall show targets", () => {
     const outline = renderToString(
-      renderOutlineCall({ filePath: "src/a.ts" }, mockTheme, makeContext({ filePath: "src/a.ts" })),
+      renderOutlineCall({ target: "src/a.ts" }, mockTheme, makeContext({ target: "src/a.ts" })),
     );
     const zoom = renderToString(
       renderZoomCall(

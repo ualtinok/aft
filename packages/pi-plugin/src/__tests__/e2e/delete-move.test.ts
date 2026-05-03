@@ -35,8 +35,31 @@ maybeDescribe("aft_delete + aft_move (real bridge)", () => {
   test("aft_delete removes a file", async () => {
     await writeFixture(harness, "doomed.ts", "export const x = 1;\n");
     expect(await exists(harness.path("doomed.ts"))).toBe(true);
-    await harness.callTool("aft_delete", { filePath: "doomed.ts" });
+    await harness.callTool("aft_delete", { files: ["doomed.ts"] });
     expect(await exists(harness.path("doomed.ts"))).toBe(false);
+  });
+
+  test("aft_delete removes multiple files in one call", async () => {
+    await writeFixture(harness, "bulk-a.ts", "a\n");
+    await writeFixture(harness, "bulk-b.ts", "b\n");
+    await writeFixture(harness, "bulk-c.ts", "c\n");
+    await harness.callTool("aft_delete", {
+      files: ["bulk-a.ts", "bulk-b.ts", "bulk-c.ts"],
+    });
+    expect(await exists(harness.path("bulk-a.ts"))).toBe(false);
+    expect(await exists(harness.path("bulk-b.ts"))).toBe(false);
+    expect(await exists(harness.path("bulk-c.ts"))).toBe(false);
+  });
+
+  test("aft_delete reports skipped files in partial failure", async () => {
+    await writeFixture(harness, "real.ts", "x\n");
+    const result = await harness.callTool("aft_delete", {
+      files: ["real.ts", "does-not-exist.ts"],
+    });
+    expect(await exists(harness.path("real.ts"))).toBe(false);
+    const text = String(result?.content?.[0]?.text ?? "");
+    // Result text mentions partial completion
+    expect(text).toMatch(/Deleted 1\/2/);
   });
 
   test("aft_move renames a file and preserves contents", async () => {

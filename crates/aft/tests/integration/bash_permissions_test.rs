@@ -82,11 +82,10 @@ fn rm_outside_project_root_requires_external_directory() {
     assert!(
         response["asks"].as_array().unwrap().iter().any(|ask| {
             ask["kind"] == "external_directory"
-                && ask["patterns"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.as_str().is_some_and(|p| p.contains("tmp/") && p.ends_with("/*")))
+                && ask["patterns"].as_array().unwrap().iter().any(|p| {
+                    p.as_str()
+                        .is_some_and(|p| p.contains("tmp/") && p.ends_with("/*"))
+                })
         }),
         "response: {response:?}"
     );
@@ -133,11 +132,10 @@ fn chained_cd_then_rm_uses_subcommand_directory() {
     assert!(
         response["asks"].as_array().unwrap().iter().any(|ask| {
             ask["kind"] == "external_directory"
-                && ask["patterns"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.as_str().is_some_and(|p| p.contains("tmp/") && p.ends_with("/*")))
+                && ask["patterns"].as_array().unwrap().iter().any(|p| {
+                    p.as_str()
+                        .is_some_and(|p| p.contains("tmp/") && p.ends_with("/*"))
+                })
         }),
         "response: {response:?}"
     );
