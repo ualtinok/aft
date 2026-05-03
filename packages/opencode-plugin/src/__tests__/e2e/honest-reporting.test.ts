@@ -83,23 +83,75 @@ maybeDescribe("e2e honest reporting surfaces", () => {
     };
   }
 
-  test("aft_outline directory mode reports skipped parse errors while keeping valid outlines", async () => {
+  test("aft_outline directory mode returns complete true below walk cap", async () => {
     const { h, tools, sdkCtx } = await toolHarness();
-    await mkdir(h.path("outline-mixed"), { recursive: true });
+    await mkdir(h.path("outline-small"), { recursive: true });
     await writeFile(
-      h.path("outline-mixed", "good.ts"),
+      h.path("outline-small", "good.ts"),
       "export function good() { return 1; }\n",
       "utf8",
     );
-    await writeFile(h.path("outline-mixed", "bad.ts"), "export function bad( {\n", "utf8");
+    await writeFile(h.path("outline-small", "bad.ts"), "export function bad( {\n", "utf8");
 
-    const output = await tools.aft_outline.execute({ target: "outline-mixed" }, sdkCtx);
+    const output = await tools.aft_outline.execute({ target: "outline-small" }, sdkCtx);
+    const response = JSON.parse(output) as Record<string, unknown>;
 
-    expect(output).toContain("good.ts");
-    expect(output).toContain("good");
-    expect(output).toContain("Skipped 1 file(s):");
-    expect(output).toContain("bad.ts");
-    expect(output).toContain("parse_error");
+    expect(response.complete).toBe(true);
+    expect(response.walk_truncated).toBe(false);
+    const skipped = response.skipped_files as Array<{ file: string; reason: string }>;
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].file).toMatch(/outline-small[/\\]bad\.ts$/);
+    expect(skipped[0].reason).toBe("parse_error");
+    expect(String(response.text)).toContain("good.ts");
+    expect(String(response.text)).toContain("good");
+  });
+
+  test("aft_outline directory mode returns complete false when Rust walk truncates", async () => {
+    const { h, tools, sdkCtx } = await toolHarness();
+    await mkdir(h.path("outline-large"), { recursive: true });
+    for (let index = 0; index < 205; index += 1) {
+      await writeFile(
+        h.path("outline-large", `file-${String(index).padStart(3, "0")}.ts`),
+        `export const value${index} = ${index};\n`,
+        "utf8",
+      );
+    }
+
+    const output = await tools.aft_outline.execute({ target: "outline-large" }, sdkCtx);
+    const response = JSON.parse(output) as Record<string, unknown>;
+
+    expect(response.complete).toBe(false);
+    expect(response.walk_truncated).toBe(true);
+    expect(Array.isArray(response.skipped_files)).toBe(true);
+    expect(String(response.text)).toContain("file-000.ts");
+  });
+
+  test("aft_outline single file target keeps text output behavior", async () => {
+    const { h, tools, sdkCtx } = await toolHarness();
+    await writeFile(h.path("single.ts"), "export function single() { return 1; }\n", "utf8");
+
+    const output = await tools.aft_outline.execute({ target: "single.ts" }, sdkCtx);
+
+    expect(() => JSON.parse(output)).toThrow();
+    expect(output).toContain("single.ts");
+    expect(output).toContain("single");
+  });
+
+  test("aft_outline array target keeps multi-file text output behavior", async () => {
+    const { h, tools, sdkCtx } = await toolHarness();
+    await writeFile(h.path("array-a.ts"), "export function arrayA() { return 1; }\n", "utf8");
+    await writeFile(h.path("array-b.ts"), "export function arrayB() { return 2; }\n", "utf8");
+
+    const output = await tools.aft_outline.execute(
+      { target: [h.path("array-a.ts"), h.path("array-b.ts")] },
+      sdkCtx,
+    );
+
+    expect(() => JSON.parse(output)).toThrow();
+    expect(output).toContain("array-a.ts");
+    expect(output).toContain("array-b.ts");
+    expect(output).toContain("arrayA");
+    expect(output).toContain("arrayB");
   });
 
   test("ast_grep_search reports no_files_matched_scope separately from zero hits", async () => {

@@ -19,7 +19,7 @@ use crate::protocol::{
     ProgressFrame, ProgressKind, RawRequest, Response, ERROR_PERMISSION_REQUIRED,
 };
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const INLINE_OUTPUT_LIMIT: usize = 30 * 1024;
 const BLOCKED_ENV_VARS: &[&str] = &[
     "LD_PRELOAD",

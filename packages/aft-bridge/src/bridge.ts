@@ -112,7 +112,7 @@ export interface ConfigureWarning {
 /** Context passed to {@link BridgeOptions.onConfigureWarnings} after the first successful configure. */
 export interface ConfigureWarningsContext {
   projectRoot: string;
-  sessionId?: string;
+  sessionId?: string | null;
   client?: unknown;
   warnings: ConfigureWarning[];
 }
@@ -207,13 +207,8 @@ export class BinaryBridge {
   private onBashCompletion:
     | ((completion: BashCompletedPayload, bridge: BinaryBridge) => void | Promise<void>)
     | undefined;
-  /**
-   * Last client passed via `send({ configureWarningClient })`. Cached so that
-   * server-pushed `configure_warnings` frames (which arrive without a
-   * triggering request) can still be delivered through the same plugin
-   * pathway as synchronous warnings.
-   */
-  private configureWarningClient: unknown = undefined;
+  /** Notification clients keyed by session_id for async configure warning pushes. */
+  private configureWarningClients = new Map<string, unknown>();
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
   private errorPrefix: string;
 
@@ -267,6 +262,18 @@ export class BinaryBridge {
     }
 
     this.ensureSpawned();
+
+    // Capture session_id early so auto-configure can reuse the initiating
+    // session's notification client when the deferred configure warning frame
+    // arrives later. One project bridge can serve many sessions, so keep this
+    // per-session instead of one bridge-wide "last client".
+    const requestSessionId =
+      typeof params.session_id === "string" && params.session_id.length > 0
+        ? params.session_id
+        : undefined;
+    if (requestSessionId && options?.configureWarningClient !== undefined) {
+      this.configureWarningClients.set(requestSessionId, options.configureWarningClient);
+    }
 
     // Auto-configure project root + plugin config on first command, then check version.
     // configured is set AFTER success to prevent skipping configuration on failure (#18).
@@ -351,21 +358,6 @@ export class BinaryBridge {
     // repos). Defaults to the bridge-wide timeout otherwise.
     const effectiveTimeoutMs = options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
 
-    // Cache the latest client passed for warning delivery so server-pushed
-    // configure_warnings frames (which have no request id) can still reach
-    // the plugin's notification path.
-    if (options?.configureWarningClient !== undefined) {
-      this.configureWarningClient = options.configureWarningClient;
-    }
-
-    // Capture session_id (if present) for per-request log prefixing. Bridge-
-    // lifecycle logs (spawn, version, idle) stay session-less; only logs that
-    // describe what happened to THIS specific request should carry the session.
-    const requestSessionId =
-      typeof params.session_id === "string" && params.session_id.length > 0
-        ? params.session_id
-        : undefined;
-
     const keepBridgeOnTimeout = options?.keepBridgeOnTimeout === true;
 
     return new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -427,7 +419,9 @@ export class BinaryBridge {
       await this.onConfigureWarnings({
         projectRoot: this.cwd,
         sessionId,
-        client: options?.configureWarningClient,
+        client:
+          options?.configureWarningClient ??
+          (sessionId ? this.configureWarningClients.get(sessionId) : undefined),
         warnings: configResult.warnings,
       });
     } catch (err) {
@@ -449,13 +443,13 @@ export class BinaryBridge {
     const warnings = frame.warnings;
     if (!Array.isArray(warnings) || warnings.length === 0) return;
     const projectRoot = typeof frame.project_root === "string" ? frame.project_root : this.cwd;
+    const rawSessionId = frame.session_id;
+    const sessionId =
+      typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : null;
     await this.onConfigureWarnings({
       projectRoot,
-      // The frame is a server-side push not tied to a particular request,
-      // so we don't have a session id. Plugins can still dedupe on warning
-      // content + project_root.
-      sessionId: undefined,
-      client: this.configureWarningClient,
+      sessionId,
+      client: sessionId ? this.configureWarningClients.get(sessionId) : undefined,
       warnings: warnings as ConfigureWarning[],
     });
   }

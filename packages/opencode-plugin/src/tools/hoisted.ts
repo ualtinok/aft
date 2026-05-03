@@ -100,14 +100,20 @@ export const _buildUnifiedDiffForTest = (fp: string, before: string, after: stri
  * each other are merged into a single hunk).
  */
 function buildUnifiedDiff(fp: string, before: string, after: string): string {
-  // Skip diff for very large files to avoid blocking the event loop
-  const SIZE_CAP = 100 * 1024; // 100KB
-  if (before.length > SIZE_CAP || after.length > SIZE_CAP) {
-    return `Index: ${fp}\n(diff skipped: file exceeds ${SIZE_CAP / 1024}KB)\n`;
-  }
-
   const beforeLines = before.split("\n");
   const afterLines = after.split("\n");
+
+  // LCS is O(n*m) in lines; a 5000x5000 matrix uses ~100 MB and ~250 ms,
+  // which we accept for normal source files. Above that we skip diff
+  // generation rather than block the plugin event loop on a single edit.
+  // Byte-size gating misses the real cost (a 100 KB minified bundle is one
+  // line; a 30 KB markdown file with 1500 lines is the expensive case).
+  const LINE_CAP = 5000;
+  if (beforeLines.length > LINE_CAP || afterLines.length > LINE_CAP) {
+    const limit = Math.max(beforeLines.length, afterLines.length);
+    return `Index: ${fp}\n(diff skipped: file has ${limit} lines, above ${LINE_CAP}-line diff cap)\n`;
+  }
+
   const ops = diffLines(beforeLines, afterLines);
 
   // No changes → empty diff (caller decides whether to render the header).

@@ -182,7 +182,7 @@ fn read_from_corrupt_file_returns_none_and_logs_warning() {
 }
 
 #[test]
-fn count_stale_files_marks_deleted_files_as_stale() {
+fn stale_file_detected_after_deletion() {
     let project = tempfile::tempdir().expect("create project dir");
     let storage = tempfile::tempdir().expect("create storage dir");
     let (index, source_file) = build_test_index(project.path());
@@ -193,7 +193,11 @@ fn count_stale_files_marks_deleted_files_as_stale() {
     let restored = SemanticIndex::read_from_disk(storage.path(), "stale-project", None)
         .expect("restore semantic index from disk");
 
-    assert_eq!(restored.count_stale_files(), 1);
+    // After deletion, the single indexed file must be stale.
+    assert!(
+        restored.is_file_stale(&source_file),
+        "deleted file should be detected as stale"
+    );
 }
 
 #[test]
@@ -280,9 +284,8 @@ fn write_roundtrip_preserves_subsecond_mtime_precision() {
         !restored.is_file_stale(&source_file),
         "unchanged file flagged stale after disk round-trip — mtime precision lost"
     );
-    assert_eq!(
-        restored.count_stale_files(),
-        0,
+    assert!(
+        !restored.is_file_stale(&source_file),
         "no file should be stale after a fresh round-trip"
     );
 }

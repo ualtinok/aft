@@ -70,6 +70,11 @@ pub struct BashCompletedFrame {
 pub struct ConfigureWarningsFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
+    /// Session id from the configure request that spawned the deferred walk.
+    /// Project-shared bridges can serve multiple sessions, so plugins need this
+    /// to route async warning notifications back to the initiating session.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Project root the warnings refer to. Plugins use this to scope the
     /// session-id deduplication of repeated identical warnings.
     pub project_root: String,
@@ -126,14 +131,99 @@ impl ConfigureWarningsFrame {
         max_callgraph_files: usize,
         warnings: Vec<serde_json::Value>,
     ) -> Self {
+        Self::new_with_session_id(
+            None,
+            project_root,
+            source_file_count,
+            source_file_count_exceeds_max,
+            max_callgraph_files,
+            warnings,
+        )
+    }
+
+    pub fn new_with_session_id(
+        session_id: Option<String>,
+        project_root: impl Into<String>,
+        source_file_count: usize,
+        source_file_count_exceeds_max: bool,
+        max_callgraph_files: usize,
+        warnings: Vec<serde_json::Value>,
+    ) -> Self {
         Self {
             frame_type: "configure_warnings",
+            session_id,
             project_root: project_root.into(),
             source_file_count,
             source_file_count_exceeds_max,
             max_callgraph_files,
             warnings,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize)]
+    struct ConfigureWarningsFrameRoundTrip {
+        #[serde(rename = "type")]
+        frame_type: String,
+        session_id: Option<String>,
+        project_root: String,
+        source_file_count: usize,
+        max_callgraph_files: usize,
+        warnings: Vec<serde_json::Value>,
+    }
+
+    #[test]
+    fn configure_warnings_frame_serializes_null_session_id_by_default() {
+        let frame = ConfigureWarningsFrame::new(
+            "/repo",
+            42,
+            false,
+            5_000,
+            vec![json!({
+                "kind": "formatter_not_installed",
+                "tool": "biome",
+                "hint": "Install biome."
+            })],
+        );
+
+        let json = serde_json::to_string(&frame).expect("serialize ConfigureWarningsFrame");
+        let decoded: ConfigureWarningsFrameRoundTrip =
+            serde_json::from_str(&json).expect("deserialize ConfigureWarningsFrame JSON");
+
+        assert_eq!(decoded.session_id, None);
+    }
+
+    #[test]
+    fn configure_warnings_frame_serializes_session_id() {
+        let frame = ConfigureWarningsFrame::new_with_session_id(
+            Some("session-1".to_string()),
+            "/repo",
+            42,
+            false,
+            5_000,
+            vec![json!({
+                "kind": "formatter_not_installed",
+                "tool": "biome",
+                "hint": "Install biome."
+            })],
+        );
+
+        let json = serde_json::to_string(&frame).expect("serialize ConfigureWarningsFrame");
+        let decoded: ConfigureWarningsFrameRoundTrip =
+            serde_json::from_str(&json).expect("deserialize ConfigureWarningsFrame JSON");
+
+        assert_eq!(decoded.frame_type, "configure_warnings");
+        assert_eq!(decoded.session_id.as_deref(), Some("session-1"));
+        assert_eq!(decoded.project_root, "/repo");
+        assert_eq!(decoded.source_file_count, 42);
+        assert_eq!(decoded.max_callgraph_files, 5_000);
+        assert_eq!(decoded.warnings[0]["tool"], "biome");
     }
 }
 

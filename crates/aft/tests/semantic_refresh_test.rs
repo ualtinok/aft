@@ -126,8 +126,7 @@ fn refresh_is_noop_when_nothing_changed() {
     assert!(summary.is_noop(), "summary should be noop, got {summary:?}");
     assert_eq!(summary.deleted, 0);
     assert_eq!(summary.changed, 0);
-    assert_eq!(summary.new_files, 0);
-    assert_eq!(summary.added_entries, 0);
+    assert_eq!(summary.added, 0);
     assert_eq!(stub.total_embedded_texts(), 0, "no embeds for noop");
     assert_eq!(index.entry_count(), entries_before, "entries preserved");
 }
@@ -161,8 +160,8 @@ fn refresh_re_embeds_only_changed_file() {
 
     assert_eq!(summary.changed, 1, "exactly one file changed");
     assert_eq!(summary.deleted, 0);
-    assert_eq!(summary.new_files, 0);
-    assert!(summary.added_entries > 0, "should re-embed something");
+    assert_eq!(summary.added, 0);
+    assert!(stub.total_embedded_texts() > 0, "should re-embed something");
 
     // We embedded only file_a's chunks, not file_b's. Total embedded texts
     // must be strictly less than entries_before (which covered both files).
@@ -204,8 +203,7 @@ fn refresh_drops_entries_for_files_no_longer_in_walk() {
 
     assert_eq!(summary.deleted, 1, "file_b reported as deleted");
     assert_eq!(summary.changed, 0);
-    assert_eq!(summary.new_files, 0);
-    assert_eq!(summary.added_entries, 0, "no embeds for deletion-only");
+    assert_eq!(summary.added, 0);
     assert_eq!(stub.total_embedded_texts(), 0, "no embed calls");
     assert_eq!(
         count_entries_for_file(&index, &file_b),
@@ -243,10 +241,10 @@ fn refresh_embeds_new_files_added_to_walk() {
         )
         .expect("refresh succeeds");
 
-    assert_eq!(summary.new_files, 1, "file_c discovered as new");
+    assert_eq!(summary.added, 1, "file_c discovered as new");
     assert_eq!(summary.changed, 0);
     assert_eq!(summary.deleted, 0);
-    assert!(summary.added_entries > 0);
+    assert!(stub.total_embedded_texts() > 0);
     assert!(stub.total_embedded_texts() > 0, "embedded only file_c");
 
     // Index grew strictly larger (kept original, added new).
@@ -297,8 +295,7 @@ fn refresh_handles_changed_plus_deleted_plus_new_in_one_call() {
 
     assert_eq!(summary.deleted, 1, "file_b deleted");
     assert_eq!(summary.changed, 1, "file_a changed");
-    assert_eq!(summary.new_files, 1, "file_c new");
-    assert!(summary.added_entries > 0);
+    assert_eq!(summary.added, 1, "file_c new");
 
     // file_b entries are gone.
     assert_eq!(count_entries_for_file(&index, &file_b), 0);

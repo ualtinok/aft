@@ -10,7 +10,7 @@ import { trackBgTask } from "../bg-notifications.js";
 import type { PluginContext } from "../types.js";
 import { bridgeFor, callBridge, resolveSessionId } from "./_shared.js";
 
-const DEFAULT_BASH_TIMEOUT_MS = 120_000;
+const DEFAULT_BASH_TIMEOUT_MS = 30_000;
 const BASH_TRANSPORT_TIMEOUT_OVERHEAD_MS = 5_000;
 
 // Background task completion metadata shape (from Track D)
@@ -37,7 +37,7 @@ const BashParams = Type.Object({
   timeout: Type.Optional(
     Type.Number({
       description:
-        "Maximum execution time in milliseconds. Default: 120000 (2 minutes). Commands exceeding this are terminated with SIGKILL.",
+        "Maximum execution time in milliseconds. Default: 30000 (30 seconds). Commands exceeding this are terminated with SIGKILL. For commands expected to run longer than 30s, use background: true instead.",
     }),
   ),
   workdir: Type.Optional(

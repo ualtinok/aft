@@ -140,10 +140,35 @@ describe("buildUnifiedDiff", () => {
     expect(deletions).toBe(3);
   });
 
-  test("over-100KB files skip diff computation", () => {
-    const big = "x".repeat(101 * 1024);
-    const diff = buildUnifiedDiff("file.ts", big, "small");
+  test("files with too many lines skip diff computation", () => {
+    // The cost guard is line count, not bytes — LCS is O(n*m) in lines.
+    // A short string with 5001 newlines exceeds the 5000-line cap.
+    const tooManyLines = Array.from({ length: 5001 }, () => "x").join("\n");
+    const diff = buildUnifiedDiff("file.ts", tooManyLines, "small");
     expect(diff).toContain("(diff skipped");
+    expect(diff).toMatch(/file has \d+ lines/);
+  });
+
+  test("large-byte minified file with few lines is still diffed", () => {
+    // Regression: a 100KB+ but few-line file (e.g., minified bundle, JSON
+    // blob, large markdown table) was previously rejected by a byte-size
+    // gate even though LCS cost is trivial. Now it's diffed normally.
+    const huge_one_line = "x".repeat(150 * 1024);
+    const diff = buildUnifiedDiff("bundle.min.js", huge_one_line, `${huge_one_line}\n// added`);
+    expect(diff).not.toContain("(diff skipped");
+    expect(diff).toContain("@@");
+  });
+
+  test("3000-line file under the cap is diffed normally", () => {
+    // The user-reported manager.ts case: 3084 lines, ~114 KB. Old byte-size
+    // gate skipped it; new line gate diffs it correctly.
+    const lines = Array.from({ length: 3000 }, (_, i) => `// line ${i + 1}`);
+    const before = lines.join("\n");
+    const after = lines.map((l, i) => (i === 1500 ? "// EDITED" : l)).join("\n");
+    const diff = buildUnifiedDiff("manager.ts", before, after);
+    expect(diff).not.toContain("(diff skipped");
+    expect(diff).toContain("@@");
+    expect(diff).toContain("// EDITED");
   });
 
   test("regression: 2000-line file with apply_patch-style 5-line edit", () => {

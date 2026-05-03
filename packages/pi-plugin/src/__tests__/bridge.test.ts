@@ -57,6 +57,131 @@ describe("Pi BinaryBridge", () => {
     ]);
   });
 
+  test("routes pushed configure_warnings frames with session_id to the warning handler", async () => {
+    const deliveries: unknown[] = [];
+    bridge = new BinaryBridge("/tmp/aft-does-not-need-to-exist", PROJECT_CWD, {
+      timeoutMs: 5_000,
+      onConfigureWarnings: (context) => {
+        deliveries.push(context);
+      },
+    });
+
+    (bridge as any).onStdoutData(
+      `${JSON.stringify({
+        type: "configure_warnings",
+        session_id: "session-1",
+        project_root: "/repo",
+        source_file_count: 10,
+        source_file_count_exceeds_max: false,
+        max_callgraph_files: 5_000,
+        warnings: [
+          {
+            kind: "formatter_not_installed",
+            language: "typescript",
+            tool: "biome",
+            hint: "Install biome.",
+          },
+        ],
+      })}\n`,
+    );
+
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toEqual({
+      projectRoot: "/repo",
+      sessionId: "session-1",
+      client: undefined,
+      warnings: [
+        {
+          kind: "formatter_not_installed",
+          language: "typescript",
+          tool: "biome",
+          hint: "Install biome.",
+        },
+      ],
+    });
+  });
+
+  test("handles pushed configure_warnings frames with missing session_id gracefully", async () => {
+    const deliveries: unknown[] = [];
+    bridge = new BinaryBridge("/tmp/aft-does-not-need-to-exist", PROJECT_CWD, {
+      timeoutMs: 5_000,
+      onConfigureWarnings: (context) => {
+        deliveries.push(context);
+      },
+    });
+
+    expect(() => {
+      (bridge as any).onStdoutData(
+        `${JSON.stringify({
+          type: "configure_warnings",
+          project_root: "/repo",
+          source_file_count: 10,
+          source_file_count_exceeds_max: false,
+          max_callgraph_files: 5_000,
+          warnings: [
+            {
+              kind: "formatter_not_installed",
+              language: "typescript",
+              tool: "biome",
+              hint: "Install biome.",
+            },
+          ],
+        })}\n`,
+      );
+    }).not.toThrow();
+
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toEqual({
+      projectRoot: "/repo",
+      sessionId: null,
+      client: undefined,
+      warnings: [
+        {
+          kind: "formatter_not_installed",
+          language: "typescript",
+          tool: "biome",
+          hint: "Install biome.",
+        },
+      ],
+    });
+  });
+
+  test("uses the session_id to pick the matching configure warning client", async () => {
+    const deliveries: unknown[] = [];
+    const clientA = { name: "client-a" };
+    const clientB = { name: "client-b" };
+    bridge = new BinaryBridge("/tmp/aft-does-not-need-to-exist", PROJECT_CWD, {
+      timeoutMs: 5_000,
+      onConfigureWarnings: (context) => {
+        deliveries.push(context);
+      },
+    });
+    (bridge as any).configureWarningClients.set("session-a", clientA);
+    (bridge as any).configureWarningClients.set("session-b", clientB);
+
+    (bridge as any).onStdoutData(
+      `${JSON.stringify({
+        type: "configure_warnings",
+        session_id: "session-a",
+        project_root: "/repo",
+        source_file_count: 10,
+        source_file_count_exceeds_max: false,
+        max_callgraph_files: 5_000,
+        warnings: [
+          {
+            kind: "formatter_not_installed",
+            language: "typescript",
+            tool: "biome",
+            hint: "Install biome.",
+          },
+        ],
+      })}\n`,
+    );
+
+    expect(deliveries).toHaveLength(1);
+    expect((deliveries[0] as { client?: unknown }).client).toBe(clientA);
+  });
+
   test("per-request timeoutMs override rejects before bridge-wide default", async () => {
     // Fake binary: reads stdin and sleeps forever without responding. We want
     // to prove the per-request override (50ms) fires instead of the bridge

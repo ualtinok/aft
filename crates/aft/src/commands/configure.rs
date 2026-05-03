@@ -1,7 +1,9 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use crossbeam_channel::unbounded;
 use notify::{RecursiveMode, Watcher};
@@ -21,6 +23,67 @@ use crate::search_index::{
 };
 use crate::semantic_index::SemanticIndex;
 use crate::{slog_info, slog_warn};
+
+static WATCHER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn create_project_watcher(
+    root_path: PathBuf,
+    tx: mpsc::Sender<notify::Result<notify::Event>>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(&root_path, RecursiveMode::Recursive)?;
+    Ok(watcher)
+}
+
+fn install_project_watcher_with<W, E, F>(
+    ctx: &AppContext,
+    root_path: &Path,
+    attach: F,
+) -> thread::JoinHandle<()>
+where
+    W: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+    F: FnOnce(PathBuf, mpsc::Sender<notify::Result<notify::Event>>) -> Result<W, E>
+        + Send
+        + 'static,
+{
+    // Drop old synchronous watcher/receiver before replacing them (re-configure).
+    *ctx.watcher().borrow_mut() = None;
+    *ctx.watcher_rx().borrow_mut() = None;
+
+    let generation = WATCHER_GENERATION
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    let (tx, rx) = mpsc::channel();
+    *ctx.watcher_rx().borrow_mut() = Some(rx);
+
+    let root_path = root_path.to_path_buf();
+    let session_id_for_bg = log_ctx::current_session();
+    thread::spawn(move || {
+        log_ctx::with_session(session_id_for_bg, || match attach(root_path.clone(), tx) {
+            Ok(_watcher) => {
+                if WATCHER_GENERATION.load(Ordering::SeqCst) == generation {
+                    slog_info!("watcher started: {}", root_path.display());
+                }
+                while WATCHER_GENERATION.load(Ordering::SeqCst) == generation {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            Err(error) => {
+                if WATCHER_GENERATION.load(Ordering::SeqCst) == generation {
+                    log::debug!(
+                        "[aft] watcher init failed: {} — callers will work with stale data",
+                        error
+                    );
+                }
+            }
+        });
+    })
+}
+
+fn install_project_watcher(ctx: &AppContext, root_path: &Path) {
+    let _ = install_project_watcher_with(ctx, root_path, create_project_watcher);
+}
 
 fn normalize_absolute_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -1142,11 +1205,23 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                 let mut warmed_files = 0usize;
                 let mut skipped_files = 0usize;
                 if let Ok(mut cache) = symbol_cache.write() {
-                    cache.set_project_root(root_clone.clone());
+                    if !cache.set_project_root_for_generation(
+                        symbol_cache_generation,
+                        root_clone.clone(),
+                    ) {
+                        slog_info!("skipping stale symbol cache prewarm after reconfigure");
+                        return;
+                    }
                     if let Some(storage_dir) = symbol_storage.as_deref() {
-                        let loaded_count = cache.load_from_disk(storage_dir, &symbol_project_key);
+                        let loaded_count = cache.load_from_disk_for_generation(
+                            symbol_cache_generation,
+                            storage_dir,
+                            &symbol_project_key,
+                        );
                         slog_info!("loaded symbol cache from disk: {} files", loaded_count);
                     }
+                } else {
+                    return;
                 }
                 let mut parser = crate::parser::FileParser::with_symbol_cache_generation(
                     symbol_cache.clone(),
@@ -1171,6 +1246,10 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                 let total_files = symbol_cache.read().map(|cache| cache.len()).unwrap_or(0);
                 if let Some(storage_dir) = symbol_storage.as_deref() {
                     if let Ok(cache) = symbol_cache.read() {
+                        if cache.generation() != symbol_cache_generation {
+                            slog_info!("skipping stale symbol cache persistence after reconfigure");
+                            return;
+                        }
                         match crate::symbol_cache_disk::write_to_disk(
                             &cache,
                             storage_dir,
@@ -1242,17 +1321,6 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                                 &semantic_project_key,
                                 Some(&fingerprint_key),
                             ) {
-                                let stale_count = cached.count_stale_files();
-                                if stale_count == 0 {
-                                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
-                                        stage: "loaded_cached_index".to_string(),
-                                        files: None,
-                                        entries_done: Some(cached.entry_count()),
-                                        entries_total: Some(cached.entry_count()),
-                                    });
-                                    return Ok(cached);
-                                }
-
                                 // Try incremental refresh: re-embed only changed/new files,
                                 // drop entries for deleted files, keep everything else.
                                 // This is the hot path for restart on a project with a
@@ -1280,14 +1348,14 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                                 let mut embed = |texts: Vec<String>| model.embed(texts);
                                 let _ = tx_progress.send(SemanticIndexEvent::Progress {
                                     stage: "refreshing_stale_files".to_string(),
-                                    files: Some(stale_count),
+                                    files: None,
                                     entries_done: None,
                                     entries_total: None,
                                 });
                                 let mut progress = |done: usize, total: usize| {
                                     let _ = tx_progress.send(SemanticIndexEvent::Progress {
                                         stage: "embedding_stale_symbols".to_string(),
-                                        files: Some(stale_count),
+                                        files: None,
                                         entries_done: Some(done),
                                         entries_total: Some(total),
                                     });
@@ -1301,17 +1369,24 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                                     &mut progress,
                                 ) {
                                     Ok(summary) => {
-                                        slog_info!(
-                                            "semantic index: refreshed incrementally — {} changed, {} new, {} deleted, {} entries added (kept {} cached)",
-                                            summary.changed,
-                                            summary.new_files,
-                                            summary.deleted,
-                                            summary.added_entries,
-                                            cached.len(),
-                                        );
-                                        cached.set_fingerprint(fingerprint);
-                                        if let Some(ref dir) = semantic_storage {
-                                            cached.write_to_disk(dir, &semantic_project_key);
+                                        if summary.is_noop() {
+                                            slog_info!(
+                                                "semantic index: cached index is current ({} entries)",
+                                                cached.entry_count(),
+                                            );
+                                        } else {
+                                            slog_info!(
+                                                "semantic index: refreshed incrementally — {} changed, {} new, {} deleted, {} total processed (kept {} cached)",
+                                                summary.changed,
+                                                summary.added,
+                                                summary.deleted,
+                                                summary.total_processed,
+                                                cached.len(),
+                                            );
+                                            cached.set_fingerprint(fingerprint);
+                                            if let Some(ref dir) = semantic_storage {
+                                                cached.write_to_disk(dir, &semantic_project_key);
+                                            }
                                         }
                                         let _ = tx_progress.send(SemanticIndexEvent::Progress {
                                             stage: "loaded_cached_index".to_string(),
@@ -1432,32 +1507,10 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    // Drop old watcher/receiver before creating new ones (re-configure)
-    *ctx.watcher().borrow_mut() = None;
-    *ctx.watcher_rx().borrow_mut() = None;
-
-    // Spawn file watcher for live invalidation
-    let (tx, rx) = mpsc::channel();
-    match notify::recommended_watcher(tx) {
-        Ok(mut w) => {
-            if let Err(e) = w.watch(&root_path, RecursiveMode::Recursive) {
-                log::debug!(
-                    "[aft] watcher watch error: {} — callers will work with stale data",
-                    e
-                );
-            } else {
-                slog_info!("watcher started: {}", root_path.display());
-            }
-            *ctx.watcher().borrow_mut() = Some(w);
-            *ctx.watcher_rx().borrow_mut() = Some(rx);
-        }
-        Err(e) => {
-            log::debug!(
-                "[aft] watcher init failed: {} — callers will work with stale data",
-                e
-            );
-        }
-    }
+    // Spawn file watcher for live invalidation off the configure foreground.
+    // FSEvents startup can synchronously wait for seconds on very large roots;
+    // configure should return while the watcher attaches in the background.
+    install_project_watcher(ctx, &root_path);
 
     slog_info!("project root set: {}", root_path.display());
 
@@ -1474,6 +1527,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let project_root_display = root_path.display().to_string();
         let config_for_bg = config_snapshot.clone();
         let session_id_for_bg = log_ctx::current_session();
+        let session_id_for_frame = session_id_for_bg.clone();
         thread::spawn(move || {
             log_ctx::with_session(session_id_for_bg, || {
                 let source_files: Vec<PathBuf> =
@@ -1492,7 +1546,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                         .collect::<Vec<_>>();
                 warnings.extend(detect_missing_lsp_binaries(&source_files, &config_for_bg));
 
-                let frame = crate::protocol::ConfigureWarningsFrame::new(
+                let frame = crate::protocol::ConfigureWarningsFrame::new_with_session_id(
+                    session_id_for_frame,
                     project_root_display,
                     full_count,
                     full_exceeds,
@@ -1527,8 +1582,16 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 mod tests {
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
 
-    use super::{parse_lsp_paths_extra, validate_storage_dir};
+    use super::{
+        install_project_watcher_with, parse_lsp_paths_extra, validate_storage_dir,
+        WATCHER_GENERATION,
+    };
+    use crate::config::Config;
+    use crate::context::AppContext;
+    use crate::parser::TreeSitterProvider;
 
     #[cfg(unix)]
     fn create_dir_symlink(src: &std::path::Path, dst: &std::path::Path) {
@@ -1649,5 +1712,31 @@ mod tests {
         let error = parse_lsp_paths_extra(&json!([link])).unwrap_err();
 
         assert!(error.contains("must resolve to a directory"));
+    }
+
+    #[test]
+    fn watcher_attach_runs_off_configure_foreground_when_slow() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
+        let attach_started = Arc::new(Barrier::new(2));
+        let attach_started_for_thread = Arc::clone(&attach_started);
+
+        let started = Instant::now();
+        let handle = install_project_watcher_with(&ctx, root.path(), move |_root, _tx| {
+            attach_started_for_thread.wait();
+            std::thread::sleep(Duration::from_millis(250));
+            Ok::<(), &'static str>(())
+        });
+
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "watcher installation should not wait for slow attach"
+        );
+        assert!(ctx.watcher_rx().borrow().is_some());
+        assert!(ctx.watcher().borrow().is_none());
+
+        attach_started.wait();
+        WATCHER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap();
     }
 }

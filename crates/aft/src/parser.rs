@@ -483,6 +483,20 @@ impl SymbolCache {
         self.project_root = Some(project_root);
     }
 
+    /// Set the project root only when the caller still belongs to the active
+    /// cache generation.
+    pub fn set_project_root_for_generation(
+        &mut self,
+        generation: u64,
+        project_root: PathBuf,
+    ) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.set_project_root(project_root);
+        true
+    }
+
     /// Insert pre-warmed symbols for a file.
     pub fn insert(&mut self, path: PathBuf, mtime: SystemTime, symbols: Vec<Symbol>) {
         self.entries.insert(path, CachedSymbols { mtime, symbols });
@@ -550,6 +564,20 @@ impl SymbolCache {
         }
 
         loaded
+    }
+
+    /// Load valid symbol entries from disk only when the caller still belongs
+    /// to the active cache generation.
+    pub fn load_from_disk_for_generation(
+        &mut self,
+        generation: u64,
+        storage_dir: &Path,
+        project_key: &str,
+    ) -> usize {
+        if self.generation != generation {
+            return 0;
+        }
+        self.load_from_disk(storage_dir, project_key)
     }
 
     /// Invalidate cached symbols for a specific file.
@@ -3461,6 +3489,57 @@ mod tests {
 
         assert_eq!(loaded, 0);
         assert_eq!(restored.len(), 0);
+    }
+
+    #[test]
+    fn stale_prewarm_generation_cannot_repopulate_symbol_cache_after_reset() {
+        let project = tempfile::tempdir().expect("create project dir");
+        let storage = tempfile::tempdir().expect("create storage dir");
+        let source = project.path().join("src/lib.rs");
+        std::fs::create_dir_all(source.parent().expect("source parent"))
+            .expect("create source dir");
+        std::fs::write(&source, "pub fn cached() {}\n").expect("write source");
+        let mtime = std::fs::metadata(&source)
+            .expect("stat source")
+            .modified()
+            .expect("source mtime");
+
+        let mut disk_cache = SymbolCache::new();
+        disk_cache.set_project_root(project.path().to_path_buf());
+        disk_cache.insert(source.clone(), mtime, vec![test_symbol("cached")]);
+        symbol_cache_disk::write_to_disk(&disk_cache, storage.path(), "prewarm-reset")
+            .expect("write symbol cache");
+
+        let shared = Arc::new(RwLock::new(SymbolCache::new()));
+        let stale_generation = shared.write().unwrap().reset();
+        let active_generation = shared.write().unwrap().reset();
+        assert_ne!(stale_generation, active_generation);
+
+        {
+            let mut cache = shared.write().unwrap();
+            assert!(!cache
+                .set_project_root_for_generation(stale_generation, project.path().to_path_buf()));
+            assert_eq!(
+                cache.load_from_disk_for_generation(
+                    stale_generation,
+                    storage.path(),
+                    "prewarm-reset"
+                ),
+                0
+            );
+        }
+
+        let mut stale_parser =
+            FileParser::with_symbol_cache_generation(Arc::clone(&shared), Some(stale_generation));
+        stale_parser
+            .extract_symbols(&source)
+            .expect("stale prewarm parses source but must not write cache");
+
+        let cache = shared.read().unwrap();
+        assert_eq!(cache.generation(), active_generation);
+        assert_eq!(cache.len(), 0);
+        assert!(cache.project_root().is_none());
+        assert!(!cache.contains_key(&source));
     }
 
     // --- Language detection ---

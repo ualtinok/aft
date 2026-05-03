@@ -8,7 +8,7 @@ import { callBridge } from "./_shared.js";
 
 const z = tool.schema;
 const METADATA_PREVIEW_LIMIT = 30 * 1024;
-const DEFAULT_BASH_TIMEOUT_MS = 120_000;
+const DEFAULT_BASH_TIMEOUT_MS = 30_000;
 const BASH_TRANSPORT_TIMEOUT_OVERHEAD_MS = 5_000;
 
 const BASH_DESCRIPTION = `Hoisted bash tool with output compression, command rewriting to AFT tools, and optional background execution. By default, output is compressed; pass compressed: false for raw output. Pass background: true to spawn in the background and get a task_id for bash_status/bash_kill.`;
@@ -70,7 +70,7 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         .number()
         .optional()
         .describe(
-          "Maximum execution time in milliseconds for foreground commands. Defaults to 120000 (2 minutes) when omitted.",
+          "Maximum execution time in milliseconds for foreground commands. Defaults to 30000 (30 seconds) when omitted. For commands expected to run longer than 30s (builds, installs, full test suites), use background: true instead.",
         ),
       workdir: z
         .string()

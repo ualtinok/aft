@@ -36,6 +36,9 @@ const SEMANTIC_INDEX_VERSION_V3: u8 = 3;
 /// V4 keeps the V3 on-disk layout but rebuilds persisted snippets once after
 /// fixing symbol ranges that were incorrectly treated as 1-based.
 const SEMANTIC_INDEX_VERSION_V4: u8 = 4;
+/// V5 adds file sizes to the file metadata table so incremental staleness
+/// detection can catch content changes even when mtime precision misses them.
+const SEMANTIC_INDEX_VERSION_V5: u8 = 5;
 const DEFAULT_OPENAI_EMBEDDING_PATH: &str = "/embeddings";
 const DEFAULT_OLLAMA_EMBEDDING_PATH: &str = "/api/embed";
 // Must stay below the bridge timeout (30s) to avoid bridge kills on slow backends.
@@ -822,26 +825,33 @@ pub struct SemanticIndex {
     entries: Vec<EmbeddingEntry>,
     /// Track which files are indexed and their mtime for staleness detection
     file_mtimes: HashMap<PathBuf, SystemTime>,
+    /// Track indexed file sizes alongside mtimes for staleness detection
+    file_sizes: HashMap<PathBuf, u64>,
     /// Embedding dimension (384 for MiniLM-L6-v2)
     dimension: usize,
     fingerprint: Option<SemanticIndexFingerprint>,
 }
 
-/// Result of an incremental refresh of the semantic index. All counts are file
-/// counts except `added_entries`, which counts symbol-level embeddings appended
-/// for the changed/new file set.
+#[derive(Debug, Clone, Copy)]
+struct IndexedFileMetadata {
+    mtime: SystemTime,
+    size: u64,
+}
+
+/// Result of an incremental refresh of the semantic index. Counts are file
+/// counts; `total_processed` is the number of current/deleted files considered.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RefreshSummary {
-    pub deleted: usize,
     pub changed: usize,
-    pub new_files: usize,
-    pub added_entries: usize,
+    pub added: usize,
+    pub deleted: usize,
+    pub total_processed: usize,
 }
 
 impl RefreshSummary {
     /// True when no files were touched.
     pub fn is_noop(&self) -> bool {
-        self.deleted == 0 && self.changed == 0 && self.new_files == 0
+        self.changed == 0 && self.added == 0 && self.deleted == 0
     }
 }
 
@@ -863,6 +873,7 @@ impl SemanticIndex {
         Self {
             entries: Vec::new(),
             file_mtimes: HashMap::new(),
+            file_sizes: HashMap::new(),
             dimension: DEFAULT_DIMENSION, // MiniLM-L6-v2 default
             fingerprint: None,
         }
@@ -885,34 +896,54 @@ impl SemanticIndex {
     fn collect_chunks(
         project_root: &Path,
         files: &[PathBuf],
-    ) -> (Vec<SemanticChunk>, HashMap<PathBuf, SystemTime>) {
-        let per_file: Vec<(PathBuf, SystemTime, Vec<SemanticChunk>)> = files
+    ) -> (Vec<SemanticChunk>, HashMap<PathBuf, IndexedFileMetadata>) {
+        let per_file: Vec<(
+            PathBuf,
+            Result<(IndexedFileMetadata, Vec<SemanticChunk>), String>,
+        )> = files
             .par_iter()
             .map_init(HashMap::new, |parsers, file| {
-                let mtime = std::fs::metadata(file)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-
-                let chunks = collect_file_chunks(project_root, file, parsers).unwrap_or_default();
-
-                (file.clone(), mtime, chunks)
+                let result = collect_file_metadata(file).and_then(|metadata| {
+                    collect_file_chunks(project_root, file, parsers)
+                        .map(|chunks| (metadata, chunks))
+                });
+                (file.clone(), result)
             })
             .collect();
 
         let mut chunks: Vec<SemanticChunk> = Vec::new();
-        let mut file_mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
+        let mut file_metadata: HashMap<PathBuf, IndexedFileMetadata> = HashMap::new();
 
-        for (file, mtime, file_chunks) in per_file {
-            file_mtimes.insert(file, mtime);
-            chunks.extend(file_chunks);
+        for (file, result) in per_file {
+            match result {
+                Ok((metadata, file_chunks)) => {
+                    file_metadata.insert(file, metadata);
+                    chunks.extend(file_chunks);
+                }
+                Err(error) => {
+                    // "unsupported file extension" is expected for non-code files
+                    // (json, xml, .gitignore, etc.) that get included in the
+                    // project walk. Pre-fix this was swallowed by .unwrap_or_default();
+                    // we now skip silently to keep the log clean. Only real read/parse
+                    // errors are worth surfacing.
+                    if error == "unsupported file extension" {
+                        continue;
+                    }
+                    slog_warn!(
+                        "failed to collect semantic chunks for {}: {}",
+                        file.display(),
+                        error
+                    );
+                }
+            }
         }
 
-        (chunks, file_mtimes)
+        (chunks, file_metadata)
     }
 
     fn build_from_chunks<F, P>(
         chunks: Vec<SemanticChunk>,
-        file_mtimes: HashMap<PathBuf, SystemTime>,
+        file_metadata: HashMap<PathBuf, IndexedFileMetadata>,
         embed_fn: &mut F,
         max_batch_size: usize,
         mut progress: Option<&mut P>,
@@ -926,7 +957,14 @@ impl SemanticIndex {
         if chunks.is_empty() {
             return Ok(Self {
                 entries: Vec::new(),
-                file_mtimes,
+                file_mtimes: file_metadata
+                    .iter()
+                    .map(|(path, metadata)| (path.clone(), metadata.mtime))
+                    .collect(),
+                file_sizes: file_metadata
+                    .into_iter()
+                    .map(|(path, metadata)| (path, metadata.size))
+                    .collect(),
                 dimension: DEFAULT_DIMENSION,
                 fingerprint: None,
             });
@@ -979,7 +1017,14 @@ impl SemanticIndex {
 
         Ok(Self {
             entries,
-            file_mtimes,
+            file_mtimes: file_metadata
+                .iter()
+                .map(|(path, metadata)| (path.clone(), metadata.mtime))
+                .collect(),
+            file_sizes: file_metadata
+                .into_iter()
+                .map(|(path, metadata)| (path, metadata.size))
+                .collect(),
             dimension,
             fingerprint: None,
         })
@@ -1052,8 +1097,16 @@ impl SemanticIndex {
         F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
         P: FnMut(usize, usize),
     {
-        // 1. Bucket files into deleted / changed / new.
+        self.backfill_missing_file_sizes();
+
+        // 1. Bucket files into deleted / changed / added.
         let current_set: HashSet<&Path> = current_files.iter().map(PathBuf::as_path).collect();
+        let total_processed = current_set.len() + self.file_mtimes.len()
+            - self
+                .file_mtimes
+                .keys()
+                .filter(|path| current_set.contains(path.as_path()))
+                .count();
 
         // Files in cache that disappeared from disk OR are no longer in the
         // walked set. Both cases need their entries dropped.
@@ -1070,69 +1123,77 @@ impl SemanticIndex {
         }
 
         // Files in walk that were never indexed.
-        let mut new_files: Vec<PathBuf> = Vec::new();
+        let mut added: Vec<PathBuf> = Vec::new();
         for path in current_files {
             if !self.file_mtimes.contains_key(path) {
-                new_files.push(path.clone());
+                added.push(path.clone());
             }
         }
 
         // Fast path: nothing to do.
-        if deleted.is_empty() && changed.is_empty() && new_files.is_empty() {
+        if deleted.is_empty() && changed.is_empty() && added.is_empty() {
             progress(0, 0);
-            return Ok(RefreshSummary::default());
+            return Ok(RefreshSummary {
+                total_processed,
+                ..RefreshSummary::default()
+            });
         }
 
-        // 2. Drop entries for deleted + changed files. We re-embed `changed`
-        //    so we have to clear them from `entries` first.
-        let drop_set: HashSet<PathBuf> = deleted
-            .iter()
-            .cloned()
-            .chain(changed.iter().cloned())
-            .collect();
-        if !drop_set.is_empty() {
-            self.entries.retain(|e| !drop_set.contains(&e.chunk.file));
+        // 2. Drop entries for deleted files immediately. Changed files are only
+        //    replaced after successful re-extraction + embedding so transient
+        //    read/parse errors keep the stale-but-valid cache entry.
+        if !deleted.is_empty() {
+            let deleted_set: HashSet<&Path> = deleted.iter().map(PathBuf::as_path).collect();
+            self.entries
+                .retain(|entry| !deleted_set.contains(entry.chunk.file.as_path()));
             for path in &deleted {
                 self.file_mtimes.remove(path);
-            }
-            // For `changed`, mtimes get rewritten below from collect_chunks.
-            for path in &changed {
-                self.file_mtimes.remove(path);
+                self.file_sizes.remove(path);
             }
         }
 
-        // 3. Embed the changed + new set, if any.
-        let mut to_embed: Vec<PathBuf> = Vec::with_capacity(changed.len() + new_files.len());
+        // 3. Embed the changed + added set, if any.
+        let mut to_embed: Vec<PathBuf> = Vec::with_capacity(changed.len() + added.len());
         to_embed.extend(changed.iter().cloned());
-        to_embed.extend(new_files.iter().cloned());
+        to_embed.extend(added.iter().cloned());
 
         if to_embed.is_empty() {
             // Only deletions happened.
             progress(0, 0);
             return Ok(RefreshSummary {
-                deleted: deleted.len(),
                 changed: 0,
-                new_files: 0,
-                added_entries: 0,
+                added: 0,
+                deleted: deleted.len(),
+                total_processed,
             });
         }
 
-        let (chunks, fresh_mtimes) = Self::collect_chunks(project_root, &to_embed);
-
-        // We must always merge mtimes for files we walked, even if they
-        // produced zero chunks (e.g., a file with no symbols). Otherwise
-        // the next refresh would re-bucket them as "new" forever.
-        for (file, mtime) in fresh_mtimes {
-            self.file_mtimes.insert(file, mtime);
-        }
+        let (chunks, fresh_metadata) = Self::collect_chunks(project_root, &to_embed);
 
         if chunks.is_empty() {
             progress(0, 0);
+            let successful_files: HashSet<PathBuf> = fresh_metadata.keys().cloned().collect();
+            if !successful_files.is_empty() {
+                self.entries
+                    .retain(|entry| !successful_files.contains(&entry.chunk.file));
+            }
+            let changed_count = changed
+                .iter()
+                .filter(|path| successful_files.contains(*path))
+                .count();
+            let added_count = added
+                .iter()
+                .filter(|path| successful_files.contains(*path))
+                .count();
+            for (file, metadata) in fresh_metadata {
+                self.file_mtimes.insert(file.clone(), metadata.mtime);
+                self.file_sizes.insert(file, metadata.size);
+            }
             return Ok(RefreshSummary {
+                changed: changed_count,
+                added: added_count,
                 deleted: deleted.len(),
-                changed: changed.len(),
-                new_files: new_files.len(),
-                added_entries: 0,
+                total_processed,
             });
         }
 
@@ -1184,17 +1245,32 @@ impl SemanticIndex {
             progress(new_entries.len(), total_chunks);
         }
 
-        let added = new_entries.len();
+        let successful_files: HashSet<PathBuf> = fresh_metadata.keys().cloned().collect();
+        if !successful_files.is_empty() {
+            self.entries
+                .retain(|entry| !successful_files.contains(&entry.chunk.file));
+        }
+
         self.entries.extend(new_entries);
+        for (file, metadata) in fresh_metadata {
+            self.file_mtimes.insert(file.clone(), metadata.mtime);
+            self.file_sizes.insert(file, metadata.size);
+        }
         if let Some(dim) = observed_dimension {
             self.dimension = dim;
         }
 
         Ok(RefreshSummary {
+            changed: changed
+                .iter()
+                .filter(|path| successful_files.contains(*path))
+                .count(),
+            added: added
+                .iter()
+                .filter(|path| successful_files.contains(*path))
+                .count(),
             deleted: deleted.len(),
-            changed: changed.len(),
-            new_files: new_files.len(),
-            added_entries: added,
+            total_processed,
         })
     }
 
@@ -1239,22 +1315,29 @@ impl SemanticIndex {
         self.entries.len()
     }
 
-    /// Check if a file needs re-indexing based on mtime
+    /// Check if a file needs re-indexing based on mtime/size
     pub fn is_file_stale(&self, file: &Path) -> bool {
-        match self.file_mtimes.get(file) {
-            None => true,
-            Some(stored_mtime) => match fs::metadata(file).and_then(|m| m.modified()) {
-                Ok(current_mtime) => *stored_mtime != current_mtime,
-                Err(_) => true,
-            },
+        let Some(stored_mtime) = self.file_mtimes.get(file) else {
+            return true;
+        };
+        let Some(stored_size) = self.file_sizes.get(file) else {
+            return true;
+        };
+        match collect_file_metadata(file) {
+            Ok(current) => *stored_mtime != current.mtime || *stored_size != current.size,
+            Err(_) => true,
         }
     }
 
-    pub fn count_stale_files(&self) -> usize {
-        self.file_mtimes
-            .keys()
-            .filter(|path| self.is_file_stale(path))
-            .count()
+    fn backfill_missing_file_sizes(&mut self) {
+        for path in self.file_mtimes.keys() {
+            if self.file_sizes.contains_key(path) {
+                continue;
+            }
+            if let Ok(metadata) = fs::metadata(path) {
+                self.file_sizes.insert(path.clone(), metadata.len());
+            }
+        }
     }
 
     /// Remove entries for a specific file
@@ -1265,6 +1348,7 @@ impl SemanticIndex {
     pub fn invalidate_file(&mut self, file: &Path) {
         self.entries.retain(|e| e.chunk.file != file);
         self.file_mtimes.remove(file);
+        self.file_sizes.remove(file);
     }
 
     /// Get the embedding dimension
@@ -1343,11 +1427,11 @@ impl SemanticIndex {
 
         let bytes = fs::read(&data_path).ok()?;
         let version = bytes[0];
-        if version != SEMANTIC_INDEX_VERSION_V4 {
+        if version != SEMANTIC_INDEX_VERSION_V5 {
             slog_info!(
                 "cached semantic index version {} is older than {}, rebuilding",
                 version,
-                SEMANTIC_INDEX_VERSION_V4
+                SEMANTIC_INDEX_VERSION_V5
             );
             let _ = fs::remove_file(&data_path);
             return None;
@@ -1398,17 +1482,16 @@ impl SemanticIndex {
 
         // Header: version(1) + dimension(4) + entry_count(4) + fingerprint_len(4) + fingerprint
         //
-        // V4 (v0.16.0+) is the single write format. Layout matches V3:
+        // V5 is the single write format. Layout extends V4:
         //   - fingerprint is always represented (absent ⇒ fingerprint_len=0,
         //     no bytes follow). Uniform format simplifies the reader.
-        //   - mtimes stored as secs(u64) + subsec_nanos(u32). Preserves full
-        //     APFS/ext4/NTFS precision so staleness checks survive restart
-        //     round-trips.
+        //   - file metadata stored as secs(u64) + subsec_nanos(u32) + size(u64).
+        //     Preserves full APFS/ext4/NTFS precision and catches mtime ties.
         //
         // V1/V2 remain readable for backward compatibility (see from_bytes).
-        // V3 loads as the same format but is rejected on disk so snippets are
-        // rebuilt once after the symbol-range bug fixed in v0.16.0.
-        let version = SEMANTIC_INDEX_VERSION_V4;
+        // V3/V4 load as compatible formats but are rejected on disk so snippets
+        // and file sizes are rebuilt once.
+        let version = SEMANTIC_INDEX_VERSION_V5;
         buf.push(version);
         buf.extend_from_slice(&(self.dimension as u32).to_le_bytes());
         buf.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
@@ -1428,6 +1511,8 @@ impl SemanticIndex {
                 .unwrap_or_default();
             buf.extend_from_slice(&duration.as_secs().to_le_bytes());
             buf.extend_from_slice(&duration.subsec_nanos().to_le_bytes());
+            let size = self.file_sizes.get(path).copied().unwrap_or_default();
+            buf.extend_from_slice(&size.to_le_bytes());
         }
 
         // Entries: each is metadata + vector
@@ -1485,18 +1570,20 @@ impl SemanticIndex {
             && version != SEMANTIC_INDEX_VERSION_V2
             && version != SEMANTIC_INDEX_VERSION_V3
             && version != SEMANTIC_INDEX_VERSION_V4
+            && version != SEMANTIC_INDEX_VERSION_V5
         {
             return Err(format!("unsupported version: {}", version));
         }
-        // V2, V3, and V4 share the same header layout (V3/V4 only differ from
+        // V2 and newer share the same header layout (V3/V4/V5 only differ from
         // V2 in the per-mtime entry layout): version(1) + dimension(4) +
         // entry_count(4) + fingerprint_len(4) + fingerprint bytes.
         if (version == SEMANTIC_INDEX_VERSION_V2
             || version == SEMANTIC_INDEX_VERSION_V3
-            || version == SEMANTIC_INDEX_VERSION_V4)
+            || version == SEMANTIC_INDEX_VERSION_V4
+            || version == SEMANTIC_INDEX_VERSION_V5)
             && data.len() < HEADER_BYTES_V2
         {
-            return Err("data too short for semantic index v2/v3/v4 header".to_string());
+            return Err("data too short for semantic index v2/v3/v4/v5 header".to_string());
         }
 
         let dimension = read_u32(data, &mut pos)? as usize;
@@ -1512,10 +1599,11 @@ impl SemanticIndex {
         //   - V1: no fingerprint field at all.
         //   - V2: fingerprint_len + fingerprint bytes; always present (writer
         //     only emitted V2 when fingerprint was Some).
-        //   - V3: fingerprint_len always present; fingerprint_len==0 ⇒ None.
+        //   - V3+: fingerprint_len always present; fingerprint_len==0 ⇒ None.
         let has_fingerprint_field = version == SEMANTIC_INDEX_VERSION_V2
             || version == SEMANTIC_INDEX_VERSION_V3
-            || version == SEMANTIC_INDEX_VERSION_V4;
+            || version == SEMANTIC_INDEX_VERSION_V4
+            || version == SEMANTIC_INDEX_VERSION_V5;
         let fingerprint = if has_fingerprint_field {
             let fingerprint_len = read_u32(data, &mut pos)? as usize;
             if pos + fingerprint_len > data.len() {
@@ -1550,20 +1638,28 @@ impl SemanticIndex {
         }
 
         let mut file_mtimes = HashMap::with_capacity(mtime_count);
+        let mut file_sizes = HashMap::with_capacity(mtime_count);
         for _ in 0..mtime_count {
             let path = read_string(data, &mut pos)?;
             let secs = read_u64(data, &mut pos)?;
-            // V3 persists subsec_nanos alongside secs so staleness checks
+            // V3+ persists subsec_nanos alongside secs so staleness checks
             // survive restart round-trips. V1/V2 load with 0 nanos, which
             // causes one rebuild on upgrade (they never matched live APFS
             // mtimes anyway — the bug v0.15.2 fixes). After that rebuild,
             // the cache is persisted as V3 and stabilises.
-            let nanos =
-                if version == SEMANTIC_INDEX_VERSION_V3 || version == SEMANTIC_INDEX_VERSION_V4 {
-                    read_u32(data, &mut pos)?
-                } else {
-                    0
-                };
+            let nanos = if version == SEMANTIC_INDEX_VERSION_V3
+                || version == SEMANTIC_INDEX_VERSION_V4
+                || version == SEMANTIC_INDEX_VERSION_V5
+            {
+                read_u32(data, &mut pos)?
+            } else {
+                0
+            };
+            let size = if version == SEMANTIC_INDEX_VERSION_V5 {
+                read_u64(data, &mut pos)?
+            } else {
+                0
+            };
             // Hardening against corrupt / maliciously crafted cache files
             // (v0.15.2). `Duration::new(secs, nanos)` can panic when the
             // nanosecond carry overflows the second counter, and
@@ -1585,7 +1681,9 @@ impl SemanticIndex {
                         secs, nanos
                     )
                 })?;
-            file_mtimes.insert(PathBuf::from(path), mtime);
+            let path = PathBuf::from(path);
+            file_mtimes.insert(path.clone(), mtime);
+            file_sizes.insert(path, size);
         }
 
         // Entries
@@ -1644,6 +1742,7 @@ impl SemanticIndex {
         Ok(Self {
             entries,
             file_mtimes,
+            file_sizes,
             dimension,
             fingerprint,
         })
@@ -1716,6 +1815,15 @@ fn parser_for(
             Ok(entry.insert(parser))
         }
     }
+}
+
+fn collect_file_metadata(file: &Path) -> Result<IndexedFileMetadata, String> {
+    let metadata = fs::metadata(file).map_err(|error| error.to_string())?;
+    let mtime = metadata.modified().map_err(|error| error.to_string())?;
+    Ok(IndexedFileMetadata {
+        mtime,
+        size: metadata.len(),
+    })
 }
 
 fn collect_file_chunks(
@@ -1954,6 +2062,28 @@ mod tests {
         (format!("http://{}", addr), handle)
     }
 
+    fn test_vector_for_texts(texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+    }
+
+    fn write_rust_file(path: &Path, function_name: &str) {
+        fs::write(
+            path,
+            format!("pub fn {function_name}() -> bool {{\n    true\n}}\n"),
+        )
+        .unwrap();
+    }
+
+    fn build_test_index(project_root: &Path, files: &[PathBuf]) -> SemanticIndex {
+        let mut embed = test_vector_for_texts;
+        SemanticIndex::build(project_root, files, &mut embed, 8).unwrap()
+    }
+
+    fn set_file_metadata(index: &mut SemanticIndex, file: &Path, mtime: SystemTime, size: u64) {
+        index.file_mtimes.insert(file.to_path_buf(), mtime);
+        index.file_sizes.insert(file.to_path_buf(), size);
+    }
+
     #[test]
     fn test_cosine_similarity_identical() {
         let a = vec![1.0, 0.0, 0.0];
@@ -1995,6 +2125,7 @@ mod tests {
         index
             .file_mtimes
             .insert(PathBuf::from("/src/main.rs"), SystemTime::UNIX_EPOCH);
+        index.file_sizes.insert(PathBuf::from("/src/main.rs"), 0);
         index.set_fingerprint(SemanticIndexFingerprint {
             backend: "fastembed".to_string(),
             model: "all-MiniLM-L6-v2".to_string(),
@@ -2156,11 +2287,188 @@ mod tests {
         index
             .file_mtimes
             .insert(target.clone(), SystemTime::UNIX_EPOCH);
+        index.file_sizes.insert(target.clone(), 0);
 
         index.invalidate_file(&target);
 
         assert!(index.entries.is_empty());
         assert!(!index.file_mtimes.contains_key(&target));
+        assert!(!index.file_sizes.contains_key(&target));
+    }
+
+    #[test]
+    fn refresh_transient_error_preserves_existing_entry_and_mtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let file = project_root.join("src/lib.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_rust_file(&file, "kept_symbol");
+
+        let mut index = build_test_index(project_root, &[file.clone()]);
+        let original_entry_count = index.entries.len();
+        let original_mtime = *index.file_mtimes.get(&file).unwrap();
+        let original_size = *index.file_sizes.get(&file).unwrap();
+
+        let stale_mtime = SystemTime::UNIX_EPOCH;
+        set_file_metadata(&mut index, &file, stale_mtime, original_size + 1);
+        fs::remove_file(&file).unwrap();
+
+        let mut embed = test_vector_for_texts;
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .unwrap();
+
+        assert_eq!(summary.changed, 0);
+        assert_eq!(summary.added, 0);
+        assert_eq!(summary.deleted, 0);
+        assert_eq!(index.entries.len(), original_entry_count);
+        assert_eq!(index.entries[0].chunk.name, "kept_symbol");
+        assert_eq!(index.file_mtimes.get(&file), Some(&stale_mtime));
+        assert_ne!(index.file_mtimes.get(&file), Some(&original_mtime));
+        assert_eq!(index.file_sizes.get(&file), Some(&(original_size + 1)));
+    }
+
+    #[test]
+    fn refresh_never_indexed_file_error_does_not_record_mtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let missing = project_root.join("src/missing.rs");
+        fs::create_dir_all(missing.parent().unwrap()).unwrap();
+
+        let mut index = SemanticIndex::new();
+        let mut embed = test_vector_for_texts;
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(
+                project_root,
+                &[missing.clone()],
+                &mut embed,
+                8,
+                &mut progress,
+            )
+            .unwrap();
+
+        assert_eq!(summary.added, 0);
+        assert_eq!(summary.changed, 0);
+        assert_eq!(summary.deleted, 0);
+        assert!(!index.file_mtimes.contains_key(&missing));
+        assert!(!index.file_sizes.contains_key(&missing));
+        assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn refresh_reports_added_for_new_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let existing = project_root.join("src/lib.rs");
+        let added = project_root.join("src/new.rs");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        write_rust_file(&existing, "existing_symbol");
+        write_rust_file(&added, "added_symbol");
+
+        let mut index = build_test_index(project_root, &[existing.clone()]);
+        let mut embed = test_vector_for_texts;
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(
+                project_root,
+                &[existing.clone(), added.clone()],
+                &mut embed,
+                8,
+                &mut progress,
+            )
+            .unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.changed, 0);
+        assert_eq!(summary.deleted, 0);
+        assert_eq!(summary.total_processed, 2);
+        assert!(index.file_mtimes.contains_key(&added));
+        assert!(index.entries.iter().any(|entry| entry.chunk.file == added));
+    }
+
+    #[test]
+    fn refresh_reports_deleted_for_removed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let deleted = project_root.join("src/deleted.rs");
+        fs::create_dir_all(deleted.parent().unwrap()).unwrap();
+        write_rust_file(&deleted, "deleted_symbol");
+
+        let mut index = build_test_index(project_root, &[deleted.clone()]);
+        fs::remove_file(&deleted).unwrap();
+
+        let mut embed = test_vector_for_texts;
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(project_root, &[], &mut embed, 8, &mut progress)
+            .unwrap();
+
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(summary.changed, 0);
+        assert_eq!(summary.added, 0);
+        assert_eq!(summary.total_processed, 1);
+        assert!(!index.file_mtimes.contains_key(&deleted));
+        assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn refresh_reports_changed_for_modified_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let file = project_root.join("src/lib.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_rust_file(&file, "old_symbol");
+
+        let mut index = build_test_index(project_root, &[file.clone()]);
+        set_file_metadata(&mut index, &file, SystemTime::UNIX_EPOCH, 0);
+        write_rust_file(&file, "new_symbol");
+
+        let mut embed = test_vector_for_texts;
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .unwrap();
+
+        assert_eq!(summary.changed, 1);
+        assert_eq!(summary.added, 0);
+        assert_eq!(summary.deleted, 0);
+        assert_eq!(summary.total_processed, 1);
+        assert!(index
+            .entries
+            .iter()
+            .any(|entry| entry.chunk.name == "new_symbol"));
+        assert!(!index
+            .entries
+            .iter()
+            .any(|entry| entry.chunk.name == "old_symbol"));
+    }
+
+    #[test]
+    fn refresh_all_clean_reports_zero_counts_and_no_embedding_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let file = project_root.join("src/lib.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_rust_file(&file, "clean_symbol");
+
+        let mut index = build_test_index(project_root, &[file.clone()]);
+        let original_entries = index.entries.len();
+        let mut embed_called = false;
+        let mut embed = |texts: Vec<String>| {
+            embed_called = true;
+            test_vector_for_texts(texts)
+        };
+        let mut progress = |_done: usize, _total: usize| {};
+        let summary = index
+            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .unwrap();
+
+        assert!(summary.is_noop());
+        assert_eq!(summary.total_processed, 1);
+        assert!(!embed_called);
+        assert_eq!(index.entries.len(), original_entries);
     }
 
     #[test]
@@ -2255,6 +2563,7 @@ mod tests {
         index
             .file_mtimes
             .insert(PathBuf::from("/src/main.rs"), SystemTime::UNIX_EPOCH);
+        index.file_sizes.insert(PathBuf::from("/src/main.rs"), 0);
         index.set_fingerprint(SemanticIndexFingerprint {
             backend: "openai_compatible".to_string(),
             model: "test-embedding".to_string(),
@@ -2305,6 +2614,7 @@ mod tests {
         index
             .file_mtimes
             .insert(PathBuf::from("/src/main.rs"), SystemTime::UNIX_EPOCH);
+        index.file_sizes.insert(PathBuf::from("/src/main.rs"), 0);
         let fingerprint = SemanticIndexFingerprint {
             backend: "fastembed".to_string(),
             model: "test".to_string(),

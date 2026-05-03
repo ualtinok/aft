@@ -7,7 +7,6 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import { discoverSourceFiles } from "../shared/discover-files.js";
 import type { PluginContext } from "../types.js";
 import { bridgeFor, callBridge, textResult } from "./_shared.js";
 import {
@@ -266,12 +265,8 @@ export function registerReadingTools(
 
         if (isDirectory) {
           const dirPath = resolve(extCtx.cwd, target);
-          const files = await discoverSourceFiles(dirPath);
-          if (files.length === 0) {
-            return textResult(`No source files found under ${target}`);
-          }
-          const response = await callBridge(bridge, "outline", { files }, extCtx);
-          return textResult(formatOutlineText(response));
+          const response = await callBridge(bridge, "outline", { directory: dirPath }, extCtx);
+          return textResult(JSON.stringify(response, null, 2), response);
         }
 
         const response = await callBridge(bridge, "outline", { file: target }, extCtx);

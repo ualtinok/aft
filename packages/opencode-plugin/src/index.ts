@@ -107,6 +107,35 @@ function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
   return warnings.filter(isConfigureWarning);
 }
 
+export async function handleConfigureWarningsForSession(context: {
+  projectRoot: string;
+  sessionId?: string | null;
+  client?: unknown;
+  warnings: unknown[];
+  fallbackClient: unknown;
+  storageDir: string;
+  pluginVersion: string;
+}): Promise<void> {
+  if (!context.sessionId) {
+    warn(
+      `[configure] deferred warnings for ${context.projectRoot} arrived without session_id; skipping notification`,
+    );
+    return;
+  }
+  const validWarnings = coerceConfigureWarnings(context.warnings);
+  if (validWarnings.length === 0) return;
+  await deliverConfigureWarnings(
+    {
+      client: context.client ?? context.fallbackClient,
+      sessionId: context.sessionId,
+      storageDir: context.storageDir,
+      pluginVersion: context.pluginVersion,
+      projectRoot: context.projectRoot,
+    },
+    validWarnings,
+  );
+}
+
 async function sendIgnoredMessage(client: unknown, sessionID: string, text: string): Promise<void> {
   const typedClient = client as {
     session?: {
@@ -413,19 +442,15 @@ const plugin: Plugin = async (input) => {
         );
       },
       onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
-        if (!sessionId) return;
-        const validWarnings = coerceConfigureWarnings(warnings);
-        if (validWarnings.length === 0) return;
-        await deliverConfigureWarnings(
-          {
-            client: client ?? input.client,
-            sessionId,
-            storageDir: configOverrides.storage_dir as string,
-            pluginVersion: PLUGIN_VERSION,
-            projectRoot,
-          },
-          validWarnings,
-        );
+        await handleConfigureWarningsForSession({
+          projectRoot,
+          sessionId,
+          client,
+          warnings,
+          fallbackClient: input.client,
+          storageDir: configOverrides.storage_dir as string,
+          pluginVersion: PLUGIN_VERSION,
+        });
       },
       onBashCompletion: (completion, bridge) => {
         // Prefer the cached session directory; fall back to plugin-init cwd

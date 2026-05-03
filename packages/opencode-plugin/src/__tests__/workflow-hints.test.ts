@@ -26,7 +26,7 @@ describe("buildWorkflowHints", () => {
     expect(out).toContain("`bash({ background: true })`");
   });
 
-  test("omits the bg-bash section when experimental.bash.background is off", () => {
+  test("shows 30s timeout warning when background bash is off but bash is available", () => {
     const out = buildWorkflowHints({
       toolSurface: "recommended",
       hoistBuiltins: true,
@@ -35,8 +35,11 @@ describe("buildWorkflowHints", () => {
       disabledTools: new Set(),
     });
     expect(out).not.toBeNull();
-    expect(out).not.toContain("**Long-running commands**");
+    // Background pattern not shown — but 30s limit IS shown
     expect(out).not.toContain("background: true");
+    expect(out).not.toContain("**Long-running commands**");
+    expect(out).toContain("**Long-running bash commands**");
+    expect(out).toContain("30 seconds");
   });
 
   test("omits the navigate section at tool_surface=recommended", () => {
@@ -93,7 +96,11 @@ describe("buildWorkflowHints", () => {
       hoistBuiltins: true,
       semanticEnabled: false,
       bashBackgroundEnabled: false,
-      disabledTools: new Set(["aft_outline", "aft_zoom"]),
+      // Disable all tools that could produce a hint section. At minimal
+      // surface, aft_navigate/grep/aft_search are already absent; disabling
+      // outline+zoom kills URL+exploration sections, bash kills the timeout
+      // hint, leaving nothing to render.
+      disabledTools: new Set(["aft_outline", "aft_zoom", "bash"]),
     });
     expect(empty).toBeNull();
   });
@@ -106,9 +113,12 @@ describe("buildWorkflowHints", () => {
       bashBackgroundEnabled: true,
       disabledTools: new Set(["aft_navigate", "bash_status"]),
     });
-    // navigate + bg-bash sections gated off.
+    // navigate section gated off (aft_navigate disabled).
     expect(out).not.toContain("Use `aft_navigate`");
+    // bg-bash section gated off (bash_status disabled) — falls back to 30s warning.
     expect(out).not.toContain("**Long-running commands**");
+    expect(out).toContain("**Long-running bash commands**");
+    expect(out).toContain("30 seconds");
     // Other sections survive.
     expect(out).toContain("**Web/URL access**");
     expect(out).toContain("**Code exploration**");

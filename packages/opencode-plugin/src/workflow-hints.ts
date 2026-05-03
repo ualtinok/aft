@@ -48,10 +48,9 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
     opts.toolSurface !== "minimal" && opts.semanticEnabled && !opts.disabledTools.has("aft_search");
   // aft_navigate is "all"-tier only.
   const hasNavigate = opts.toolSurface === "all" && !opts.disabledTools.has("aft_navigate");
+  const hasBash = !opts.disabledTools.has(bashName);
   const hasBgBash =
-    opts.bashBackgroundEnabled &&
-    !opts.disabledTools.has(bashName) &&
-    !opts.disabledTools.has(bashStatusName);
+    hasBash && opts.bashBackgroundEnabled && !opts.disabledTools.has(bashStatusName);
 
   // Web/URL access — needs aft_outline + aft_zoom.
   if (hasOutline && hasZoom) {
@@ -86,11 +85,19 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
     );
   }
 
-  // Long-running commands — needs experimental.bash.background.
-  if (hasBgBash) {
-    sections.push(
-      `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. Check progress with \`${bashStatusName}({ taskId })\`.`,
-    );
+  // Bash timeout guidance — always show when bash is available so agents
+  // know the 30s default and don't get surprised by timed-out commands.
+  // When background bash is enabled, add the background invocation pattern.
+  if (hasBash) {
+    if (hasBgBash) {
+      sections.push(
+        `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. Check progress with \`${bashStatusName}({ taskId })\`.`,
+      );
+    } else {
+      sections.push(
+        `**Long-running bash commands**: foreground \`${bashName}\` times out after 30 seconds. Pass \`timeout\` in milliseconds to extend it for commands you know will take longer.`,
+      );
+    }
   }
 
   if (sections.length === 0) {

@@ -129,6 +129,40 @@ function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
   return warnings.filter(isConfigureWarning);
 }
 
+export async function handleConfigureWarningsForSession(context: {
+  projectRoot: string;
+  sessionId?: string | null;
+  client?: unknown;
+  warnings: unknown[];
+  storageDir: string;
+  pluginVersion: string;
+}): Promise<void> {
+  if (!context.sessionId) {
+    warn(
+      `[configure] deferred warnings for ${context.projectRoot} arrived without session_id; skipping notification`,
+    );
+    return;
+  }
+  if (!context.client) {
+    warn(
+      `[configure] deferred warnings for session ${context.sessionId} arrived without notification client; skipping notification`,
+    );
+    return;
+  }
+  const validWarnings = coerceConfigureWarnings(context.warnings);
+  if (validWarnings.length === 0) return;
+  await deliverConfigureWarnings(
+    {
+      client: context.client,
+      sessionId: context.sessionId,
+      storageDir: context.storageDir,
+      pluginVersion: context.pluginVersion,
+      projectRoot: context.projectRoot,
+    },
+    validWarnings,
+  );
+}
+
 /** Resolve the AFT storage directory (auth + semantic index + ONNX cache). */
 function resolveStorageDir(): string {
   // Pi doesn't expose its data dir via a public API; use ~/.pi/agent/aft as convention.
@@ -398,19 +432,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       errorPrefix: "[aft-pi]",
       minVersion: PLUGIN_VERSION,
       onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
-        if (!sessionId || !client) return;
-        const validWarnings = coerceConfigureWarnings(warnings);
-        if (validWarnings.length === 0) return;
-        await deliverConfigureWarnings(
-          {
-            client,
-            sessionId,
-            storageDir,
-            pluginVersion: PLUGIN_VERSION,
-            projectRoot,
-          },
-          validWarnings,
-        );
+        await handleConfigureWarningsForSession({
+          projectRoot,
+          sessionId,
+          client,
+          warnings,
+          storageDir,
+          pluginVersion: PLUGIN_VERSION,
+        });
       },
       onBashCompletion: (completion, bridge) => {
         void handlePushedBgCompletion(
@@ -570,4 +599,4 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   log(`AFT extension ready (surface=${config.tool_surface ?? "recommended"})`);
 }
 
-export const __test__ = { resolveToolSurface };
+export const __test__ = { resolveToolSurface, handleConfigureWarningsForSession };
