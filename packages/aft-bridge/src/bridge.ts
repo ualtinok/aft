@@ -207,6 +207,13 @@ export class BinaryBridge {
   private onBashCompletion:
     | ((completion: BashCompletedPayload, bridge: BinaryBridge) => void | Promise<void>)
     | undefined;
+  /**
+   * Last client passed via `send({ configureWarningClient })`. Cached so that
+   * server-pushed `configure_warnings` frames (which arrive without a
+   * triggering request) can still be delivered through the same plugin
+   * pathway as synchronous warnings.
+   */
+  private configureWarningClient: unknown = undefined;
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
   private errorPrefix: string;
 
@@ -270,11 +277,20 @@ export class BinaryBridge {
         if (!this._configurePromise) {
           // First caller — create the configure promise.
           // All parallel callers await this same promise.
+          //
+          // Forward the triggering call's session_id into configure so
+          // Rust's thread-local session context propagates through to
+          // background tasks spawned by configure (search-index pre-warm,
+          // semantic-index build). Without this, background log lines
+          // emitted by configure threads appear with no session prefix.
+          const sessionIdForConfigure =
+            typeof params["session_id"] === "string" ? (params["session_id"] as string) : undefined;
           this._configurePromise = (async () => {
             try {
               const configResult = await this.send("configure", {
                 project_root: this.cwd,
                 ...this.configOverrides,
+                ...(sessionIdForConfigure ? { session_id: sessionIdForConfigure } : {}),
               });
               if (configResult.success === false) {
                 throw new Error(
@@ -334,6 +350,13 @@ export class BinaryBridge {
     // commands that legitimately need them (callers, trace_to, grep on big
     // repos). Defaults to the bridge-wide timeout otherwise.
     const effectiveTimeoutMs = options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
+
+    // Cache the latest client passed for warning delivery so server-pushed
+    // configure_warnings frames (which have no request id) can still reach
+    // the plugin's notification path.
+    if (options?.configureWarningClient !== undefined) {
+      this.configureWarningClient = options.configureWarningClient;
+    }
 
     // Capture session_id (if present) for per-request log prefixing. Bridge-
     // lifecycle logs (spawn, version, idle) stay session-less; only logs that
@@ -412,6 +435,29 @@ export class BinaryBridge {
         `configure warning delivery failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Handle the `configure_warnings` push frame the Rust binary emits after
+   * configure has returned. The frame carries the warnings produced by the
+   * deferred file walk + missing-binary detection. Forwards to the same
+   * `onConfigureWarnings` handler used for synchronous warnings so plugins
+   * don't need to know about the async path.
+   */
+  private async handleConfigureWarningsFrame(frame: Record<string, unknown>): Promise<void> {
+    if (!this.onConfigureWarnings) return;
+    const warnings = frame.warnings;
+    if (!Array.isArray(warnings) || warnings.length === 0) return;
+    const projectRoot = typeof frame.project_root === "string" ? frame.project_root : this.cwd;
+    await this.onConfigureWarnings({
+      projectRoot,
+      // The frame is a server-side push not tied to a particular request,
+      // so we don't have a session id. Plugins can still dedupe on warning
+      // content + project_root.
+      sessionId: undefined,
+      client: this.configureWarningClient,
+      warnings: warnings as ConfigureWarning[],
+    });
   }
 
   /** Kill the child process and reject all pending requests. */
@@ -645,6 +691,14 @@ export class BinaryBridge {
         }
         if (response.type === "bash_completed") {
           this.onBashCompletion?.(response as unknown as BashCompletedPayload, this);
+          continue;
+        }
+        if (response.type === "configure_warnings") {
+          this.handleConfigureWarningsFrame(response).catch((err) => {
+            warn(
+              `configure warning delivery failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
           continue;
         }
         const id = response.id as string | undefined;

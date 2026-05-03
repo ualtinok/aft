@@ -1413,7 +1413,7 @@ pub(crate) fn current_git_head(root: &Path) -> Option<String> {
     run_git(root, &["rev-parse", "HEAD"])
 }
 
-pub(crate) fn project_cache_key(project_root: &Path) -> String {
+pub fn project_cache_key(project_root: &Path) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();

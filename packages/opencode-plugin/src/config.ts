@@ -174,7 +174,7 @@ export const AftConfigSchema = z
      * Maximum source files allowed for call-graph operations (callers, trace_to,
      * trace_data, impact). Projects above this size return `project_too_large`
      * instead of attempting the reverse-index build. Does not affect grep,
-     * glob, read, edit, or any other tool. Default: 20000.
+     * glob, read, edit, or any other tool. Default: 5000.
      */
     max_callgraph_files: z.number().int().positive().optional(),
     /** Auto-refresh OpenCode's cached @cortexkit/aft-opencode package when a newer channel version exists. */

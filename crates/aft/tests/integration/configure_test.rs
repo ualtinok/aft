@@ -75,6 +75,8 @@ fn configure_warns_for_missing_formatter_and_checker_tools() {
         configure["success"], true,
         "configure should succeed: {configure:?}"
     );
+    // Warnings are now produced asynchronously after configure returns.
+    let configure = aft.merge_configure_warnings(configure);
     let formatter = warning_with_kind(&configure, "formatter_not_installed", "tool", "biome")
         .expect("missing formatter warning");
     assert_eq!(formatter["language"], "typescript");
@@ -151,6 +153,7 @@ fn configure_warns_for_missing_builtin_and_custom_lsp_binaries() {
         configure["success"], true,
         "configure should succeed: {configure:?}"
     );
+    let configure = aft.merge_configure_warnings(configure);
     let bash = warning_with_kind(
         &configure,
         "lsp_binary_missing",
@@ -231,6 +234,7 @@ fn configure_warns_for_file_discovered_auto_installable_lsp() {
         configure["success"], true,
         "configure should succeed: {configure:?}"
     );
+    let configure = aft.merge_configure_warnings(configure);
     let warning = warning_with_kind(
         &configure,
         "lsp_binary_missing",
@@ -272,6 +276,7 @@ fn configure_warns_for_custom_lsp_regardless_of_auto_install_set() {
         configure["success"], true,
         "configure should succeed: {configure:?}"
     );
+    let configure = aft.merge_configure_warnings(configure);
     let warning = warning_with_kind(
         &configure,
         "lsp_binary_missing",

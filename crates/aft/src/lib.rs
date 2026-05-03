@@ -70,6 +70,7 @@ pub mod parser;
 pub mod protocol;
 pub mod search_index;
 pub mod semantic_index;
+pub mod symbol_cache_disk;
 pub mod symbols;
 
 #[cfg(test)]
@@ -248,6 +249,6 @@ mod tests {
         assert_eq!(cfg.max_symbol_depth, 10);
         assert_eq!(cfg.formatter_timeout_secs, 10);
         assert_eq!(cfg.type_checker_timeout_secs, 30);
-        assert_eq!(cfg.max_callgraph_files, 20_000);
+        assert_eq!(cfg.max_callgraph_files, 5_000);
     }
 }

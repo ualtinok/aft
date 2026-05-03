@@ -260,11 +260,29 @@ fn persistence_restore_does_not_push_completion_frame() {
     let mut aft = AftProcess::spawn();
     configure_background(&mut aft, project.path(), storage.path(), SESSION);
 
-    assert_eq!(
-        aft.try_read_next_timeout(Duration::from_millis(250)),
-        None,
-        "restore unexpectedly emitted a push frame"
-    );
+    // Skip the async configure_warnings frame that fires after every configure
+    // (introduced when configure stopped doing the file walk synchronously).
+    // Anything other than that frame would mean restore emitted an unexpected
+    // bash-completion frame, which would be the real bug this test guards.
+    let mut deadline_iter = 0;
+    loop {
+        match aft.try_read_next_timeout(Duration::from_millis(250)) {
+            None => break,
+            Some(frame)
+                if frame.get("type").and_then(|v| v.as_str()) == Some("configure_warnings") =>
+            {
+                // expected — keep looking
+            }
+            Some(other) => {
+                panic!("restore unexpectedly emitted a push frame: {other:?}");
+            }
+        }
+        deadline_iter += 1;
+        assert!(
+            deadline_iter < 4,
+            "configure_warnings appeared more than once after restore"
+        );
+    }
 
     let drained = drain(&mut aft, SESSION);
     assert!(drained["bg_completions"]

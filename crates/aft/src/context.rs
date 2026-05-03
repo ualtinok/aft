@@ -292,6 +292,20 @@ impl AppContext {
         }
     }
 
+    /// Get a clone of the current progress sender for use from background
+    /// threads. Returns `None` when the main loop hasn't installed one (tests,
+    /// CLI without push frames).
+    ///
+    /// Used by `configure`'s deferred file-walk thread to push warnings after
+    /// configure has already returned, so configure latency stays sub-100 ms
+    /// even on huge directories.
+    pub fn progress_sender_handle(&self) -> Option<ProgressSender> {
+        self.progress_sender
+            .lock()
+            .ok()
+            .and_then(|sender| sender.clone())
+    }
+
     pub fn bash_background(&self) -> &BgTaskRegistry {
         &self.bash_background
     }

@@ -16,7 +16,8 @@ use crate::lsp::registry::{resolve_lsp_binary, servers_for_file, ServerKind};
 use crate::parser::{detect_language, LangId};
 use crate::protocol::{RawRequest, Response};
 use crate::search_index::{
-    build_path_filters, current_git_head, resolve_cache_dir, walk_project_files, SearchIndex,
+    build_path_filters, current_git_head, project_cache_key, resolve_cache_dir, walk_project_files,
+    SearchIndex,
 };
 use crate::semantic_index::SemanticIndex;
 use crate::{slog_info, slog_warn};
@@ -1043,21 +1044,26 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     }
 
-    // Single foreground source-file walk for configure-time decisions. From
-    // this list we derive source count, detected languages for formatter/checker
-    // warnings, and LSP server activation for missing-binary warnings.
-    let source_files: Vec<PathBuf> = crate::callgraph::walk_project_files(&root_path).collect();
-    let detected_languages: HashSet<LangId> = source_files
-        .iter()
-        .filter_map(|path| detect_language(path))
-        .collect();
-    let source_file_count = source_files.len();
-    let exceeds = source_file_count > ctx.config().max_callgraph_files;
+    // The full source-file walk (used to detect languages and warn about
+    // missing formatter/checker/LSP binaries) used to run synchronously here
+    // and could block configure for 30+ seconds on huge directories like the
+    // user's $HOME (2.4M files). We defer it to a background thread that
+    // pushes a `ConfigureWarningsFrame` once it's done, keeping configure
+    // itself fast on every project — including ones the user accidentally
+    // opened in.
+    //
+    // The cap-bounded count below uses `take(max + 1)` so it costs O(cap),
+    // not O(project) — fast enough to compute synchronously even on huge
+    // trees, and only used as a hint about callgraph viability.
+    let max_callgraph_files = ctx.config().max_callgraph_files;
+    let source_file_count = crate::callgraph::walk_project_files(&root_path)
+        .take(max_callgraph_files + 1)
+        .count();
+    let exceeds = source_file_count > max_callgraph_files;
     if exceeds {
         slog_warn!(
-            "project has >{} source files (max_callgraph_files={}). Call-graph operations (callers, trace_to, trace_data, impact) will be disabled. Open a specific subdirectory for call-graph features.",
-            ctx.config().max_callgraph_files,
-            ctx.config().max_callgraph_files
+            "project has >{} source files. Call-graph operations (callers, trace_to, trace_data, impact) will be disabled. Open a specific subdirectory for call-graph features.",
+            max_callgraph_files
         );
     }
 
@@ -1119,6 +1125,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
         let root_clone = root_path.clone();
         let symbol_cache = ctx.symbol_cache();
+        let symbol_storage = storage_dir.clone();
+        let symbol_project_key = project_cache_key(&root_path);
         let session_id_for_bg = log_ctx::current_session();
         thread::spawn(move || {
             log_ctx::with_session(session_id_for_bg, || {
@@ -1132,16 +1140,57 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 
                 // Pre-warm symbol cache from indexed files
                 let mut warmed_files = 0usize;
+                let mut skipped_files = 0usize;
+                if let Ok(mut cache) = symbol_cache.write() {
+                    cache.set_project_root(root_clone.clone());
+                    if let Some(storage_dir) = symbol_storage.as_deref() {
+                        let loaded_count = cache.load_from_disk(storage_dir, &symbol_project_key);
+                        slog_info!("loaded symbol cache from disk: {} files", loaded_count);
+                    }
+                }
                 let mut parser = crate::parser::FileParser::with_symbol_cache_generation(
-                    symbol_cache,
+                    symbol_cache.clone(),
                     Some(symbol_cache_generation),
                 );
                 for file_entry in &index.files {
+                    let cached = symbol_cache
+                        .read()
+                        .map(|cache| {
+                            cache.contains_path_with_mtime(&file_entry.path, file_entry.modified)
+                        })
+                        .unwrap_or(false);
+                    if cached {
+                        skipped_files += 1;
+                        continue;
+                    }
                     if parser.extract_symbols(&file_entry.path).is_ok() {
                         warmed_files += 1;
                     }
                 }
-                slog_info!("pre-warmed symbol cache: {} files", warmed_files);
+
+                let total_files = symbol_cache.read().map(|cache| cache.len()).unwrap_or(0);
+                if let Some(storage_dir) = symbol_storage.as_deref() {
+                    if let Ok(cache) = symbol_cache.read() {
+                        match crate::symbol_cache_disk::write_to_disk(
+                            &cache,
+                            storage_dir,
+                            &symbol_project_key,
+                        ) {
+                            Ok(()) => {
+                                slog_info!("persisted symbol cache: {} files", cache.len());
+                            }
+                            Err(error) => {
+                                slog_warn!("failed to persist symbol cache: {}", error);
+                            }
+                        }
+                    }
+                }
+                slog_info!(
+                    "pre-warmed symbol cache: {} new, {} cached, {} files total",
+                    warmed_files,
+                    skipped_files,
+                    total_files
+                );
 
                 let _ = tx.send(index);
             });
@@ -1169,8 +1218,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         let session_id_for_bg2 = log_ctx::current_session();
         thread::spawn(move || {
             log_ctx::with_session(session_id_for_bg2, || {
-                let build_result =
-                    catch_unwind(AssertUnwindSafe(|| -> Result<SemanticIndex, String> {
+                // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
+                // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
+                // on constrained systems when indexing tens of thousands of files.
+                const MAX_SEMANTIC_FILES: usize = 10_000;
+
+                let build_result = catch_unwind(AssertUnwindSafe(
+                    || -> Result<SemanticIndex, String> {
                         let _ = tx_progress.send(SemanticIndexEvent::Progress {
                             stage: "initializing_embedding_model".to_string(),
                             files: None,
@@ -1199,10 +1253,83 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                                     return Ok(cached);
                                 }
 
-                                slog_info!(
-                                    "semantic index: {} stale files, rebuilding",
-                                    stale_count
-                                );
+                                // Try incremental refresh: re-embed only changed/new files,
+                                // drop entries for deleted files, keep everything else.
+                                // This is the hot path for restart on a project with a
+                                // handful of edits — avoids re-embedding 4000+ unchanged
+                                // files just to pick up 10 changes.
+                                let filters = build_path_filters(&[], &[]).unwrap_or_default();
+                                let current_files = walk_project_files(&root_clone, &filters);
+
+                                // Cap before incremental too — same reason as full rebuild.
+                                if current_files.len() > MAX_SEMANTIC_FILES {
+                                    slog_warn!(
+                                        "skipping semantic index: {} files exceeds limit of {}. \
+                                         Open a specific project directory instead of a large root.",
+                                        current_files.len(),
+                                        MAX_SEMANTIC_FILES
+                                    );
+                                    return Err(format!(
+                                        "too many files ({}) for semantic indexing (max {})",
+                                        current_files.len(),
+                                        MAX_SEMANTIC_FILES
+                                    ));
+                                }
+
+                                let mut cached = cached;
+                                let mut embed = |texts: Vec<String>| model.embed(texts);
+                                let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                    stage: "refreshing_stale_files".to_string(),
+                                    files: Some(stale_count),
+                                    entries_done: None,
+                                    entries_total: None,
+                                });
+                                let mut progress = |done: usize, total: usize| {
+                                    let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                        stage: "embedding_stale_symbols".to_string(),
+                                        files: Some(stale_count),
+                                        entries_done: Some(done),
+                                        entries_total: Some(total),
+                                    });
+                                };
+
+                                match cached.refresh_stale_files(
+                                    &root_clone,
+                                    &current_files,
+                                    &mut embed,
+                                    semantic_config.max_batch_size.max(1),
+                                    &mut progress,
+                                ) {
+                                    Ok(summary) => {
+                                        slog_info!(
+                                            "semantic index: refreshed incrementally — {} changed, {} new, {} deleted, {} entries added (kept {} cached)",
+                                            summary.changed,
+                                            summary.new_files,
+                                            summary.deleted,
+                                            summary.added_entries,
+                                            cached.len(),
+                                        );
+                                        cached.set_fingerprint(fingerprint);
+                                        if let Some(ref dir) = semantic_storage {
+                                            cached.write_to_disk(dir, &semantic_project_key);
+                                        }
+                                        let _ = tx_progress.send(SemanticIndexEvent::Progress {
+                                            stage: "loaded_cached_index".to_string(),
+                                            files: None,
+                                            entries_done: Some(cached.entry_count()),
+                                            entries_total: Some(cached.entry_count()),
+                                        });
+                                        return Ok(cached);
+                                    }
+                                    Err(error) => {
+                                        // Hard failure (dimension mismatch, embed backend
+                                        // error). Drop the cache and do a full rebuild.
+                                        slog_warn!(
+                                            "incremental refresh failed ({}), falling back to full rebuild",
+                                            error
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -1215,10 +1342,6 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                             entries_total: None,
                         });
 
-                        // Cap file count to prevent OOM on huge project roots (e.g., /home/user).
-                        // fastembed model (~200MB) + embeddings + batch buffers can exceed memory
-                        // on constrained systems when indexing tens of thousands of files.
-                        const MAX_SEMANTIC_FILES: usize = 10_000;
                         if files.len() > MAX_SEMANTIC_FILES {
                             slog_warn!(
                                 "skipping semantic index: {} files exceeds limit of {}. \
@@ -1275,7 +1398,8 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
                         }
 
                         Ok(index)
-                    }));
+                    },
+                ));
 
                 let event = match build_result {
                     Ok(Ok(index)) => SemanticIndexEvent::Ready(index),
@@ -1338,12 +1462,53 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     slog_info!("project root set: {}", root_path.display());
 
     let config_snapshot = ctx.config().clone();
-    let mut warnings = detect_missing_tools_for_languages(&detected_languages, &config_snapshot)
-        .into_iter()
-        .map(|warning| json!(warning))
-        .collect::<Vec<_>>();
-    warnings.extend(detect_missing_lsp_binaries(&source_files, &config_snapshot));
 
+    // Defer the full source-file walk + language detection +
+    // formatter/checker/LSP missing-binary detection to a background thread.
+    // On a normal project this finishes in <1 s and pushes a
+    // `ConfigureWarningsFrame` for the plugin to surface; on a huge directory
+    // it may take seconds-to-minutes, but configure itself returns now.
+    if let Some(progress_sender) = ctx.progress_sender_handle() {
+        let walk_root = root_path.clone();
+        let max_files = config_snapshot.max_callgraph_files;
+        let project_root_display = root_path.display().to_string();
+        let config_for_bg = config_snapshot.clone();
+        let session_id_for_bg = log_ctx::current_session();
+        thread::spawn(move || {
+            log_ctx::with_session(session_id_for_bg, || {
+                let source_files: Vec<PathBuf> =
+                    crate::callgraph::walk_project_files(&walk_root).collect();
+                let detected_languages: HashSet<LangId> = source_files
+                    .iter()
+                    .filter_map(|path| detect_language(path))
+                    .collect();
+                let full_count = source_files.len();
+                let full_exceeds = full_count > max_files;
+
+                let mut warnings =
+                    detect_missing_tools_for_languages(&detected_languages, &config_for_bg)
+                        .into_iter()
+                        .map(|warning| json!(warning))
+                        .collect::<Vec<_>>();
+                warnings.extend(detect_missing_lsp_binaries(&source_files, &config_for_bg));
+
+                let frame = crate::protocol::ConfigureWarningsFrame::new(
+                    project_root_display,
+                    full_count,
+                    full_exceeds,
+                    max_files,
+                    warnings,
+                );
+                progress_sender(crate::protocol::PushFrame::ConfigureWarnings(frame));
+            });
+        });
+    }
+
+    // Configure now returns immediately. The plugin should treat the response
+    // as the "configured" signal and listen for a follow-up
+    // `configure_warnings` push frame for missing-binary warnings and the
+    // accurate file count. The bounded source_file_count below is good
+    // enough for an early "is this project too big for callgraph" hint.
     Response::success(
         &req.id,
         json!({
@@ -1351,7 +1516,9 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
             "source_file_count": source_file_count,
             "source_file_count_exceeds_max": exceeds,
             "max_callgraph_files": config_snapshot.max_callgraph_files,
-            "warnings": warnings,
+            "source_file_count_bounded": true,
+            "warnings": [],
+            "warnings_pending": true,
         }),
     )
 }

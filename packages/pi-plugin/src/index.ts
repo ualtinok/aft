@@ -429,6 +429,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   );
   const ctx: PluginContext = { pool, config, storageDir };
 
+  // Eager async configure: warm the bridge for `process.cwd()` so the first
+  // tool call doesn't pay the spawn + configure latency. Errors are swallowed —
+  // the next real tool call will surface a proper error.
+  void (async () => {
+    try {
+      const bridge = pool.getBridge(process.cwd());
+      // No session_id: runs before any user session exists; configure
+      // threads spawned by this warmup will log with no [ses_xxx] prefix.
+      await bridge.send("status", {});
+    } catch (err) {
+      log(`eager configure failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  })();
+
   if (ANNOUNCEMENT_VERSION && ANNOUNCEMENT_FEATURES.length > 0) {
     sendFeatureAnnouncement(ANNOUNCEMENT_VERSION, ANNOUNCEMENT_FEATURES, storageDir);
   }

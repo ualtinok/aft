@@ -20,6 +20,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BinaryBridge, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import { ingestBgCompletions } from "../bg-notifications.js";
+import {
+  getSessionDirectory,
+  getSessionDirectoryCached,
+  warmSessionDirectory,
+} from "../shared/session-directory.js";
 import type { PluginContext } from "../types.js";
 
 /**
@@ -62,33 +67,58 @@ export interface ToolRuntime {
 }
 
 /**
+ * Canonicalize a directory path: strip trailing separators, resolve symlinks
+ * via `realpath`, fall back to lexical resolution if the path doesn't exist.
+ *
+ * Used both for the canonical project-root key and for verifying the
+ * session-stored directory before we use it for routing.
+ */
+function canonicalizeDirectory(dir: string): string {
+  const trimmed = dir.replace(/[/\\]+$/, "");
+  try {
+    return fs.realpathSync(trimmed);
+  } catch {
+    return path.resolve(trimmed);
+  }
+}
+
+/**
  * Resolve the canonical project root for a runtime.
  *
  * Prefers `worktree` because that stays stable across OpenCode sessions in
  * the same project; falls back to `directory` when unavailable (standalone
  * CLI use, older hosts). Normalizes trailing slashes and resolves symlinks
- * via `realpath` so `/repo` and `/repo/` and `/Users/.../repo -> /Volumes/...`
- * collapse to the same key.
+ * so `/repo` and `/repo/` and `/Users/.../repo -> /Volumes/...` collapse to
+ * the same key.
+ *
+ * NOTE: When the runtime carries a `sessionID` and we have a cached
+ * session-stored directory for it (see `shared/session-directory.ts`), the
+ * stored directory wins. This is the workaround for OpenCode's bug where
+ * `ctx.directory` is set to `process.cwd()` rather than the resumed
+ * session's actual project directory.
  */
 export function projectRootFor(runtime: ToolRuntime): string {
-  const raw = runtime.worktree ?? runtime.directory;
-  // Strip trailing separators first so realpath failure still produces a
-  // consistent fallback key.
-  const trimmed = raw.replace(/[/\\]+$/, "");
-  try {
-    return fs.realpathSync(trimmed);
-  } catch {
-    // realpath fails for paths that don't exist (e.g. test fixtures created
-    // lazily). Fall back to lexical resolution so we still produce a stable
-    // key rather than crashing.
-    return path.resolve(trimmed);
+  // Workaround: if OpenCode handed us a session ID and the session has a
+  // resolved directory in our cache, use that. This survives `opencode -s`
+  // launched from the wrong cwd.
+  const cached = getSessionDirectoryCached(runtime.sessionID);
+  if (typeof cached === "string" && cached.length > 0) {
+    return canonicalizeDirectory(cached);
   }
+
+  const raw = runtime.worktree ?? runtime.directory;
+  return canonicalizeDirectory(raw);
 }
 
 /**
  * Get the BinaryBridge for the runtime's project root.
  *
  * Prefer `callBridge()` unless you need to send multiple requests yourself.
+ *
+ * This is synchronous and uses only the cached session directory. If the
+ * cache is cold, it falls back to `runtime.directory` — `callBridge()`
+ * eagerly warms the cache before calling this so the cache is hot for
+ * subsequent calls in the same session.
  */
 export function bridgeFor(ctx: PluginContext, runtime: ToolRuntime): BinaryBridge {
   return ctx.pool.getBridge(projectRootFor(runtime));
@@ -101,17 +131,29 @@ export function bridgeFor(ctx: PluginContext, runtime: ToolRuntime): BinaryBridg
  * the right bridge (project-keyed), attaches the session namespace from
  * `context.sessionID`, and returns whatever the binary responds.
  *
+ * Before routing, it ensures the session-directory cache is warm so the
+ * very first tool call on a resumed-from-wrong-cwd session still reaches
+ * the correct project bridge. Subsequent calls hit the cache synchronously.
+ *
  * The Rust side falls back to a shared default namespace when `session_id`
  * is absent (see `RawRequest::session()`), so hosts that don't expose a
  * session identifier still work — they just share undo/checkpoint state.
  */
-export function callBridge(
+export async function callBridge(
   ctx: PluginContext,
   runtime: ToolRuntime,
   command: string,
   params: Record<string, unknown> = {},
   options?: BridgeRequestOptions,
-): ReturnType<BinaryBridge["send"]> {
+): Promise<Record<string, unknown>> {
+  // Resolve the session's stored project directory once on first call —
+  // OpenCode sets `runtime.directory = process.cwd()` even for resumed
+  // sessions, so we can't trust it as the workspace root. Subsequent
+  // calls in the same session hit the cache and skip the lookup.
+  if (runtime.sessionID && getSessionDirectoryCached(runtime.sessionID) === undefined) {
+    await getSessionDirectory(ctx.client, runtime.sessionID, runtime.directory);
+  }
+
   const merged: Record<string, unknown> = { ...params };
   if (runtime.sessionID) {
     merged.session_id = runtime.sessionID;
@@ -122,10 +164,21 @@ export function callBridge(
     configureWarningClient: ctx.client,
     ...options,
   };
-  return bridgeFor(ctx, runtime)
-    .send(command, merged, Object.keys(sendOptions).length > 0 ? sendOptions : undefined)
-    .then((response) => {
-      ingestBgCompletions(runtime.sessionID, response.bg_completions);
-      return response;
-    });
+  const response = await bridgeFor(ctx, runtime).send(
+    command,
+    merged,
+    Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
+  );
+  ingestBgCompletions(runtime.sessionID, response.bg_completions);
+  return response;
+}
+
+/**
+ * Eagerly warm the session-directory cache for a runtime. Safe to call from
+ * synchronous code — the lookup runs in the background and failures are
+ * logged. Useful in plugin lifecycle hooks (`chat.message`, etc.) where we
+ * want the cache filled before any tool call arrives.
+ */
+export function warmSessionDirectoryFromRuntime(ctx: PluginContext, runtime: ToolRuntime): void {
+  warmSessionDirectory(ctx.client, runtime.sessionID, runtime.directory);
 }

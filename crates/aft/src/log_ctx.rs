@@ -54,8 +54,12 @@ pub fn current_session() -> Option<String> {
 
 /// Return the current session id prefix string, e.g. `"[ses_abcd1234] "`,
 /// or an empty string if no session is set.
+///
+/// The stored session id may already carry the `ses_` prefix (OpenCode's
+/// real session IDs do); detect that and avoid double-prefixing.
 pub fn session_prefix() -> String {
     CURRENT_SESSION.with(|s| match s.borrow().as_deref() {
+        Some(sid) if sid.starts_with("ses_") => format!("[{}] ", sid),
         Some(sid) => format!("[ses_{}] ", sid),
         None => String::new(),
     })
@@ -138,6 +142,15 @@ mod tests {
 
         // Without session
         assert_eq!(session_prefix(), "");
+    }
+
+    #[test]
+    fn session_prefix_does_not_double_prefix_real_ids() {
+        // Real OpenCode session IDs already start with "ses_" — the
+        // formatter must not turn that into "ses_ses_xxx".
+        with_session(Some("ses_313660571ffeZTsf4koSJwk50Q".to_string()), || {
+            assert_eq!(session_prefix(), "[ses_313660571ffeZTsf4koSJwk50Q] ");
+        });
     }
 
     #[test]

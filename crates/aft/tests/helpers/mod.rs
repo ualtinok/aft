@@ -156,6 +156,57 @@ impl AftProcess {
         ))
     }
 
+    /// Wait for and consume a `configure_warnings` push frame, returning its
+    /// `warnings` array merged into the original configure response.
+    ///
+    /// Configure now defers the file-walk + missing-binary detection to a
+    /// background thread (so it can return in <100 ms even on huge directories).
+    /// Tests that previously relied on synchronous warnings should call this
+    /// helper after `configure` to merge the async results back in:
+    ///
+    /// ```rust,ignore
+    /// let configure = aft.send(json!({"id":"cfg",...}).to_string().as_str());
+    /// let configure = aft.merge_configure_warnings(configure);
+    /// // configure["warnings"] now contains the async warnings
+    /// ```
+    pub fn merge_configure_warnings(
+        &mut self,
+        mut configure: serde_json::Value,
+    ) -> serde_json::Value {
+        let frame = self.wait_for_configure_warnings_frame();
+        let warnings = frame
+            .get("warnings")
+            .and_then(|warnings| warnings.as_array())
+            .cloned()
+            .unwrap_or_default();
+        configure["warnings"] = serde_json::Value::Array(warnings);
+        if let Some(count) = frame.get("source_file_count").cloned() {
+            configure["source_file_count"] = count;
+        }
+        if let Some(exceeds) = frame.get("source_file_count_exceeds_max").cloned() {
+            configure["source_file_count_exceeds_max"] = exceeds;
+        }
+        configure["warnings_pending"] = serde_json::Value::Bool(false);
+        configure
+    }
+
+    /// Read frames until a `configure_warnings` push frame arrives, then
+    /// return it. Panics if a non-frame response (one with an `id`) arrives
+    /// before the frame, or if EOF is hit.
+    fn wait_for_configure_warnings_frame(&mut self) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for configure_warnings push frame");
+            }
+            let value = self.read_json_line();
+            if value.get("type").and_then(|kind| kind.as_str()) == Some("configure_warnings") {
+                return value;
+            }
+            // Other push frames (progress, bash_completed) are skipped silently.
+        }
+    }
+
     /// Send a raw line that should produce no response (e.g. empty line).
     /// Verifies the process is still alive by sending a follow-up ping.
     pub fn send_silent(&mut self, request: &str) {

@@ -59,11 +59,38 @@ pub struct BashCompletedFrame {
     pub output_truncated: bool,
 }
 
+/// Pushed after configure has completed, when the deferred file walk and
+/// language detection produce warnings (missing formatter/checker/LSP binaries,
+/// or "project too large" file-count exceeded). The walk runs in a background
+/// thread so configure itself returns in <100 ms even on huge directories
+/// (e.g. user's $HOME). When the walk finishes, AFT pushes one frame with
+/// the merged warnings — the plugin delivers them through the same path as
+/// the synchronous warnings that configure used to return.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigureWarningsFrame {
+    #[serde(rename = "type")]
+    pub frame_type: &'static str,
+    /// Project root the warnings refer to. Plugins use this to scope the
+    /// session-id deduplication of repeated identical warnings.
+    pub project_root: String,
+    /// Source-file count discovered by the bounded walk (may stop short of
+    /// the full count if `max_callgraph_files` is exceeded).
+    pub source_file_count: usize,
+    /// `true` when the walk hit the configured `max_callgraph_files` cap;
+    /// in that case `source_file_count` is `cap + 1`.
+    pub source_file_count_exceeds_max: bool,
+    /// Configured callgraph file cap, echoed for plugin display.
+    pub max_callgraph_files: usize,
+    /// Merged formatter/checker/LSP missing-binary warnings.
+    pub warnings: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum PushFrame {
     Progress(ProgressFrame),
     BashCompleted(BashCompletedFrame),
+    ConfigureWarnings(ConfigureWarningsFrame),
 }
 
 impl PermissionAskFrame {
@@ -87,6 +114,25 @@ impl ProgressFrame {
             request_id: request_id.into(),
             kind,
             chunk: chunk.into(),
+        }
+    }
+}
+
+impl ConfigureWarningsFrame {
+    pub fn new(
+        project_root: impl Into<String>,
+        source_file_count: usize,
+        source_file_count_exceeds_max: bool,
+        max_callgraph_files: usize,
+        warnings: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            frame_type: "configure_warnings",
+            project_root: project_root.into(),
+            source_file_count,
+            source_file_count_exceeds_max,
+            max_callgraph_files,
+            warnings,
         }
     }
 }

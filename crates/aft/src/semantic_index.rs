@@ -7,7 +7,7 @@ use fastembed::{EmbeddingModel as FastembedEmbeddingModel, InitOptions, TextEmbe
 use rayon::prelude::*;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::Display;
 use std::fs;
@@ -827,6 +827,24 @@ pub struct SemanticIndex {
     fingerprint: Option<SemanticIndexFingerprint>,
 }
 
+/// Result of an incremental refresh of the semantic index. All counts are file
+/// counts except `added_entries`, which counts symbol-level embeddings appended
+/// for the changed/new file set.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RefreshSummary {
+    pub deleted: usize,
+    pub changed: usize,
+    pub new_files: usize,
+    pub added_entries: usize,
+}
+
+impl RefreshSummary {
+    /// True when no files were touched.
+    pub fn is_noop(&self) -> bool {
+        self.deleted == 0 && self.changed == 0 && self.new_files == 0
+    }
+}
+
 /// Search result from a semantic query
 #[derive(Debug)]
 pub struct SemanticResult {
@@ -1010,6 +1028,174 @@ impl SemanticIndex {
             max_batch_size,
             Some(progress),
         )
+    }
+
+    /// Incrementally refresh entries for changed/new files only, preserving cached
+    /// embeddings for unchanged files. Used when loading the index from disk and
+    /// finding that a small fraction of files have moved on, deleted, or appeared.
+    ///
+    /// Returns `RefreshSummary` describing what changed. On success, `self` is
+    /// mutated in place and remains a valid index.
+    ///
+    /// `current_files` is the full set of files the project considers indexable
+    /// (typically `walk_project_files(...)`). Files in the cache that are no
+    /// longer in this set are treated as deleted.
+    pub fn refresh_stale_files<F, P>(
+        &mut self,
+        project_root: &Path,
+        current_files: &[PathBuf],
+        embed_fn: &mut F,
+        max_batch_size: usize,
+        progress: &mut P,
+    ) -> Result<RefreshSummary, String>
+    where
+        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
+        P: FnMut(usize, usize),
+    {
+        // 1. Bucket files into deleted / changed / new.
+        let current_set: HashSet<&Path> = current_files.iter().map(PathBuf::as_path).collect();
+
+        // Files in cache that disappeared from disk OR are no longer in the
+        // walked set. Both cases need their entries dropped.
+        let mut deleted: Vec<PathBuf> = Vec::new();
+        let mut changed: Vec<PathBuf> = Vec::new();
+        for indexed_path in self.file_mtimes.keys() {
+            if !current_set.contains(indexed_path.as_path()) {
+                deleted.push(indexed_path.clone());
+                continue;
+            }
+            if self.is_file_stale(indexed_path) {
+                changed.push(indexed_path.clone());
+            }
+        }
+
+        // Files in walk that were never indexed.
+        let mut new_files: Vec<PathBuf> = Vec::new();
+        for path in current_files {
+            if !self.file_mtimes.contains_key(path) {
+                new_files.push(path.clone());
+            }
+        }
+
+        // Fast path: nothing to do.
+        if deleted.is_empty() && changed.is_empty() && new_files.is_empty() {
+            progress(0, 0);
+            return Ok(RefreshSummary::default());
+        }
+
+        // 2. Drop entries for deleted + changed files. We re-embed `changed`
+        //    so we have to clear them from `entries` first.
+        let drop_set: HashSet<PathBuf> = deleted
+            .iter()
+            .cloned()
+            .chain(changed.iter().cloned())
+            .collect();
+        if !drop_set.is_empty() {
+            self.entries.retain(|e| !drop_set.contains(&e.chunk.file));
+            for path in &deleted {
+                self.file_mtimes.remove(path);
+            }
+            // For `changed`, mtimes get rewritten below from collect_chunks.
+            for path in &changed {
+                self.file_mtimes.remove(path);
+            }
+        }
+
+        // 3. Embed the changed + new set, if any.
+        let mut to_embed: Vec<PathBuf> = Vec::with_capacity(changed.len() + new_files.len());
+        to_embed.extend(changed.iter().cloned());
+        to_embed.extend(new_files.iter().cloned());
+
+        if to_embed.is_empty() {
+            // Only deletions happened.
+            progress(0, 0);
+            return Ok(RefreshSummary {
+                deleted: deleted.len(),
+                changed: 0,
+                new_files: 0,
+                added_entries: 0,
+            });
+        }
+
+        let (chunks, fresh_mtimes) = Self::collect_chunks(project_root, &to_embed);
+
+        // We must always merge mtimes for files we walked, even if they
+        // produced zero chunks (e.g., a file with no symbols). Otherwise
+        // the next refresh would re-bucket them as "new" forever.
+        for (file, mtime) in fresh_mtimes {
+            self.file_mtimes.insert(file, mtime);
+        }
+
+        if chunks.is_empty() {
+            progress(0, 0);
+            return Ok(RefreshSummary {
+                deleted: deleted.len(),
+                changed: changed.len(),
+                new_files: new_files.len(),
+                added_entries: 0,
+            });
+        }
+
+        // 4. Embed in batches and dimension-check against the existing index.
+        let total_chunks = chunks.len();
+        progress(0, total_chunks);
+        let batch_size = max_batch_size.max(1);
+        let existing_dimension = if self.entries.is_empty() {
+            None
+        } else {
+            Some(self.dimension)
+        };
+        let mut new_entries: Vec<EmbeddingEntry> = Vec::with_capacity(chunks.len());
+        let mut observed_dimension: Option<usize> = existing_dimension;
+
+        for batch_start in (0..chunks.len()).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(chunks.len());
+            let batch_texts: Vec<String> = chunks[batch_start..batch_end]
+                .iter()
+                .map(|c| c.embed_text.clone())
+                .collect();
+
+            let vectors = embed_fn(batch_texts)?;
+            validate_embedding_batch(&vectors, batch_end - batch_start, "embedding backend")?;
+
+            if let Some(dim) = vectors.first().map(|v| v.len()) {
+                match observed_dimension {
+                    None => observed_dimension = Some(dim),
+                    Some(expected) if dim != expected => {
+                        // Refuse to mix dimensions in one index. Caller should
+                        // fall back to a full rebuild.
+                        return Err(format!(
+                            "embedding dimension changed during incremental refresh: \
+                             cached index uses {expected}, new vectors use {dim}"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+            for (i, vector) in vectors.into_iter().enumerate() {
+                let chunk_idx = batch_start + i;
+                new_entries.push(EmbeddingEntry {
+                    chunk: chunks[chunk_idx].clone(),
+                    vector,
+                });
+            }
+
+            progress(new_entries.len(), total_chunks);
+        }
+
+        let added = new_entries.len();
+        self.entries.extend(new_entries);
+        if let Some(dim) = observed_dimension {
+            self.dimension = dim;
+        }
+
+        Ok(RefreshSummary {
+            deleted: deleted.len(),
+            changed: changed.len(),
+            new_files: new_files.len(),
+            added_entries: added,
+        })
     }
 
     /// Search the index with a query embedding, returning top-K results sorted by relevance

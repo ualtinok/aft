@@ -53,6 +53,11 @@ import {
 import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import { clearSharedBridgePool, setSharedBridgePool } from "./shared/runtime.js";
+import {
+  getSessionDirectory,
+  getSessionDirectoryCached,
+  warmSessionDirectory,
+} from "./shared/session-directory.js";
 import { coerceAftStatus, formatStatusMarkdown } from "./shared/status.js";
 import { ensureTuiPluginEntry } from "./shared/tui-config.js";
 import { cleanupUrlCache } from "./shared/url-fetch.js";
@@ -423,10 +428,14 @@ const plugin: Plugin = async (input) => {
         );
       },
       onBashCompletion: (completion, bridge) => {
+        // Prefer the cached session directory; fall back to plugin-init cwd
+        // when we haven't seen this session yet (e.g. completion arriving
+        // before any tool call has populated the cache).
+        const sessionDir = getSessionDirectoryCached(completion.session_id) ?? input.directory;
         void handlePushedBgCompletion(
           {
             ctx,
-            directory: input.directory,
+            directory: sessionDir,
             sessionID: completion.session_id,
             client: input.client,
             isActive: () => bridge.hasPendingRequests(),
@@ -445,6 +454,27 @@ const plugin: Plugin = async (input) => {
     storageDir: configOverrides.storage_dir as string,
   };
   setSharedBridgePool(pool);
+
+  // Eager async configure: fire-and-forget a status request so the bridge
+  // for `input.directory` warms up (spawns the binary, runs configure,
+  // pre-loads disk-backed indexes) before the agent's first tool call.
+  //
+  // We send `status` rather than `configure` because `bridge.send()` runs
+  // configure lazily on the first non-{configure,version} command, and
+  // status is the cheapest valid request that triggers that path. Errors
+  // are swallowed — if configure fails on init, the next real tool call
+  // will surface a proper error to the agent.
+  void (async () => {
+    try {
+      const bridge = pool.getBridge(input.directory);
+      // No session_id: this runs before any user session exists; the
+      // resulting configure threads will log with no [ses_xxx] prefix
+      // (correct behavior for plugin-init activity).
+      await bridge.send("status", {}, { configureWarningClient: input.client });
+    } catch (err) {
+      log(`eager configure failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  })();
 
   // Start RPC server for TUI plugin communication
   const rpcServer = new AftRpcServer(configOverrides.storage_dir as string, input.directory);
@@ -466,9 +496,35 @@ const plugin: Plugin = async (input) => {
   });
   rpcServer.handle("status", async (params) => {
     const sessionID = (params.sessionID as string) || "rpc";
-    // Prefer an already-warm bridge (semantic/trigram indexes loaded) before
-    // spawning a cold one just to answer a status query.
-    const bridge = pool.getActiveBridgeForRoot(input.directory) ?? pool.getBridge(input.directory);
+    // The TUI sidebar polls this every ~1.5s. We must NOT cold-spawn a bridge
+    // just to answer a status query — the user may have launched OpenCode
+    // from a directory that's expensive to configure (e.g. $HOME with 500k+
+    // files), causing every poll to hang configure for 30s and restart
+    // forever. If no bridge is already warm for this project, return a
+    // synthetic "not_initialized" status so the sidebar shows something
+    // sensible without triggering project indexing.
+    //
+    // Try the session-stored directory first (fixes `opencode -s` from a
+    // different cwd), then fall back to the plugin-init cwd.
+    const cachedDir = getSessionDirectoryCached(sessionID);
+    const candidateDirs = new Set<string>();
+    if (typeof cachedDir === "string" && cachedDir.length > 0) {
+      candidateDirs.add(cachedDir);
+    }
+    candidateDirs.add(input.directory);
+    let bridge: ReturnType<typeof pool.getActiveBridgeForRoot> = null;
+    for (const dir of candidateDirs) {
+      bridge = pool.getActiveBridgeForRoot(dir);
+      if (bridge) break;
+    }
+    if (!bridge) {
+      return {
+        success: true,
+        status: "not_initialized",
+        message:
+          "AFT bridge has not been initialized for this project yet. Status will populate after the first tool call.",
+      };
+    }
     return await bridge.send("status", { session_id: sessionID });
   });
   // Feature announcement — TUI plugin calls this on startup to show a dialog.
@@ -684,9 +740,14 @@ const plugin: Plugin = async (input) => {
       if (eventInput.event.type !== "session.idle") return;
       const sessionID = extractSessionID(eventInput.event.properties);
       if (!sessionID) return;
+      // Use the session's stored directory rather than the plugin-init cwd:
+      // OpenCode passes process.cwd() in `input.directory`, which can be wrong
+      // for `-s` resumes from another folder.
+      const sessionDir =
+        (await getSessionDirectory(input.client, sessionID, input.directory)) ?? input.directory;
       await handleIdleBgCompletions({
         ctx,
-        directory: input.directory,
+        directory: sessionDir,
         sessionID,
         client: input.client,
       });
@@ -696,7 +757,11 @@ const plugin: Plugin = async (input) => {
       sessionId?: string;
       id?: string;
     }) => {
-      resetBgWake(messageInput.sessionID ?? messageInput.sessionId ?? messageInput.id);
+      const sid = messageInput.sessionID ?? messageInput.sessionId ?? messageInput.id;
+      resetBgWake(sid);
+      // Eagerly warm the session-directory cache so the first tool call from
+      // this turn routes to the right project (covers `opencode -s`-from-cwd).
+      warmSessionDirectory(input.client, sid, input.directory);
     },
     "command.execute.before": async (
       commandInput: { command: string; sessionID: string },
@@ -706,9 +771,13 @@ const plugin: Plugin = async (input) => {
         return;
       }
 
+      // Resolve the session's stored directory before picking a bridge —
+      // otherwise `/aft-status` from a `-s` session would target home cwd.
+      const sessionDir =
+        (await getSessionDirectory(input.client, commandInput.sessionID, input.directory)) ??
+        input.directory;
       // Prefer an existing active bridge to get warm index status
-      const bridge =
-        ctx.pool.getActiveBridgeForRoot(input.directory) ?? ctx.pool.getBridge(input.directory);
+      const bridge = ctx.pool.getActiveBridgeForRoot(sessionDir) ?? ctx.pool.getBridge(sessionDir);
       const response = await bridge.send("status", { session_id: commandInput.sessionID });
       if (response.success === false) {
         throw new Error((response.message as string) || "status failed");
@@ -746,8 +815,11 @@ const plugin: Plugin = async (input) => {
             "\n\n[Hint] Use the grep tool instead of bash for faster indexed search.";
         }
       }
+      // Use cached session directory so bg-completion drains target the
+      // right project bridge after `opencode -s` from another cwd.
+      const sessionDir = getSessionDirectoryCached(toolInput.sessionID) ?? input.directory;
       await appendInTurnBgCompletions(
-        { ctx, directory: input.directory, sessionID: toolInput.sessionID },
+        { ctx, directory: sessionDir, sessionID: toolInput.sessionID },
         output,
       );
     },

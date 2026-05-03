@@ -125,7 +125,8 @@ pub struct Config {
     /// exceeds this count the reverse index is not built and those
     /// commands return a `project_too_large` error. Does not affect
     /// `grep`, `glob`, `read`, `edit`, or other non-callgraph features.
-    /// Default: 20_000 (covers typical monorepos; rejects OS-wide roots).
+    /// Default: 5_000 (matches measured per-op cost ceilings; raise for
+    /// very large projects if you accept multi-minute per-call latency).
     pub max_callgraph_files: usize,
     pub semantic: SemanticBackendConfig,
     /// Enable Astral ty as an experimental Python LSP server (default: false).
@@ -189,10 +190,24 @@ impl Default for Config {
             bash_permissions: false,
             search_index_max_file_size: 1_048_576,
             // Projects larger than this skip call-graph reverse index construction.
-            // Chosen to cover typical monorepos (AFT ~2K, OpenCode ~5K, Reth ~8K)
-            // while rejecting OS-wide roots (/home, ~/Work) that would otherwise
-            // walk hundreds of thousands of files per callers/trace_to query.
-            max_callgraph_files: 20_000,
+            //
+            // The previous default (20_000) was set by hand-wave to "fits under
+            // the 30 s bridge timeout" without measurement. Direct benchmarks
+            // showed the cost is super-linear (tree-sitter parse + reverse-index
+            // build per file): a 6.8K-file Rust project took 41 s — already past
+            // the 60 s per-callgraph-op timeout. At 10 K extrapolated cost is
+            // ~80–100 s; at 20 K it's 5+ minutes. So the old default routinely
+            // produced "timed out, restarting bridge" rather than a clean
+            // `project_too_large` rejection.
+            //
+            // 5_000 reflects measured reality: at this size, callgraph
+            // operations on a real Rust/TS project complete in roughly 30–40 s,
+            // matching the per-op timeout budget. Users with bigger projects
+            // can raise this knob, but the default should not advertise
+            // capabilities that fail in practice. Read/edit/grep/glob/outline/
+            // semantic_search/AST/LSP all remain unaffected by this cap —
+            // it only gates `aft_navigate` and `aft_refactor op="move"`.
+            max_callgraph_files: 5_000,
             semantic: SemanticBackendConfig::default(),
             experimental_lsp_ty: false,
             lsp_servers: Vec::new(),
