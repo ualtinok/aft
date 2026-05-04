@@ -213,16 +213,57 @@ async function assertPublicUrl(
   if (addresses.length === 0) {
     throw new Error(`Failed to resolve URL host ${url.hostname}`);
   }
-  return addresses[0].address;
+  // Prefer IPv4 when available. AAAA can come first on many resolvers, but
+  // many user networks (corporate, home, mobile) don't have IPv6 transit, so
+  // pinning to AAAA causes EHOSTUNREACH / connect timeouts that surface as a
+  // bare `fetch failed`. Falls back to whatever DNS gave us if no IPv4 record.
+  // `family` is documented as numeric (4/6) but be defensive — some runtimes
+  // have surfaced it as the string "IPv4"/"IPv6" historically.
+  const ipv4 = addresses.find(
+    (entry) =>
+      entry.family === 4 ||
+      (entry.family as unknown) === "IPv4" ||
+      (typeof entry.address === "string" && isIP(entry.address) === 4),
+  );
+  const chosen = ipv4 ?? addresses[0];
+  if (!chosen || typeof chosen.address !== "string" || chosen.address.length === 0) {
+    // Should be unreachable given the length>0 check above, but the bare
+    // `Invalid IP address: undefined` failure surfaced by undici when an
+    // empty/undefined IP slips into connect.lookup is opaque enough that
+    // we want a clear, structured failure instead.
+    throw new Error(
+      `DNS lookup for ${url.hostname} returned no usable address (got: ${JSON.stringify(addresses)})`,
+    );
+  }
+  return chosen.address;
 }
 
 function createPinnedDispatcher(validatedIp: string): Dispatcher {
+  const family = validatedIp.includes(":") ? 6 : 4;
+  // Node 18+ calls the lookup with `opts.all: true` (especially via TLS /
+  // happy-eyeballs paths). When `all` is true the callback expects an *array*
+  // of `{address, family}` objects, not the legacy `(err, address, family)`
+  // 3-arg shape. Calling the legacy form there causes Node to surface
+  // `TypeError [ERR_INVALID_IP_ADDRESS]: Invalid IP address: undefined` from
+  // net:emitLookup, wrapped by undici as a bare `fetch failed`. Honor
+  // whichever shape `opts.all` requested.
+  // (Cast to `any` because undici's `LookupFunction` type only models the
+  // single-address callback overload, not the `all: true` variadic.)
+  // biome-ignore lint/suspicious/noExplicitAny: dual-overload lookup callback
+  const pinnedLookup: any = (
+    _hostname: string,
+    opts: { all?: boolean } | undefined,
+    // biome-ignore lint/suspicious/noExplicitAny: dual-overload lookup callback
+    callback: any,
+  ) => {
+    if (opts?.all) {
+      callback(null, [{ address: validatedIp, family }]);
+    } else {
+      callback(null, validatedIp, family);
+    }
+  };
   return new Agent({
-    connect: {
-      lookup: (_hostname, _opts, callback) => {
-        callback(null, validatedIp, validatedIp.includes(":") ? 6 : 4);
-      },
-    },
+    connect: { lookup: pinnedLookup },
   });
 }
 
@@ -266,7 +307,32 @@ async function fetchWithRedirects(
         },
       });
     } catch (err) {
-      throw new Error(`Failed to fetch ${currentUrl.href}: ${(err as Error).message}`);
+      // undici wraps the underlying network error (ECONNREFUSED / ETIMEDOUT /
+      // EHOSTUNREACH / ENOTFOUND / cert errors) inside `.cause` and exposes a
+      // bare "fetch failed" on the outer Error. Surfacing the cause's `code`
+      // and message turns an unactionable failure into something the agent
+      // (and the user) can actually triage.
+      const error = err as Error & { cause?: unknown; code?: string };
+      const cause = error.cause as
+        | (Error & { code?: string; errno?: number; syscall?: string })
+        | undefined;
+      const causeCode = cause?.code ?? error.code;
+      const causeMsg = cause?.message ?? "";
+      const detail = causeCode
+        ? causeMsg
+          ? `${causeCode}: ${causeMsg}`
+          : causeCode
+        : (error.message ?? "unknown error");
+      // Log the full chain so triage doesn't depend on the agent surface
+      // forwarding the wrapped error message.
+      warn(`URL fetch failed: ${currentUrl.href} — ${detail}`, {
+        outerMessage: error.message,
+        causeName: cause?.name,
+        causeCode,
+        causeErrno: cause?.errno,
+        causeSyscall: cause?.syscall,
+      });
+      throw new Error(`Failed to fetch ${currentUrl.href}: ${detail}`);
     } finally {
       clearTimeout(timer);
     }

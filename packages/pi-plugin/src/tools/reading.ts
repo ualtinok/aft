@@ -5,7 +5,7 @@
 
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { fetchUrlToTempFile } from "@cortexkit/aft-bridge";
+import { fetchUrlToTempFile, formatZoomText } from "@cortexkit/aft-bridge";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
 import type { PluginContext } from "../types.js";
@@ -348,6 +348,9 @@ export function registerReadingTools(
             })
           : (params.filePath as string);
 
+        // Header label — what the agent typed, not the on-disk cache path.
+        const targetLabel = (hasUrl ? params.url : params.filePath) ?? file;
+
         // Multi-symbol: fire in parallel and preserve per-symbol failures.
         // Uses callBridge (not bridge.send directly) so each parallel request
         // carries Pi's native session_id — otherwise multi-symbol zoom would
@@ -363,7 +366,7 @@ export function registerReadingTools(
               }));
             }),
           );
-          const batch = formatZoomBatchResult(params.symbols, results);
+          const batch = formatZoomBatchResult(targetLabel, params.symbols, results);
           return textResult(batch.text, batch);
         }
 
@@ -371,7 +374,10 @@ export function registerReadingTools(
         if (params.symbol) req.symbol = params.symbol;
         if (params.contextLines !== undefined) req.context_lines = params.contextLines;
         const response = await callBridge(bridge, "zoom", req, extCtx);
-        return textResult(JSON.stringify(response, null, 2));
+        if (response.success === false) {
+          throw new Error((response.message as string) || "zoom failed");
+        }
+        return textResult(formatZoomText(targetLabel, response));
       },
       renderCall(args, theme, context) {
         return renderZoomCall(args, theme, context);
@@ -383,8 +389,17 @@ export function registerReadingTools(
   }
 }
 
-/** Exported for regression tests. */
+/**
+ * Format multi-symbol zoom results as plain text. Successful entries use
+ * `formatZoomText` (line-numbered, no JSON escapes); failures render as
+ * `Symbol "name" not found: <reason>`. Sections are blank-line separated.
+ *
+ * Exported for regression tests. Output is byte-identical to the OpenCode
+ * plugin's formatZoomBatchResult — both hosts share `formatZoomText` from
+ * `@cortexkit/aft-bridge` so the agent sees the same shape across hosts.
+ */
 export function formatZoomBatchResult(
+  targetLabel: string,
   symbols: string[],
   responses: Record<string, unknown>[],
 ): ZoomBatchResult {
@@ -397,29 +412,21 @@ export function formatZoomBatchResult(
           : "zoom failed";
       return { name, success: false, error: message };
     }
-
-    return { name, success: true, content: zoomResponseContent(response) };
+    return { name, success: true, content: formatZoomText(targetLabel, response) };
   });
   const complete = entries.every((entry) => entry.success);
-  const lines: string[] = [];
+  const sections: string[] = [];
   if (!complete) {
-    lines.push("Incomplete zoom results: one or more symbols failed.");
+    sections.push("Incomplete zoom results: one or more symbols failed.");
   }
   for (const entry of entries) {
     if (entry.success) {
-      lines.push(`Symbol "${entry.name}":\n${entry.content ?? ""}`.trimEnd());
+      sections.push(entry.content ?? "");
     } else {
-      lines.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
+      sections.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
     }
   }
-  return { complete, symbols: entries, text: lines.join("\n\n") };
-}
-
-function zoomResponseContent(response: Record<string, unknown>): string {
-  if (typeof response.content === "string") return response.content;
-  if (typeof response.text === "string") return response.text;
-  const { success: _success, ...rest } = response;
-  return JSON.stringify(rest, null, 2);
+  return { complete, symbols: entries, text: sections.join("\n\n") };
 }
 
 /**

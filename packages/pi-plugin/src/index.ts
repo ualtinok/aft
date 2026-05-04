@@ -297,20 +297,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const config = loadAftConfig(process.cwd());
   const storageDir = resolveStorageDir();
 
-  // ONNX runtime for semantic search (optional, best-effort). `ensureOnnxRuntime`
-  // handles unsupported platforms by returning null, so we don't need to pre-check.
-  let ortDylibDir: string | null = null;
+  // ONNX runtime for semantic search (optional, best-effort).
+  //
+  // We deliberately do NOT block plugin load on this. The ONNX runtime archive
+  // is 60–80 MB and on a slow connection this can take 30–120 seconds.
+  // Awaiting it inline used to make Pi appear to hang during plugin load, and
+  // SIGKILL'ing the host mid-download left partial state on disk that the
+  // next launch had to recover from.
+  //
+  // Instead: kick off the download as a background promise and patch
+  // `_ort_dylib_dir` into the pool's configure overrides as soon as it
+  // settles. Bridges spawned AFTER the download finishes pick it up
+  // automatically. `ensureOnnxRuntime` returns null on unsupported platforms.
+  let onnxRuntimePromise: Promise<string | null> | null = null;
   if (config.semantic_search) {
-    try {
-      ortDylibDir = await ensureOnnxRuntime(storageDir);
-      if (!ortDylibDir) {
-        warn(
-          `ONNX Runtime unavailable. Semantic search will be disabled. Install manually: ${getManualInstallHint()}`,
-        );
-      }
-    } catch (err) {
+    onnxRuntimePromise = ensureOnnxRuntime(storageDir).catch((err) => {
       warn(`Failed to prepare ONNX Runtime: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      return null;
+    });
   }
 
   // Build configure-time overrides forwarded to every bridge on spawn.
@@ -351,9 +355,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   if (config.url_fetch_allow_private !== undefined)
     configOverrides.url_fetch_allow_private = config.url_fetch_allow_private;
   configOverrides.storage_dir = storageDir;
-  if (ortDylibDir) {
-    configOverrides._ort_dylib_dir = ortDylibDir;
-  }
+  // _ort_dylib_dir is patched in asynchronously below once ensureOnnxRuntime
+  // settles. Bridges spawned before that resolution don't get ORT and
+  // semantic search returns "still building" until they restart.
 
   // ─────────────────────────── LSP auto-install ───────────────────────────
   // Mirrors the OpenCode plugin: discover relevant LSPs, surface cached bin
@@ -465,6 +469,31 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   );
   const ctx: PluginContext = { pool, config, storageDir };
 
+  // Settle the ONNX runtime download promise (started above) and patch the
+  // resolved path into the pool's configure overrides. Bridges spawned AFTER
+  // this resolves will pass `_ort_dylib_dir` through configure and pick up
+  // the runtime; bridges already running at resolution time keep going
+  // without ORT (we don't restart them — that would discard warm
+  // trigram/semantic/LSP state). Result: semantic search becomes available
+  // for new sessions automatically once the download completes.
+  if (onnxRuntimePromise) {
+    onnxRuntimePromise.then(
+      (ortDylibDir) => {
+        if (ortDylibDir) {
+          pool.setConfigureOverride("_ort_dylib_dir", ortDylibDir);
+          log(`ONNX Runtime ready at ${ortDylibDir}; new bridges will load semantic backend.`);
+        } else {
+          warn(
+            `ONNX Runtime unavailable. Semantic search will be disabled. Install manually: ${getManualInstallHint()}`,
+          );
+        }
+      },
+      (err) => {
+        warn(`ONNX Runtime resolution rejected unexpectedly: ${err}`);
+      },
+    );
+  }
+
   // Eager async configure: warm the bridge for `process.cwd()` so the first
   // tool call doesn't pay the spawn + configure latency. Errors are swallowed —
   // the next real tool call will surface a proper error.
@@ -486,7 +515,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   const surface = resolveToolSurface(config);
 
   // Hoisted tool overrides (replace Pi's built-in bash/read/write/edit/grep with AFT versions).
-  if (surface.hoistBash) {
+  // Bash hoisting is opt-in: only register the AFT bash replacement when the
+  // user has enabled at least one experimental.bash.* flag (rewrite, compress,
+  // or background). When all flags are off, Pi's native bash stays in place
+  // and no AFT bash code is in the path. registerBashTool handles per-flag
+  // gating internally for bash_status / bash_kill.
+  // Read nested user-facing config shape — the flat experimental_bash_* keys
+  // are an internal Rust-configure detail, not the surface users write to.
+  const anyBashExperimental =
+    config.experimental?.bash?.rewrite === true ||
+    config.experimental?.bash?.compress === true ||
+    config.experimental?.bash?.background === true;
+  if (surface.hoistBash && anyBashExperimental) {
     registerBashTool(pi, ctx);
   }
   registerHoistedTools(pi, ctx, surface);

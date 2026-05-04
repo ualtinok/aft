@@ -17,7 +17,7 @@ export type {
   ConfigureWarningsContext,
 } from "./bridge.js";
 // --- transport ---
-export { BinaryBridge, compareSemver } from "./bridge.js";
+export { BinaryBridge, compareSemver, tagStderrLine } from "./bridge.js";
 // --- binary resolution ---
 export {
   downloadBinary,
@@ -29,6 +29,7 @@ export {
 export type { Logger, LogMeta } from "./logger.js";
 // --- ONNX runtime ---
 export {
+  __test__ as __onnxTest__,
   cleanupOnnxRuntime,
   ensureOnnxRuntime,
   getManualInstallHint,
@@ -54,3 +55,6 @@ export type {
 export { findBinary, findBinarySync, platformKey } from "./resolver.js";
 // --- URL fetch (shared by aft_outline / aft_zoom URL targets) ---
 export { _isPrivateIpv4, cleanupUrlCache, fetchUrlToTempFile } from "./url-fetch.js";
+// --- aft_zoom plain-text formatter (shared by both plugin hosts) ---
+export type { ZoomResponseLike } from "./zoom-format.js";
+export { formatZoomText } from "./zoom-format.js";

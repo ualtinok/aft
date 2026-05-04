@@ -101,18 +101,35 @@ describe("Tool round-trips", () => {
 
   test("batched zoom surfaces both successes and per-symbol failures", () => {
     const batch = formatZoomBatchResult(
+      "src/sample.ts",
       ["greet", "Missing"],
       [
-        { success: true, content: "export function greet() {}" },
+        {
+          success: true,
+          name: "greet",
+          kind: "function",
+          range: { start_line: 1, end_line: 1, start_col: 0, end_col: 26 },
+          content: "export function greet() {}",
+          context_before: [],
+          context_after: [],
+          annotations: { calls_out: [], called_by: [] },
+        },
         { success: false, message: "symbol not found" },
       ],
     );
 
     expect(batch.complete).toBe(false);
-    expect(batch.symbols).toEqual([
-      { name: "greet", success: true, content: "export function greet() {}" },
-      { name: "Missing", success: false, error: "symbol not found" },
-    ]);
+    expect(batch.symbols[0]?.name).toBe("greet");
+    expect(batch.symbols[0]?.success).toBe(true);
+    // Successful entries now contain plain-text formatted output (line-numbered,
+    // not JSON-escaped) routed through formatZoomText.
+    expect(batch.symbols[0]?.content).toContain("src/sample.ts:1-1 [function greet]");
+    expect(batch.symbols[0]?.content).toContain("1: export function greet() {}");
+    expect(batch.symbols[1]).toEqual({
+      name: "Missing",
+      success: false,
+      error: "symbol not found",
+    });
     expect(batch.text).toContain("Incomplete zoom results");
     expect(batch.text).toContain("export function greet() {}");
     expect(batch.text).toContain('Symbol "Missing" not found: symbol not found');

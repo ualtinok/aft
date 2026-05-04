@@ -235,21 +235,30 @@ const plugin: Plugin = async (input) => {
   configOverrides.storage_dir = join(dataHome, "opencode", "storage", "plugin", "aft");
 
   // Auto-resolve ONNX Runtime for semantic search.
-  // Downloads the shared library on first use if the platform is supported.
+  //
+  // We deliberately do NOT block plugin load on this. The ONNX runtime archive
+  // is 60–80 MB and on a slow connection this can take 30–120 seconds. Awaiting
+  // it inline used to make OpenCode appear to hang ("blackscreen on launch")
+  // until the download finished, and SIGKILL'ing the host mid-download left
+  // partial state that the next launch had to recover from.
+  //
+  // Instead: kick off the download as a background promise, let the plugin
+  // finish registering tools immediately, and patch `_ort_dylib_dir` into the
+  // pool's configure overrides as soon as the download settles. Bridges that
+  // spawn AFTER the download finishes pick it up automatically; bridges spawned
+  // before will configure without ORT and semantic search will return its
+  // existing "still building" status until the user restarts that session.
+  //
   // The resolved path is passed to bridges via ORT_DYLIB_PATH env var.
+  let onnxRuntimePromise: Promise<string | null> | null = null;
   if (aftConfig.semantic_search && isFastembedSemanticBackend) {
     const storageDir = configOverrides.storage_dir as string;
-    const ortDylibDir = await ensureOnnxRuntime(storageDir).catch((err) => {
+    onnxRuntimePromise = ensureOnnxRuntime(storageDir).catch((err) => {
       warn(
         `ONNX Runtime setup failed: ${err instanceof Error ? err.message : String(err)}. Semantic search will be unavailable.`,
       );
       return null;
     });
-    if (ortDylibDir) {
-      configOverrides._ort_dylib_dir = ortDylibDir;
-    } else if (!isOrtAutoDownloadSupported()) {
-      warn(`Semantic search requires ONNX Runtime. Install: ${getManualInstallHint()}`);
-    }
   }
 
   // ─────────────────────────── LSP auto-install ───────────────────────────
@@ -446,6 +455,32 @@ const plugin: Plugin = async (input) => {
   };
   setSharedBridgePool(pool);
 
+  // Settle the ONNX runtime download promise (started above) and patch the
+  // resolved path into the pool's configure overrides. Bridges spawned AFTER
+  // this resolves will pass `_ort_dylib_dir` through configure and pick up
+  // the runtime; bridges already running at resolution time keep going
+  // without ORT (we don't restart them — that would discard warm
+  // trigram/semantic/LSP state). Result: semantic search becomes available
+  // for new sessions automatically once the download completes, without
+  // forcing the user to restart OpenCode.
+  if (onnxRuntimePromise) {
+    onnxRuntimePromise.then(
+      (ortDylibDir) => {
+        if (ortDylibDir) {
+          pool.setConfigureOverride("_ort_dylib_dir", ortDylibDir);
+          log(`ONNX Runtime ready at ${ortDylibDir}; new bridges will load semantic backend.`);
+        } else if (!isOrtAutoDownloadSupported()) {
+          // Logged once; the manual-install warning is dispatched separately
+          // through the warning channel below.
+          log(`ONNX Runtime auto-download not supported on ${process.platform}/${process.arch}.`);
+        }
+      },
+      (err) => {
+        warn(`ONNX Runtime resolution rejected unexpectedly: ${err}`);
+      },
+    );
+  }
+
   // Eager async configure: fire-and-forget a status request so the bridge
   // for `input.directory` warms up (spawns the binary, runs configure,
   // pre-loads disk-backed indexes) before the agent's first tool call.
@@ -602,18 +637,27 @@ const plugin: Plugin = async (input) => {
     }, 8000);
   }
 
-  // Warn about ONNX Runtime if semantic search is enabled but ORT is unavailable
-  if (aftConfig.semantic_search && isFastembedSemanticBackend && !configOverrides._ort_dylib_dir) {
-    // The ensureOnnxRuntime call above is async and may still be in flight.
-    // Schedule the warning check after a short delay to let it resolve.
-    setTimeout(() => {
-      if (!configOverrides._ort_dylib_dir && !isOrtAutoDownloadSupported()) {
-        sendWarning(
-          notifyOpts,
-          `Semantic search requires ONNX Runtime.\nInstall: ${getManualInstallHint()}`,
-        ).catch(() => {});
-      }
-    }, 5000);
+  // Warn about ONNX Runtime if semantic search is enabled but ORT is unavailable.
+  //
+  // We branch on the promise we kicked off earlier rather than peeking at
+  // configOverrides synchronously — the download is intentionally non-blocking
+  // and the override is patched in only after it settles. If the promise
+  // resolves to a path, no warning. If it resolves to null AND auto-download
+  // is unsupported on this platform, surface the manual-install hint.
+  if (onnxRuntimePromise) {
+    onnxRuntimePromise.then(
+      (ortDylibDir) => {
+        if (!ortDylibDir && !isOrtAutoDownloadSupported()) {
+          sendWarning(
+            notifyOpts,
+            `Semantic search requires ONNX Runtime.\nInstall: ${getManualInstallHint()}`,
+          ).catch(() => {});
+        }
+      },
+      () => {
+        // Already logged in the .catch above; don't double-warn.
+      },
+    );
   } else {
     // No warnings needed — clean up any stale warnings from previous runs
     cleanupWarnings(notifyOpts).catch(() => {});

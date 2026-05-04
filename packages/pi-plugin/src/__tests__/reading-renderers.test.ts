@@ -85,9 +85,19 @@ describe("reading renderers", () => {
 
   test("batched zoom keeps successes visible when another symbol fails", () => {
     const batch = formatZoomBatchResult(
+      "sample.ts",
       ["run", "Missing"],
       [
-        { success: true, content: "export function run() {}" },
+        {
+          success: true,
+          name: "run",
+          kind: "function",
+          range: { start_line: 1, end_line: 1, start_col: 0, end_col: 24 },
+          content: "export function run() {}",
+          context_before: [],
+          context_after: [],
+          annotations: { calls_out: [], called_by: [] },
+        },
         { success: false, message: "symbol not found" },
       ],
     );
@@ -102,6 +112,9 @@ describe("reading renderers", () => {
 
     expect(batch.complete).toBe(false);
     expect(batch.text).toContain("Incomplete zoom results");
+    // Successful entries are now formatted as plain text via formatZoomText —
+    // line-numbered, no JSON escapes.
+    expect(batch.text).toContain("sample.ts:1-1 [function run]");
     expect(batch.text).toContain("export function run() {}");
     expect(batch.text).toContain('Symbol "Missing" not found: symbol not found');
     expect(rendered).toContain("Incomplete zoom results");

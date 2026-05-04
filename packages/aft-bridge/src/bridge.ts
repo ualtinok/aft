@@ -23,6 +23,26 @@ const MAX_STDOUT_BUFFER = 64 * 1024 * 1024; // 64MB
  * Compare two semver version strings (major.minor.patch plus pre-release).
  * Returns: negative if a < b, 0 if equal, positive if a > b.
  */
+/**
+ * Re-tag a single stderr line forwarded from the `aft` child process.
+ *
+ * env_logger in `aft` emits each log line with an outer `[aft]` or `[aft-lsp]`
+ * tag based on log target. The plugin logger then wraps those lines with its
+ * own `[aft-plugin]` outer tag. We must NOT add a second `[aft]` here when
+ * the line is already tagged, or LSP errors end up rendered as
+ * `[aft-plugin] [aft] [aft-lsp] [aft] ...` (the v0.19.0 doubled-prefix bug).
+ *
+ * Rule:
+ * - Already starts with `[aft]` or `[aft-<word>]` → leave as-is.
+ * - Untagged (rare child-library output, panics, etc.) → prepend `[aft]`.
+ *
+ * Exported for unit testing; production callers use it inside the stderr
+ * `on("data")` handler in `BinaryBridge.spawn`.
+ */
+export function tagStderrLine(line: string): string {
+  return /^\[aft(-\w+)?\] /.test(line) ? line : `[aft] ${line}`;
+}
+
 export function compareSemver(a: string, b: string): number {
   const [aMain, aPre] = a.split("-", 2);
   const [bMain, bPre] = b.split("-", 2);
@@ -577,10 +597,9 @@ export class BinaryBridge {
       const lines = chunk.toString("utf-8").trimEnd().split("\n");
       for (const line of lines) {
         if (!line) continue;
-        // Strip Rust env_logger prefix and re-tag under [aft]
-        const stripped = line.replace(/^\[aft\]\s*/, "");
-        log(`[aft] ${stripped}`);
-        this.pushStderrLine(stripped);
+        const tagged = tagStderrLine(line);
+        log(tagged);
+        this.pushStderrLine(tagged);
       }
     });
 

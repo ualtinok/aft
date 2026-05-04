@@ -72,7 +72,12 @@ const MAX_EXTRACT_BYTES = 1 * 1024 * 1024 * 1024;
 
 const ONNX_LOCK_FILE = ".aft-onnx-installing";
 const ONNX_INSTALLED_META_FILE = ".aft-onnx-installed";
-const STALE_LOCK_MS = 30 * 60 * 1000;
+// 5 minutes is well under any reasonable real download time (60–80 MB archive
+// on a working connection) but short enough that a SIGKILL'd plugin process
+// recovers fast on the next launch. Previously 30 min — that left users
+// blocked for a very long time after closing OpenCode mid-download (issue
+// reports of "blackscreen on launch then ONNX broken").
+const STALE_LOCK_MS = 5 * 60 * 1000;
 
 /** Map (process.platform, process.arch) → ONNX Runtime asset name + library filename */
 interface OrtPlatformInfo {
@@ -214,6 +219,17 @@ export async function ensureOnnxRuntime(storageDir: string): Promise<string | nu
   const onnxBaseDir = join(storageDir, "onnxruntime");
   mkdirSync(onnxBaseDir, { recursive: true });
   const lockPath = join(onnxBaseDir, ONNX_LOCK_FILE);
+
+  // Recover from SIGKILL'd previous attempts before acquiring the lock.
+  // When the host process is killed mid-download (user closes OpenCode while
+  // ONNX is still downloading), the staging dir at `${ortDir}.tmp.<pid>.<ts>`
+  // and a half-populated `ortDir` can survive without a meta file. The
+  // existing TOFU branch above already handles a tampered-but-complete
+  // install, but this branch covers the "abandoned, incomplete" case where
+  // the lib file isn't present (we wouldn't be here otherwise). Sweep them
+  // out so the next download starts from a clean slate.
+  cleanupAbandonedOnnxAttempts(onnxBaseDir, ortDir);
+
   if (!acquireLock(lockPath)) {
     warn(
       `ONNX Runtime install already in progress in another process (lock: ${lockPath}). Skipping.`,
@@ -225,6 +241,68 @@ export async function ensureOnnxRuntime(storageDir: string): Promise<string | nu
     return await downloadOnnxRuntime(info, ortDir);
   } finally {
     releaseLock(lockPath);
+  }
+}
+
+/**
+ * Sweep abandoned `*.tmp.<pid>.<ts>` staging directories left behind by
+ * killed download attempts, and remove an empty/half-populated target dir
+ * so the next download retries cleanly. Safe to call before lock acquisition
+ * because we only delete dirs whose owning PID is dead (or when the parent
+ * dir's mtime exceeds STALE_LOCK_MS — covers Windows where we can't check
+ * process liveness reliably).
+ */
+function cleanupAbandonedOnnxAttempts(onnxBaseDir: string, ortDir: string): void {
+  // Sweep .tmp.* staging dirs whose pid is dead or are sufficiently old.
+  try {
+    const entries = readdirSync(onnxBaseDir);
+    const ortDirBaseName = ortDir.slice(onnxBaseDir.length + 1);
+    for (const entry of entries) {
+      if (!entry.startsWith(`${ortDirBaseName}.tmp.`)) continue;
+      const stagingDir = join(onnxBaseDir, entry);
+      // Format: `${ORT_VERSION}.tmp.<pid>.<ts>`. Extract pid; if dead, sweep.
+      const parts = entry.split(".");
+      const pidStr = parts[parts.length - 2];
+      const pid = pidStr ? Number.parseInt(pidStr, 10) : NaN;
+      let abandoned = false;
+      if (Number.isFinite(pid) && pid > 0) {
+        if (process.platform === "win32") {
+          // No reliable cross-process liveness check on Windows; fall back
+          // to mtime-based age comparison.
+          try {
+            const ageMs = Date.now() - statSync(stagingDir).mtimeMs;
+            abandoned = ageMs > STALE_LOCK_MS;
+          } catch {
+            abandoned = true;
+          }
+        } else {
+          abandoned = !isProcessAlive(pid);
+        }
+      } else {
+        abandoned = true;
+      }
+      if (abandoned) {
+        log(`[onnx] removing abandoned staging dir ${stagingDir}`);
+        try {
+          rmSync(stagingDir, { recursive: true, force: true });
+        } catch (err) {
+          warn(`[onnx] failed to remove ${stagingDir}: ${err}`);
+        }
+      }
+    }
+  } catch {
+    // base dir doesn't exist yet; nothing to sweep
+  }
+
+  // If the target dir exists but doesn't contain a meta file, the previous
+  // attempt was killed mid-copy. Wipe it so download can recreate cleanly.
+  try {
+    if (existsSync(ortDir) && !existsSync(join(ortDir, ONNX_INSTALLED_META_FILE))) {
+      log(`[onnx] removing half-populated install dir ${ortDir} (no meta file)`);
+      rmSync(ortDir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    warn(`[onnx] failed to sweep ${ortDir}: ${err}`);
   }
 }
 
@@ -724,3 +802,14 @@ export function cleanupOnnxRuntime(storageDir: string): void {
     // ignore
   }
 }
+
+/**
+ * Test-only exports. Intentionally not part of the published surface — these
+ * are internal helpers we want to exercise from unit tests without forcing
+ * an actual ONNX download. Don't use from production code.
+ */
+export const __test__ = {
+  cleanupAbandonedOnnxAttempts,
+  ORT_VERSION,
+  ONNX_INSTALLED_META_FILE,
+};

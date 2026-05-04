@@ -168,9 +168,40 @@ export class BridgePool {
     );
   }
 
+  /**
+   * Update or set a single configure override that will be applied to every
+   * **future** bridge spawn. Existing bridges keep their original configure
+   * payload — this method intentionally does NOT restart them, because that
+   * would discard their warm trigram/semantic/LSP/symbol-cache state. Use
+   * this for opt-in features that resolve asynchronously after plugin load
+   * (e.g. ONNX runtime download finishing in the background).
+   *
+   * If `value === undefined`, the override key is removed.
+   */
+  setConfigureOverride(key: string, value: unknown): void {
+    if (value === undefined) {
+      delete this.configOverrides[key];
+    } else {
+      this.configOverrides[key] = value;
+    }
+  }
+
   /** Number of active bridges in the pool. */
   get size(): number {
     return this.bridges.size;
+  }
+
+  /**
+   * Test-only: read the current configure-override map.
+   *
+   * NEVER call this from production code. The override map is intentionally
+   * private because the contract is "applied at next spawn" — exposing the
+   * live map invites callers to mutate it directly and bypass the lifecycle.
+   * This getter is here so tests for `setConfigureOverride` can verify the
+   * mutation result without spawning real binaries.
+   */
+  _testGetConfigOverrides(): Readonly<Record<string, unknown>> {
+    return { ...this.configOverrides };
   }
 }
 

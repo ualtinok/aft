@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { fetchUrlToTempFile } from "@cortexkit/aft-bridge";
+import { fetchUrlToTempFile, formatZoomText } from "@cortexkit/aft-bridge";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
@@ -147,6 +147,9 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             })
           : (args.filePath as string);
 
+        // Header label — what the agent typed, not the on-disk cache path.
+        const targetLabel = (hasUrl ? (args.url as string) : (args.filePath as string)) ?? file;
+
         // Multi-symbol mode: make separate zoom calls in parallel and combine results
         if (Array.isArray(args.symbols) && args.symbols.length > 0) {
           const results = await Promise.all(
@@ -159,7 +162,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
               }));
             }),
           );
-          return JSON.stringify(formatZoomBatchResult(args.symbols as string[], results), null, 2);
+          return formatZoomBatchResult(targetLabel, args.symbols as string[], results).text;
         }
 
         // Single symbol mode
@@ -171,14 +174,21 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         if (data.success === false) {
           throw new Error((data.message as string) || "zoom failed");
         }
-        return JSON.stringify(data);
+        return formatZoomText(targetLabel, data);
       },
     },
   };
 }
 
-/** Exported for regression tests. */
+/**
+ * Format multi-symbol zoom results as plain text. Successful entries use
+ * `formatZoomText` (line-numbered, no JSON escapes); failures render as
+ * `Symbol "name" not found: <reason>`. Sections are blank-line separated.
+ *
+ * Exported for regression tests.
+ */
 export function formatZoomBatchResult(
+  targetLabel: string,
   symbols: string[],
   responses: Record<string, unknown>[],
 ): ZoomBatchResult {
@@ -191,29 +201,21 @@ export function formatZoomBatchResult(
           : "zoom failed";
       return { name, success: false, error: message };
     }
-
-    return { name, success: true, content: zoomResponseContent(response) };
+    return { name, success: true, content: formatZoomText(targetLabel, response) };
   });
   const complete = entries.every((entry) => entry.success);
-  const lines: string[] = [];
+  const sections: string[] = [];
   if (!complete) {
-    lines.push("Incomplete zoom results: one or more symbols failed.");
+    sections.push("Incomplete zoom results: one or more symbols failed.");
   }
   for (const entry of entries) {
     if (entry.success) {
-      lines.push(`Symbol "${entry.name}":\n${entry.content ?? ""}`.trimEnd());
+      sections.push(entry.content ?? "");
     } else {
-      lines.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
+      sections.push(`Symbol "${entry.name}" not found: ${entry.error ?? "zoom failed"}`);
     }
   }
-  return { complete, symbols: entries, text: lines.join("\n\n") };
-}
-
-function zoomResponseContent(response: Record<string, unknown>): string {
-  if (typeof response.content === "string") return response.content;
-  if (typeof response.text === "string") return response.text;
-  const { success: _success, ...rest } = response;
-  return JSON.stringify(rest, null, 2);
+  return { complete, symbols: entries, text: sections.join("\n\n") };
 }
 
 /**
