@@ -23,7 +23,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external '@cortexkit/aft-*' && tsc --emitDeclarationOnly",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "echo 'no tests in @cortexkit/aft-bridge yet'",
     "prepublishOnly": "bun run build"
