@@ -490,8 +490,29 @@ const plugin: Plugin = async (input) => {
   // status is the cheapest valid request that triggers that path. Errors
   // are swallowed — if configure fails on init, the next real tool call
   // will surface a proper error to the agent.
+  //
+  // When semantic_search is enabled with the fastembed backend, we MUST
+  // wait for ONNX Runtime resolution before spawning the eager bridge.
+  // Otherwise the bridge starts without ORT_DYLIB_PATH in its env, and the
+  // subsequent setConfigureOverride('_ort_dylib_dir', ...) call on the pool
+  // only affects bridges spawned after that — but the eager bridge is
+  // already running. Result: that first bridge tries to load semantic and
+  // fails with `ONNX Runtime not found`, which surfaces as the
+  // "Semantic Index status: failed" the user sees in the TUI sidebar even
+  // though ONNX downloaded successfully.
   void (async () => {
     try {
+      if (onnxRuntimePromise) {
+        // Await ONNX resolution so _ort_dylib_dir is set on the pool BEFORE
+        // we spawn the bridge. Cap at 60s so a slow/broken download doesn't
+        // permanently block the eager warm path; the bridge still spawns
+        // without ORT after the cap and semantic just fails (matching the
+        // pre-fix behavior, which is no worse than today).
+        await Promise.race([
+          onnxRuntimePromise,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 60_000)),
+        ]);
+      }
       const bridge = pool.getBridge(input.directory);
       // No session_id: this runs before any user session exists; the
       // resulting configure threads will log with no [ses_xxx] prefix
