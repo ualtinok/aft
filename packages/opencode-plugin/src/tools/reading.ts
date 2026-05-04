@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
+import { fetchUrlToTempFile } from "@cortexkit/aft-bridge";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { fetchUrlToTempFile } from "../shared/url-fetch.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
 

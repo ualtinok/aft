@@ -32,6 +32,7 @@ import { bridgeLogger, error, log, warn } from "./logger.js";
 // internals call the active-logger helpers (log/warn/error) from constructors.
 setActiveLogger(bridgeLogger);
 
+import { cleanupUrlCache } from "@cortexkit/aft-bridge";
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
   abortInFlightGithubInstalls,
@@ -58,7 +59,6 @@ import {
 } from "./shared/session-directory.js";
 import { coerceAftStatus, formatStatusMarkdown } from "./shared/status.js";
 import { ensureTuiPluginEntry } from "./shared/tui-config.js";
-import { cleanupUrlCache } from "./shared/url-fetch.js";
 import { registerShutdownCleanup } from "./shutdown-hooks.js";
 import { astTools } from "./tools/ast.js";
 import { conflictTools } from "./tools/conflicts.js";

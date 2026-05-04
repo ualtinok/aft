@@ -11,7 +11,7 @@ import {
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { Agent, type Dispatcher, fetch as undiciFetch } from "undici";
-import { log, warn } from "../logger";
+import { log, warn } from "./active-logger.js";
 
 /** Max response body size (10 MB) */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;

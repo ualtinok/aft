@@ -5,6 +5,7 @@
 
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fetchUrlToTempFile } from "@cortexkit/aft-bridge";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
 import type { PluginContext } from "../types.js";
@@ -26,12 +27,19 @@ import {
 const OutlineParams = Type.Object({
   target: Type.Union([Type.String(), Type.Array(Type.String())], {
     description:
-      "What to outline: a file path, directory path, or array of file paths. The mode is auto-detected: directories by stat, arrays as multi-file. Directory walks cap at 200 files.",
+      "What to outline: a file path, directory path, URL (http:// or https://), or array of file paths. The mode is auto-detected: URLs by `http://`/`https://` prefix, directories by stat, arrays as multi-file. Directory walks cap at 200 files.",
   }),
 });
 
 const ZoomParams = Type.Object({
-  filePath: Type.String({ description: "Path to file (absolute or project-relative)" }),
+  filePath: Type.Optional(
+    Type.String({ description: "Path to file (absolute or project-relative)" }),
+  ),
+  url: Type.Optional(
+    Type.String({
+      description: "HTTP/HTTPS URL of an HTML or Markdown document to fetch and zoom into",
+    }),
+  ),
   symbol: Type.Optional(
     Type.String({ description: "Symbol name (function/class/type) or Markdown heading" }),
   ),
@@ -42,6 +50,15 @@ const ZoomParams = Type.Object({
     Type.Number({ description: "Lines of context before/after (default: 3)" }),
   ),
 });
+
+function isUrl(s: string): boolean {
+  return s.startsWith("http://") || s.startsWith("https://");
+}
+
+/** Best-effort label for renderers when zoom is called with `filePath` OR `url`. */
+function zoomTargetLabel(args: { filePath?: string; url?: string }): string {
+  return args.filePath ?? args.url ?? "(no target)";
+}
 
 export interface ReadingSurface {
   outline: boolean;
@@ -95,7 +112,7 @@ export function buildZoomSections(
         }
         const content = asString(record.content);
         return [
-          `${theme.fg("accent", name)} ${theme.fg("muted", shortenPath(args.filePath))}`,
+          `${theme.fg("accent", name)} ${theme.fg("muted", shortenPath(zoomTargetLabel(args)))}`,
           content,
         ]
           .filter(Boolean)
@@ -118,10 +135,11 @@ export function buildZoomSections(
       const startLine =
         range && typeof range.start_line === "number" ? range.start_line : undefined;
       const endLine = range && typeof range.end_line === "number" ? range.end_line : undefined;
+      const targetLabel = zoomTargetLabel(args);
       const location =
         startLine !== undefined
-          ? `${shortenPath(args.filePath)}:${startLine}${endLine && endLine !== startLine ? `-${endLine}` : ""}`
-          : shortenPath(args.filePath);
+          ? `${shortenPath(targetLabel)}:${startLine}${endLine && endLine !== startLine ? `-${endLine}` : ""}`
+          : shortenPath(targetLabel);
       const lines = [`${theme.fg("accent", name)} ${theme.fg("muted", `[${kind}] ${location}`)}`];
 
       const content = asString(record.content);
@@ -200,7 +218,12 @@ export function renderZoomCall(
     : args.symbols && args.symbols.length > 0
       ? theme.fg("toolOutput", `${args.symbols.length} symbols`)
       : theme.fg("toolOutput", "lines");
-  return renderToolCall("zoom", `${accentPath(theme, args.filePath)} ${target}`, theme, context);
+  return renderToolCall(
+    "zoom",
+    `${accentPath(theme, zoomTargetLabel(args))} ${target}`,
+    theme,
+    context,
+  );
 }
 
 /** Exported for renderer unit tests. */
@@ -224,7 +247,7 @@ export function registerReadingTools(
       name: "aft_outline",
       label: "outline",
       description:
-        "Structural outline of source code or Markdown. For code, returns symbols (functions, classes, types) with line ranges. For Markdown/HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\nPass a single `target`:\n  • file path → outline that file (with signatures)\n  • directory path → outline source files under it (recursively, up to 200 files)\n  • array of paths → outline multiple files in one call",
+        "Structural outline of source code, documentation files, or remote URLs. For code, returns symbols (functions, classes, types) with line ranges. For Markdown and HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\nPass a single `target`:\n  • file path → outline that file (with signatures)\n  • directory path → outline source files under it (recursively, up to 200 files)\n  • URL (http:// or https://) → fetch and outline a remote HTML/Markdown document\n  • array of paths → outline multiple files in one call",
       parameters: OutlineParams,
       async execute(
         _toolCallId: string,
@@ -236,6 +259,18 @@ export function registerReadingTools(
         const bridge = bridgeFor(ctx, extCtx.cwd);
         const target = params.target;
         const isArray = Array.isArray(target) && target.length > 0;
+
+        // URL mode: fetch to temp file, then outline the cached copy
+        if (typeof target === "string" && isUrl(target)) {
+          const cachedPath = await fetchUrlToTempFile(target, ctx.storageDir, {
+            allowPrivate: ctx.config.url_fetch_allow_private === true,
+          });
+          const response = await callBridge(bridge, "outline", { file: cachedPath }, extCtx);
+          if (response.success === false) {
+            throw new Error((response.message as string) || "outline failed");
+          }
+          return textResult((response.text as string) ?? "");
+        }
 
         // Multi-file mode
         if (isArray) {
@@ -286,7 +321,7 @@ export function registerReadingTools(
       name: "aft_zoom",
       label: "zoom",
       description:
-        "Inspect a code symbol or Markdown/HTML section. For code, returns the full source of the symbol with call-graph annotations (calls/called-by). Pass `symbols` for batched lookups.",
+        "Inspect a code symbol or Markdown/HTML section. For code, returns the full source of the symbol with call-graph annotations (calls/called-by). Pass `symbols` for batched lookups.\n\nProvide exactly ONE of `filePath` or `url`.",
       parameters: ZoomParams,
       async execute(
         _toolCallId: string,
@@ -296,6 +331,22 @@ export function registerReadingTools(
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
+        const hasFilePath = typeof params.filePath === "string" && params.filePath.length > 0;
+        const hasUrl = typeof params.url === "string" && params.url.length > 0;
+
+        if (!hasFilePath && !hasUrl) {
+          throw new Error("Provide exactly one of 'filePath' or 'url'");
+        }
+        if (hasFilePath && hasUrl) {
+          throw new Error("Provide exactly ONE of 'filePath' or 'url' — not both");
+        }
+
+        // URL mode: fetch to temp file, then zoom into the cached copy
+        const file = hasUrl
+          ? await fetchUrlToTempFile(params.url as string, ctx.storageDir, {
+              allowPrivate: ctx.config.url_fetch_allow_private === true,
+            })
+          : (params.filePath as string);
 
         // Multi-symbol: fire in parallel and preserve per-symbol failures.
         // Uses callBridge (not bridge.send directly) so each parallel request
@@ -304,7 +355,7 @@ export function registerReadingTools(
         if (Array.isArray(params.symbols) && params.symbols.length > 0) {
           const results = await Promise.all(
             params.symbols.map((sym) => {
-              const req: Record<string, unknown> = { file: params.filePath, symbol: sym };
+              const req: Record<string, unknown> = { file, symbol: sym };
               if (params.contextLines !== undefined) req.context_lines = params.contextLines;
               return callBridge(bridge, "zoom", req, extCtx).catch((err) => ({
                 success: false,
@@ -316,7 +367,7 @@ export function registerReadingTools(
           return textResult(batch.text, batch);
         }
 
-        const req: Record<string, unknown> = { file: params.filePath };
+        const req: Record<string, unknown> = { file };
         if (params.symbol) req.symbol = params.symbol;
         if (params.contextLines !== undefined) req.context_lines = params.contextLines;
         const response = await callBridge(bridge, "zoom", req, extCtx);

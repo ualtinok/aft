@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("fetchUrlToTempFile", () => {
   test("blocks redirects to private hosts by default", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
 
     const fetchImpl = mock(
       async () =>
@@ -37,7 +37,7 @@ describe("fetchUrlToTempFile", () => {
   });
 
   test("pins fetch dispatcher to the already validated DNS result", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
     const dispatcher = {} as Dispatcher;
     const dispatcherIps: string[] = [];
     const lookups: string[] = [];
@@ -65,7 +65,7 @@ describe("fetchUrlToTempFile", () => {
   });
 
   test("re-validates and re-pins each redirect target", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
     const dispatcher = {} as Dispatcher;
     const dispatcherIps: string[] = [];
     const lookups: string[] = [];
@@ -103,7 +103,7 @@ describe("fetchUrlToTempFile", () => {
 
 describe("isPrivateIp", () => {
   test("blocks IPv4 private ranges", async () => {
-    const { _isPrivateIpv4 } = await import("../shared/url-fetch.js");
+    const { _isPrivateIpv4 } = await import("@cortexkit/aft-bridge");
     expect(_isPrivateIpv4("0.0.0.0")).toBe(true);
     expect(_isPrivateIpv4("10.0.0.1")).toBe(true);
     expect(_isPrivateIpv4("127.0.0.1")).toBe(true);
@@ -116,7 +116,7 @@ describe("isPrivateIp", () => {
   });
 
   test("allows IPv4 public addresses", async () => {
-    const { _isPrivateIpv4 } = await import("../shared/url-fetch.js");
+    const { _isPrivateIpv4 } = await import("@cortexkit/aft-bridge");
     expect(_isPrivateIpv4("8.8.8.8")).toBe(false);
     expect(_isPrivateIpv4("93.184.216.34")).toBe(false);
     expect(_isPrivateIpv4("172.15.0.1")).toBe(false); // just outside 172.16/12
@@ -125,7 +125,7 @@ describe("isPrivateIp", () => {
   });
 
   test("rejects IPv4-mapped IPv6 loopback bypass via SSRF guard", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
 
     // Redirect to IPv4-mapped IPv6 form of 127.0.0.1
     const fetchImpl = mock(
@@ -142,7 +142,7 @@ describe("isPrivateIp", () => {
   });
 
   test("rejects IPv4-compatible IPv6 loopback bypass via SSRF guard", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
 
     // IPv4-compatible form: ::127.0.0.1 (last colon is at index 1)
     const fetchImpl = mock(
@@ -159,7 +159,7 @@ describe("isPrivateIp", () => {
   });
 
   test("rejects IPv6 unspecified address ::", async () => {
-    const { fetchUrlToTempFile } = await import("../shared/url-fetch.js");
+    const { fetchUrlToTempFile } = await import("@cortexkit/aft-bridge");
 
     const fetchImpl = mock(
       async () =>

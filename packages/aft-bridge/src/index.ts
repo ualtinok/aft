@@ -52,3 +52,5 @@ export type {
   ProgressFrame,
 } from "./protocol.js";
 export { findBinary, findBinarySync, platformKey } from "./resolver.js";
+// --- URL fetch (shared by aft_outline / aft_zoom URL targets) ---
+export { _isPrivateIpv4, cleanupUrlCache, fetchUrlToTempFile } from "./url-fetch.js";
