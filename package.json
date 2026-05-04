@@ -14,10 +14,13 @@
     "format:check": "biome format . && cargo fmt --check",
     "test": "bun run --filter '*' test",
     "test:rust": "cargo test",
+    "test:windows-e2e": "bun run scripts/windows-vm/test.ts",
+    "windows-vm:setup": "bun run scripts/windows-vm/setup.ts",
     "version-sync": "node scripts/version-sync.mjs",
     "bench": "bun run benchmarks/src/runner.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.7"
+    "@biomejs/biome": "^2.4.7",
+    "typescript": "^5.8.0"
   }
 }
