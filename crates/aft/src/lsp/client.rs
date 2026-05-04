@@ -153,7 +153,7 @@ impl LspClient {
                         if let Ok(mut guard) = reader_pending.lock() {
                             if let Some(tx) = guard.remove(&response.id) {
                                 if tx.send(response).is_err() {
-                                    log::debug!("[aft-lsp] response channel closed");
+                                    log::debug!("response channel closed");
                                 }
                             }
                         } else {

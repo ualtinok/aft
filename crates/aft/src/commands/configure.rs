@@ -72,7 +72,7 @@ where
             Err(error) => {
                 if WATCHER_GENERATION.load(Ordering::SeqCst) == generation {
                     log::debug!(
-                        "[aft] watcher init failed: {} — callers will work with stale data",
+                        "watcher init failed: {} — callers will work with stale data",
                         error
                     );
                 }

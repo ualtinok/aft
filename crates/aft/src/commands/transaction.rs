@@ -259,7 +259,7 @@ pub fn handle_transaction(req: &RawRequest, ctx: &AppContext) -> Response {
     let lsp_outcome = merge_lsp_outcomes(lsp_outcomes.iter());
 
     log::debug!(
-        "[aft] transaction: {} files modified successfully",
+        "transaction: {} files modified successfully",
         files_modified
     );
 
@@ -544,7 +544,7 @@ fn rollback(
         };
         if let Err(e) = result {
             log::warn!(
-                "[aft] transaction rollback: failed to restore {}: {}",
+                "transaction rollback: failed to restore {}: {}",
                 path.display(),
                 e
             );
@@ -561,7 +561,7 @@ fn rollback(
         if path.exists() {
             if let Err(e) = std::fs::remove_file(path) {
                 log::warn!(
-                    "[aft] transaction rollback: failed to delete new file {}: {}",
+                    "transaction rollback: failed to delete new file {}: {}",
                     path.display(),
                     e
                 );
@@ -600,7 +600,7 @@ fn transaction_error(
     }
 
     log::debug!(
-        "[aft] transaction failed at operation[{}]: {} — rolled back {} files",
+        "transaction failed at operation[{}]: {} — rolled back {} files",
         failed_index,
         message,
         rolled_back.len()

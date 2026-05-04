@@ -161,6 +161,21 @@ pub struct LspManager {
     /// drive the fake server's behavioral variants (`AFT_FAKE_LSP_PULL=1`,
     /// `AFT_FAKE_LSP_WORKSPACE=1`, etc.). Production code does not set this.
     extra_env: HashMap<String, String>,
+    /// Per-(kind,root) cache of spawn failures. Once a server fails to spawn
+    /// for a workspace root, we remember why and skip subsequent attempts for
+    /// the lifetime of this AFT process. Without this, every file open or
+    /// didChange retries `spawn_server` and logs a fresh ERROR — visible as
+    /// repeated `failed to spawn TypeScript Language Server: Could not find a
+    /// valid TypeScript installation` lines per edit.
+    ///
+    /// Entries are NEVER evicted automatically. The expected recovery path is
+    /// for the user to fix their environment (install the missing binary or
+    /// add a `tsconfig.json` / `package.json` with the right dependency) and
+    /// restart OpenCode/Pi, which spawns a fresh `aft` process with an empty
+    /// cache. We deliberately don't auto-retry on file events: the failure
+    /// modes we track here (binary not installed, init handshake failure)
+    /// don't fix themselves at runtime.
+    failed_spawns: HashMap<ServerKey, ServerAttemptResult>,
 }
 
 impl LspManager {
@@ -174,6 +189,7 @@ impl LspManager {
             event_rx,
             binary_overrides: HashMap::new(),
             extra_env: HashMap::new(),
+            failed_spawns: HashMap::new(),
         }
     }
 
@@ -241,6 +257,21 @@ impl LspManager {
             };
 
             if !self.clients.contains_key(&key) {
+                // If we already tried and failed to spawn this server for this
+                // root, return the cached classification without retrying or
+                // re-logging. This prevents per-edit ERROR spam when the user's
+                // environment is missing a dependency the LSP needs (the
+                // typescript-language-server "Could not find a valid TypeScript
+                // installation" case is the canonical example).
+                if let Some(cached) = self.failed_spawns.get(&key) {
+                    outcomes.attempts.push(ServerAttempt {
+                        server_id,
+                        server_name,
+                        result: cached.clone(),
+                    });
+                    continue;
+                }
+
                 match self.spawn_server(&def, &key.root, config) {
                     Ok(client) => {
                         self.clients.insert(key.clone(), client);
@@ -249,6 +280,10 @@ impl LspManager {
                     Err(err) => {
                         slog_error!("failed to spawn {}: {}", def.name, err);
                         let result = classify_spawn_error(&def.binary, &err);
+                        // Remember the failure so subsequent file events skip
+                        // this (kind, root) pair instead of producing a fresh
+                        // spawn attempt + ERROR log per request.
+                        self.failed_spawns.insert(key.clone(), result.clone());
                         outcomes.attempts.push(ServerAttempt {
                             server_id,
                             server_name,
@@ -526,7 +561,7 @@ impl LspManager {
                 // servers (e.g. older tsserver builds) and is a spec violation.
                 if !client.supports_watched_files() {
                     log::debug!(
-                        "[aft-lsp] skipping didChangeWatchedFiles for {:?} (capability not declared)",
+                        "skipping didChangeWatchedFiles for {:?} (capability not declared)",
                         key
                     );
                     continue;

@@ -41,7 +41,7 @@ pub fn parse_lsp_hints(req: &RawRequest) -> Option<LspHints> {
     match serde_json::from_value::<LspHints>(value.clone()) {
         Ok(hints) => {
             log::debug!(
-                "[aft] lsp_hints: parsed {} symbol hints",
+                "lsp_hints: parsed {} symbol hints",
                 hints.symbols.len()
             );
             Some(hints)

@@ -225,7 +225,7 @@ fn resolve_edit(
 
         if fuzzy_matches[0].pass > 1 {
             log::debug!(
-                "[aft] batch: edit[{}] fuzzy match (pass {}) for '{}'",
+                "batch: edit[{}] fuzzy match (pass {}) for '{}'",
                 index,
                 fuzzy_matches[0].pass,
                 match_str

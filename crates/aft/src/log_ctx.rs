@@ -65,39 +65,43 @@ pub fn session_prefix() -> String {
     })
 }
 
-/// Log at INFO level with the `[aft]` prefix and optional `[ses_xxx]` session tag.
+/// Log at INFO level with the optional `[ses_xxx]` session tag.
 ///
-/// Use this instead of `log::info!("[aft] ...")` in per-request code paths.
+/// Use this instead of `log::info!(...)` in per-request code paths.
 /// The macro automatically reads the thread-local session id and formats:
 ///
 /// ```text
 /// With session:    [aft] [ses_abcd1234] semantic index: rebuilding from scratch
 /// Without session: [aft] semantic index: rebuilding from scratch
 /// ```
+///
+/// The `[aft]` / `[aft-lsp]` outer prefix is added by env_logger based on the
+/// log target — do NOT inline it into the macro body, that produces a doubled
+/// `[aft-lsp] [aft]` prefix when LSP modules log.
 #[macro_export]
 macro_rules! slog_info {
     ($($arg:tt)*) => {
-        log::info!("[aft] {}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
+        log::info!("{}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
     };
 }
 
-/// Log at WARN level with the `[aft]` prefix and optional `[ses_xxx]` session tag.
+/// Log at WARN level with the optional `[ses_xxx]` session tag.
 ///
 /// See [`slog_info!`] for format details.
 #[macro_export]
 macro_rules! slog_warn {
     ($($arg:tt)*) => {
-        log::warn!("[aft] {}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
+        log::warn!("{}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
     };
 }
 
-/// Log at ERROR level with the `[aft]` prefix and optional `[ses_xxx]` session tag.
+/// Log at ERROR level with the optional `[ses_xxx]` session tag.
 ///
 /// See [`slog_info!`] for format details.
 #[macro_export]
 macro_rules! slog_error {
     ($($arg:tt)*) => {
-        log::error!("[aft] {}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
+        log::error!("{}{}", $crate::log_ctx::session_prefix(), format!($($arg)*))
     };
 }
 

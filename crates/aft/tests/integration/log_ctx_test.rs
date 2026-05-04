@@ -70,19 +70,20 @@ fn set_session_direct_manipulation() {
 /// already be set by other tests.
 #[test]
 fn slog_macros_prepend_session_tag() {
-    // Case 1: With session id — verify session_prefix() output
+    // Case 1: With session id — verify session_prefix() output.
+    // The slog_* macros expand to `log::info!("{}{}", session_prefix(), ...)`.
+    // env_logger prepends `[aft]` or `[aft-lsp]` based on target at output time;
+    // we test the macro body directly, not env_logger formatting.
     aft::log_ctx::with_session(Some("abcd1234".to_string()), || {
         let prefix = aft::log_ctx::session_prefix();
         assert_eq!(prefix, "[ses_abcd1234] ");
-        // The macro expands to: log::info!("[aft] {}{}", session_prefix(), format!(...))
-        // So the full output would be: "[aft] [ses_abcd1234] semantic index: ..."
-        let full = format!(
-            "[aft] {}semantic index: rebuilding from scratch (450 files)",
+        let body = format!(
+            "{}semantic index: rebuilding from scratch (450 files)",
             prefix
         );
         assert_eq!(
-            full,
-            "[aft] [ses_abcd1234] semantic index: rebuilding from scratch (450 files)"
+            body,
+            "[ses_abcd1234] semantic index: rebuilding from scratch (450 files)"
         );
     });
 
@@ -90,13 +91,7 @@ fn slog_macros_prepend_session_tag() {
     aft::log_ctx::with_session(None, || {
         let prefix = aft::log_ctx::session_prefix();
         assert_eq!(prefix, "");
-        let full = format!(
-            "[aft] {}semantic index: fingerprint mismatch, rebuilding",
-            prefix
-        );
-        assert_eq!(
-            full,
-            "[aft] semantic index: fingerprint mismatch, rebuilding"
-        );
+        let body = format!("{}semantic index: fingerprint mismatch, rebuilding", prefix);
+        assert_eq!(body, "semantic index: fingerprint mismatch, rebuilding");
     });
 }

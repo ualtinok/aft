@@ -341,7 +341,7 @@ impl BackupStore {
             return;
         };
         if let Err(e) = std::fs::create_dir_all(&session_dir) {
-            log::warn!("[aft] failed to create session dir: {}", e);
+            log::warn!("failed to create session dir: {}", e);
             return;
         }
         let marker = session_dir.join("session.json");
@@ -383,13 +383,13 @@ impl BackupStore {
             }
             if let Err(e) = std::fs::remove_dir_all(&session_dir) {
                 log::warn!(
-                    "[aft] failed to remove stale backup session {}: {}",
+                    "failed to remove stale backup session {}: {}",
                     session_dir.display(),
                     e
                 );
             } else {
                 log::warn!(
-                    "[aft] removed stale backup session {} (last_accessed={})",
+                    "removed stale backup session {} (last_accessed={})",
                     session_dir.display(),
                     last_accessed
                 );
@@ -433,7 +433,7 @@ impl BackupStore {
             // This is a legacy flat-layout path-hash directory. Move it under
             // the default session namespace.
             if let Err(e) = std::fs::create_dir_all(&default_session_dir) {
-                log::warn!("[aft] failed to create default session dir: {}", e);
+                log::warn!("failed to create default session dir: {}", e);
                 return;
             }
             let leaf = match entry_path.file_name() {
@@ -457,7 +457,7 @@ impl BackupStore {
                 }
                 Err(e) => {
                     log::warn!(
-                        "[aft] failed to migrate legacy backup {}: {}",
+                        "failed to migrate legacy backup {}: {}",
                         entry_path.display(),
                         e
                     );
@@ -466,7 +466,7 @@ impl BackupStore {
         }
         if migrated > 0 {
             log::info!(
-                "[aft] migrated {} legacy backup entries into default session namespace",
+                "migrated {} legacy backup entries into default session namespace",
                 migrated
             );
             // Write a session.json marker so future scans don't re-migrate.
@@ -556,7 +556,7 @@ impl BackupStore {
         }
         if total_entries > 0 {
             log::info!(
-                "[aft] loaded {} backup entries across {} session(s) from disk",
+                "loaded {} backup entries across {} session(s) from disk",
                 total_entries,
                 self.disk_index.len()
             );
@@ -623,7 +623,7 @@ impl BackupStore {
 
         // Ensure session dir + marker exist.
         if let Err(e) = std::fs::create_dir_all(&session_dir) {
-            log::warn!("[aft] failed to create session dir: {}", e);
+            log::warn!("failed to create session dir: {}", e);
             return;
         }
         let marker = session_dir.join("session.json");
@@ -641,7 +641,7 @@ impl BackupStore {
         let hash = Self::path_hash(key);
         let dir = session_dir.join(&hash);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            log::warn!("[aft] failed to create backup dir: {}", e);
+            log::warn!("failed to create backup dir: {}", e);
             return;
         }
 

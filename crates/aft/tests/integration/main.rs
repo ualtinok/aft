@@ -12,6 +12,7 @@ mod bash_drain_completions_test;
 mod bash_permissions_test;
 mod bash_rewrite_test;
 mod bash_test;
+mod bash_windows_test;
 mod callgraph_test;
 mod commands_test;
 mod configure_test;

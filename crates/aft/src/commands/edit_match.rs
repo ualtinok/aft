@@ -605,7 +605,7 @@ fn handle_glob_edit_match(
     }
 
     log::debug!(
-        "[aft] edit_match (glob): {} replacements across {} files",
+        "edit_match (glob): {} replacements across {} files",
         total_replacements,
         total_files
     );
@@ -688,7 +688,7 @@ fn restore_glob_checkpoint(
         Ok(_) => Ok(()),
         Err(e) => {
             log::warn!(
-                "[aft] edit_match glob rollback: failed to restore checkpoint {}: {}",
+                "edit_match glob rollback: failed to restore checkpoint {}: {}",
                 name,
                 e
             );
@@ -803,7 +803,7 @@ fn handle_single_file_edit_match(
     // Log if fuzzy match was needed (not exact)
     if fuzzy_matches[0].pass > 1 {
         log::debug!(
-            "[aft] edit_match: fuzzy match (pass {}) for '{}' in {}",
+            "edit_match: fuzzy match (pass {}) for '{}' in {}",
             fuzzy_matches[0].pass,
             match_str,
             file

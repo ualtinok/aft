@@ -512,7 +512,7 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     let files_modified = results.len();
 
     log::debug!(
-        "[aft] move_symbol: {} from {} to {} ({} consumers updated)",
+        "move_symbol: {} from {} to {} ({} consumers updated)",
         symbol_name,
         file,
         destination,
@@ -1014,7 +1014,7 @@ fn restore_checkpoint(ctx: &AppContext, session: &str, name: &str) {
     let cp_store = ctx.checkpoint().borrow();
     if let Err(e) = cp_store.restore(session, name) {
         log::debug!(
-            "[aft] move_symbol rollback: failed to restore checkpoint '{}': {}",
+            "move_symbol rollback: failed to restore checkpoint '{}': {}",
             name,
             e
         );
@@ -1027,7 +1027,7 @@ fn cleanup_new_files(new_files: &[PathBuf]) {
         if path.exists() {
             if let Err(e) = std::fs::remove_file(path) {
                 log::debug!(
-                    "[aft] move_symbol rollback: failed to delete new file {}: {}",
+                    "move_symbol rollback: failed to delete new file {}: {}",
                     path.display(),
                     e
                 );
@@ -1062,7 +1062,7 @@ fn move_error(
     }
 
     log::debug!(
-        "[aft] move_symbol failed at {}: {} — rolled back {} files",
+        "move_symbol failed at {}: {} — rolled back {} files",
         failed_file,
         message,
         rolled_back.len()

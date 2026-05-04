@@ -1525,7 +1525,7 @@ fn verify_file_mtimes(index: &mut SearchIndex) {
 
     if !stale_paths.is_empty() {
         log::info!(
-            "[aft] search index: refreshed {} stale file(s) from disk cache",
+            "search index: refreshed {} stale file(s) from disk cache",
             stale_paths.len()
         );
     }

@@ -1010,7 +1010,7 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
         Some(l) => l,
         None => {
             log::debug!(
-                "[aft] format: {} (skipped: unsupported_language)",
+                "format: {} (skipped: unsupported_language)",
                 path.display()
             );
             return (false, Some("unsupported_language".to_string()));
@@ -1018,7 +1018,7 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
     };
     if !has_formatter_support(lang) {
         log::debug!(
-            "[aft] format: {} (skipped: unsupported_language)",
+            "format: {} (skipped: unsupported_language)",
             path.display()
         );
         return (false, Some("unsupported_language".to_string()));
@@ -1028,7 +1028,7 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
         ToolDetection::Found(cmd, args) => (cmd, args),
         ToolDetection::NotConfigured => {
             log::debug!(
-                "[aft] format: {} (skipped: no_formatter_configured)",
+                "format: {} (skipped: no_formatter_configured)",
                 path.display()
             );
             return (false, Some("no_formatter_configured".to_string()));
@@ -1098,7 +1098,7 @@ pub fn auto_format(path: &Path, config: &Config) -> (bool, Option<String>) {
         }
         Err(FormatError::UnsupportedLanguage) => {
             log::debug!(
-                "[aft] format: {} (skipped: unsupported_language)",
+                "format: {} (skipped: unsupported_language)",
                 path.display()
             );
             (false, Some("unsupported_language".to_string()))
@@ -1466,7 +1466,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
         Some(l) => l,
         None => {
             log::debug!(
-                "[aft] validate: {} (skipped: unsupported_language)",
+                "validate: {} (skipped: unsupported_language)",
                 path.display()
             );
             return (Vec::new(), Some("unsupported_language".to_string()));
@@ -1474,7 +1474,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
     };
     if !has_checker_support(lang) {
         log::debug!(
-            "[aft] validate: {} (skipped: unsupported_language)",
+            "validate: {} (skipped: unsupported_language)",
             path.display()
         );
         return (Vec::new(), Some("unsupported_language".to_string()));
@@ -1484,7 +1484,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
         ToolDetection::Found(cmd, args) => (cmd, args),
         ToolDetection::NotConfigured => {
             log::debug!(
-                "[aft] validate: {} (skipped: no_checker_configured)",
+                "validate: {} (skipped: no_checker_configured)",
                 path.display()
             );
             return (Vec::new(), Some("no_checker_configured".to_string()));
@@ -1513,7 +1513,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
         Ok(result) => {
             let errors = parse_checker_output(&result.stdout, &result.stderr, path, &cmd);
             log::debug!(
-                "[aft] validate: {} ({}, {} errors)",
+                "validate: {} ({}, {} errors)",
                 path.display(),
                 cmd,
                 errors.len()
@@ -1533,7 +1533,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
         }
         Err(FormatError::Failed { stderr, .. }) => {
             log::debug!(
-                "[aft] validate: {} (skipped: error: {})",
+                "validate: {} (skipped: error: {})",
                 path.display(),
                 stderr.lines().next().unwrap_or("unknown")
             );
@@ -1541,7 +1541,7 @@ pub fn validate_full(path: &Path, config: &Config) -> (Vec<ValidationError>, Opt
         }
         Err(FormatError::UnsupportedLanguage) => {
             log::debug!(
-                "[aft] validate: {} (skipped: unsupported_language)",
+                "validate: {} (skipped: unsupported_language)",
                 path.display()
             );
             (Vec::new(), Some("unsupported_language".to_string()))

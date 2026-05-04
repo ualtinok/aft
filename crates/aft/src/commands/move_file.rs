@@ -118,7 +118,7 @@ pub fn handle_move_file(req: &RawRequest, ctx: &AppContext) -> Response {
         MoveOutcome::Moved => MoveOutcome::Moved,
         MoveOutcome::CopiedSourceDeleteFailed(message) => {
             log::warn!(
-                "[aft] move_file: copied but failed to remove source: {}",
+                "move_file: copied but failed to remove source: {}",
                 message
             );
             MoveOutcome::CopiedSourceDeleteFailed(message)
