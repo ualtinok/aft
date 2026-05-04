@@ -16,7 +16,16 @@ import { access, cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/prom
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { BinaryBridge } from "@cortexkit/aft-bridge";
-import { BridgePool } from "@cortexkit/aft-bridge";
+import { BridgePool, setActiveLogger } from "@cortexkit/aft-bridge";
+import { bridgeLogger } from "../../logger.js";
+
+// Route aft-bridge log calls (including forwarded Rust child stderr lines like
+// "[aft] invalidated 7 files") into $TMPDIR/aft-pi-test.log instead of
+// console.error. Without this, every "invalidated N files" / "watcher started"
+// line emitted by the Rust child during e2e tests leaks onto test stdout and
+// pollutes the bash background-completion output preview.
+setActiveLogger(bridgeLogger);
+
 import type { AftConfig } from "../../config.js";
 import { registerAstTools } from "../../tools/ast.js";
 import { registerConflictsTool } from "../../tools/conflicts.js";
