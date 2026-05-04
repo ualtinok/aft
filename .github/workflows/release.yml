@@ -38,6 +38,14 @@ jobs:
       - name: Install JS dependencies
         run: bun install
 
+      - name: Build aft-bridge (consumers need its dist/ for typecheck)
+        # Workspace consumers (opencode-plugin, pi-plugin) import from
+        # @cortexkit/aft-bridge. Bun resolves to the workspace package whose
+        # dist/ doesn't exist yet (gitignored). Build it first so tsc can
+        # find its .d.ts files. Required because v0.19.0 hasn't published yet
+        # (publish-npm runs AFTER this Test job).
+        run: bun run --cwd packages/aft-bridge build
+
       - name: TypeScript typecheck
         run: bun run typecheck
 
