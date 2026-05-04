@@ -78,9 +78,27 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
         ...configOverrides,
       },
     );
+    // Mirror flat `experimental_bash_*` configure overrides back into the
+    // nested user-facing config shape that Pi's plugin reads from
+    // `ctx.config.experimental.bash.*` to decide whether to register
+    // bash_status / bash_kill. Without this, gating in registerBashTool would
+    // skip them even when the bridge has experimental_bash_background=true.
+    const bashExperimental = {
+      ...(configOverrides.experimental_bash_rewrite !== undefined
+        ? { rewrite: configOverrides.experimental_bash_rewrite as boolean }
+        : {}),
+      ...(configOverrides.experimental_bash_compress !== undefined
+        ? { compress: configOverrides.experimental_bash_compress as boolean }
+        : {}),
+      ...(configOverrides.experimental_bash_background !== undefined
+        ? { background: configOverrides.experimental_bash_background as boolean }
+        : {}),
+    };
+    const ctxConfig: Record<string, unknown> =
+      Object.keys(bashExperimental).length > 0 ? { experimental: { bash: bashExperimental } } : {};
     const ctx: PluginContext = {
       pool,
-      config: {} as PluginContext["config"],
+      config: ctxConfig as PluginContext["config"],
       storageDir: join(h.tempDir, ".aft-storage"),
     };
     const tools = new Map<string, MockToolDef>();
@@ -187,7 +205,7 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
     expect(response.success).toBe(true);
     expect(String(response.output)).toContain("1: alpha");
     expect(String(response.output)).toContain("2: beta");
-    expect(String(response.output)).toContain("call the `read` tool directly next time");
+    expect(String(response.output)).toContain("Prefer `read` tool over bash.");
   }, 60_000);
 
   test("rewrites grep -r to grep tool with footer hint when enabled", async () => {
@@ -205,7 +223,7 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
     expect(response.success).toBe(true);
     expect(String(response.output)).toContain("lib.ts");
     expect(String(response.output)).toContain("needle");
-    expect(String(response.output)).toContain("call the `grep` tool directly next time");
+    expect(String(response.output)).toContain("Prefer `grep` tool over bash.");
   }, 60_000);
 
   test("rewriter disabled runs cat as raw bash without footer", async () => {
@@ -217,7 +235,7 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
 
     expect(response.success).toBe(true);
     expect(response.output).toBe("raw cat output\n");
-    expect(String(response.output)).not.toContain("call the `read` tool directly next time");
+    expect(String(response.output)).not.toContain("Prefer `read` tool over bash.");
   });
 
   test("generic compressor strips ANSI and collapses four-plus duplicate lines", async () => {
@@ -276,14 +294,22 @@ maybeDescribe("e2e bash command (Pi adapter + bridge + Rust)", () => {
     expect(completed.output_preview).toBe("done\n");
   });
 
-  test("Pi bash_status tool reports running for an in-flight background task", async () => {
+  test("Pi bash_status tool reports running and appends anti-polling reminder", async () => {
     const { h, bash, bashStatus } = await pluginHarness({ experimental_bash_background: true });
     const spawned = await callBash(bash, h, { command: "sleep 2 && echo done", background: true });
     const taskId = String(spawned.details.task_id);
 
     const status = await callTaskTool<BashStatusDetails>(bashStatus, h, taskId);
 
-    expect(status.output).toBe(`Task ${taskId}: running`);
+    // Header: status line for the task. Don't anchor on exact format because
+    // duration may or may not be present depending on timing on the runner.
+    expect(status.output).toContain(`Task ${taskId}: running`);
+    // Anti-polling reminder must be appended for running tasks (parity with
+    // the OpenCode plugin). Same wording so agent behavior is consistent
+    // across both harnesses.
+    expect(status.output).toContain(
+      "A completion reminder will be delivered automatically; don't poll.",
+    );
     expect(status.details.success).toBe(true);
     expect(status.details.status).toBe("running");
   });

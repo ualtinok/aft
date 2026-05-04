@@ -102,7 +102,7 @@ fn output(data: &Value) -> &str {
 fn assert_rewritten(command: &str, ctx: &AppContext, tool: &str) -> Value {
     let data = rewrite(command, ctx).unwrap_or_else(|| panic!("{command} should rewrite"));
     assert!(
-        output(&data).contains(&format!("call the `{tool}` tool directly next time")),
+        output(&data).contains(&format!("Prefer `{tool}` tool over bash.")),
         "missing footer: {data:?}"
     );
     data

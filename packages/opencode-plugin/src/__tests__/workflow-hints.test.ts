@@ -24,6 +24,10 @@ describe("buildWorkflowHints", () => {
     expect(out).toContain("- `trace_data`");
     expect(out).toContain("**Long-running commands**");
     expect(out).toContain("`bash({ background: true })`");
+    // Anti-polling guidance must be present so agents stop calling
+    // bash_status back-to-back when waiting for a background task.
+    expect(out).toContain("A completion reminder is delivered automatically");
+    expect(out).toContain("do not poll");
   });
 
   test("shows 30s timeout warning when background bash is off but bash is available", () => {

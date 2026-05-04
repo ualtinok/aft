@@ -91,7 +91,7 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
   if (hasBash) {
     if (hasBgBash) {
       sections.push(
-        `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. Check progress with \`${bashStatusName}({ taskId })\`.`,
+        `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. A completion reminder is delivered automatically — do not poll \`${bashStatusName}({ taskId })\`. Use \`${bashStatusName}\` only after the reminder arrives, or to inspect a task you already know is complete.`,
       );
     } else {
       sections.push(

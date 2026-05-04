@@ -146,11 +146,20 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
       // with no output. Surface a concise status line so the agent knows the
       // task started; details (exit, output) come back later via bg_completions
       // appended to a future foreground call.
+      //
+      // The "completion reminder will be delivered automatically; don't poll
+      // bash_status" sentence is load-bearing: without it, agents fall back to
+      // their default training behavior (poll a status endpoint to wait for an
+      // async task) and end up calling bash_status back-to-back instead of
+      // continuing with other work or ending the turn. We tell the agent the
+      // mechanism exists and which anti-pattern to avoid; we deliberately do
+      // NOT prescribe what to do instead, because that's a context-dependent
+      // decision the agent owns.
       if (data.status === "running" && typeof data.task_id === "string") {
         const callID = getCallID(context);
         const taskId = data.task_id;
         trackBgTask(context.sessionID, taskId);
-        const startedLine = `Background task started: ${taskId}`;
+        const startedLine = `Background task started: ${taskId}. A completion reminder will be delivered automatically; don't poll bash_status.`;
         const metadataPayload = { description, output: startedLine, status: "running", taskId };
         metadata?.(metadataPayload);
         if (callID) {
@@ -231,6 +240,15 @@ export function createBashStatusTool(ctx: PluginContext): ToolDefinition {
       const preview = data.output_preview as string | undefined;
       if (preview && status !== "running") {
         text += `\n${preview.slice(0, 2000)}`;
+      }
+      // For still-running tasks, append the same anti-polling reminder we add
+      // to the initial spawn line. Agents that ignore the spawn-line guidance
+      // and call bash_status anyway get the reminder again here so they don't
+      // call back-to-back. Terminal statuses (completed/failed/killed/timed_out)
+      // get NO such suffix — we want clean output once the task is actually
+      // done and the agent is ready to consume the result.
+      if (status === "running") {
+        text += `\nA completion reminder will be delivered automatically; don't poll.`;
       }
       return text;
     },

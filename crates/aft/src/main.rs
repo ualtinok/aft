@@ -307,6 +307,38 @@ const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "py", "rs", "go"]
 /// Drain pending file watcher events and invalidate changed source files
 /// in the call graph.
 ///
+/// Decide whether a `notify::Event` represents a real content change worth
+/// invalidating cached state for. Pulled out as a free function so unit
+/// tests can exercise every notify event variant without setting up a
+/// watcher pipeline.
+///
+/// The filter rejects:
+/// - `Access(_)` (read syscalls; cause feedback loops on atime)
+/// - `Modify(Metadata(AccessTime|Permissions|Ownership|Extended))`
+///   (no content change — biome-lint reproducer)
+/// - Anything that's not Create/Remove/Modify
+///
+/// And accepts:
+/// - `Create(_)`, `Remove(_)`, `Modify(Name(_))` (rename)
+/// - `Modify(Data(_))`, `Modify(Other)`, `Modify(Any)`
+/// - `Modify(Metadata(WriteTime|Any|Other))` (real or unknown content change)
+pub(crate) fn watcher_event_invalidates(kind: &notify::EventKind) -> bool {
+    use notify::event::{MetadataKind, ModifyKind};
+    use notify::EventKind;
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(meta)) => !matches!(
+            meta,
+            MetadataKind::AccessTime
+                | MetadataKind::Permissions
+                | MetadataKind::Ownership
+                | MetadataKind::Extended
+        ),
+        EventKind::Modify(_) => true,
+        _ => false,
+    }
+}
+
 /// Borrows the watcher receiver and callgraph in separate phases to avoid
 /// RefCell borrow conflicts. Events are deduplicated by PathBuf — notify
 /// fires multiple events per file write (Create, Modify, etc.).
@@ -324,12 +356,29 @@ fn drain_watcher_events(ctx: &AppContext) {
         while let Ok(event_result) = rx.try_recv() {
             if let Ok(event) = event_result {
                 // Only process events that indicate actual file content changes.
+                //
                 // Skip Access events — on Linux with atime enabled, reading a file
-                // during update_file triggers an access event, creating a feedback loop.
-                use notify::EventKind;
-                match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
-                    _ => continue,
+                // during update_file triggers an access event, creating a feedback
+                // loop.
+                //
+                // Skip Modify(Metadata(...)) events that don't imply content
+                // changes: AccessTime, Permissions, Ownership, Extended.
+                // The biome-lint case is the canonical reproducer — running
+                // `biome check` opens every TS file for read, which on Linux
+                // (and on macOS in some configurations) updates atime and fires
+                // notify `Modify(Metadata(AccessTime))` events. Without this
+                // filter, every read-only lint pass invalidates the entire
+                // symbol cache, search index, and semantic index — completely
+                // unnecessary work.
+                //
+                // We KEEP `Modify(Metadata(WriteTime))` because mtime change
+                // does indicate a real content modification on every supported
+                // platform. We KEEP `Modify(Metadata(Any))` and
+                // `Modify(Metadata(Other))` as catch-all "we can't tell what
+                // metadata changed" cases — better to over-invalidate than to
+                // miss a real edit.
+                if !watcher_event_invalidates(&event.kind) {
+                    continue;
                 }
                 for path in event.paths {
                     // Skip internal directories that generate frequent non-source events.
@@ -511,5 +560,118 @@ fn drain_lsp_events(ctx: &AppContext) {
                 log::info!("exited {:?} {}", server_kind, root.display());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod watcher_filter_tests {
+    use super::watcher_event_invalidates;
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+        RenameMode,
+    };
+    use notify::EventKind;
+
+    #[test]
+    fn create_and_remove_invalidate() {
+        assert!(watcher_event_invalidates(&EventKind::Create(
+            CreateKind::File
+        )));
+        assert!(watcher_event_invalidates(&EventKind::Remove(
+            RemoveKind::File
+        )));
+    }
+
+    #[test]
+    fn modify_data_invalidates() {
+        // The "actual file write" case — must invalidate.
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Data(DataChange::Content)
+        )));
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Data(DataChange::Any)
+        )));
+    }
+
+    #[test]
+    fn modify_name_rename_invalidates() {
+        // Renames should invalidate the old path's cached state.
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Name(RenameMode::To)
+        )));
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Name(RenameMode::From)
+        )));
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Name(RenameMode::Both)
+        )));
+    }
+
+    #[test]
+    fn modify_metadata_writetime_invalidates() {
+        // mtime change implies real content edit on every supported platform.
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::WriteTime)
+        )));
+    }
+
+    #[test]
+    fn modify_metadata_any_or_other_invalidates() {
+        // Catch-all "we can't tell what changed" — better to over-invalidate.
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Any)
+        )));
+        assert!(watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Other)
+        )));
+    }
+
+    /// Regression: biome-lint reading every TS file under Linux atime triggers
+    /// notify `Modify(Metadata(AccessTime))` events. Treating those as
+    /// invalidations re-parses the entire symbol cache, search index, and
+    /// semantic index for every read-only lint pass — wasted work.
+    #[test]
+    fn modify_metadata_access_time_does_not_invalidate() {
+        assert!(!watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::AccessTime)
+        )));
+    }
+
+    #[test]
+    fn modify_metadata_permissions_ownership_extended_do_not_invalidate() {
+        // chmod / chown / xattrs don't change content.
+        assert!(!watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Permissions)
+        )));
+        assert!(!watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Ownership)
+        )));
+        assert!(!watcher_event_invalidates(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Extended)
+        )));
+    }
+
+    #[test]
+    fn access_events_do_not_invalidate() {
+        // Read syscalls cause an atime feedback loop on Linux when the watcher
+        // is watching a directory we read into.
+        assert!(!watcher_event_invalidates(&EventKind::Access(
+            AccessKind::Open(AccessMode::Read)
+        )));
+        assert!(!watcher_event_invalidates(&EventKind::Access(
+            AccessKind::Read
+        )));
+        assert!(!watcher_event_invalidates(&EventKind::Access(
+            AccessKind::Close(AccessMode::Read)
+        )));
+    }
+
+    #[test]
+    fn other_event_kinds_do_not_invalidate() {
+        // `Other`, `Any` — we explicitly opt out of unknown event categories
+        // since the existing `Modify(_)` and `Modify(Metadata(Any))` arms
+        // already handle the meaningful catch-all cases.
+        assert!(!watcher_event_invalidates(&EventKind::Other));
+        assert!(!watcher_event_invalidates(&EventKind::Any));
     }
 }

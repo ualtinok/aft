@@ -170,7 +170,7 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
 
     expect(response.success).toBe(true);
     expect(String(response.output)).toContain("1: alpha");
-    expect(String(response.output)).toContain("call the `read` tool directly next time");
+    expect(String(response.output)).toContain("Prefer `read` tool over bash.");
   });
 
   test("rewrites grep -r to grep tool with footer hint when enabled", async () => {
@@ -185,7 +185,7 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
 
     expect(response.success).toBe(true);
     expect(String(response.output)).toContain("needle");
-    expect(String(response.output)).toContain("call the `grep` tool directly next time");
+    expect(String(response.output)).toContain("Prefer `grep` tool over bash.");
   });
 
   test("rewriter disabled runs cat as raw bash without footer", async () => {
@@ -197,7 +197,7 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
 
     expect(response.success).toBe(true);
     expect(response.output).toBe("raw cat output\n");
-    expect(String(response.output)).not.toContain("call the `read` tool directly next time");
+    expect(String(response.output)).not.toContain("Prefer `read` tool over bash.");
   });
 
   test("generic compressor strips ANSI and collapses four-plus duplicate lines", async () => {

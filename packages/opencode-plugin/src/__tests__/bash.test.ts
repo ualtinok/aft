@@ -286,10 +286,17 @@ describe("OpenCode bash adapter", () => {
     );
     const stored = consumeToolMetadata("bg-session", "bg-call");
 
-    expect(output).toBe("Background task started: task-xyz");
+    // The "completion reminder" sentence is load-bearing — it tells the
+    // agent the notification mechanism exists so it stops polling. Don't
+    // soften this assertion; if the wording changes accidentally we want
+    // the test to fail.
+    expect(output).toBe(
+      "Background task started: task-xyz. A completion reminder will be delivered automatically; don't poll bash_status.",
+    );
     expect(stored?.metadata).toEqual({
       description: undefined,
-      output: "Background task started: task-xyz",
+      output:
+        "Background task started: task-xyz. A completion reminder will be delivered automatically; don't poll bash_status.",
       status: "running",
       taskId: "task-xyz",
     });
@@ -311,7 +318,7 @@ describe("bash_status tool", () => {
     return { ctx, statusTool: createBashStatusTool(ctx), killTool: createBashKillTool(ctx) };
   }
 
-  test("returns running status with no output preview", async () => {
+  test("returns running status with anti-polling reminder, no output preview", async () => {
     const { statusTool } = makeCtx((_cmd, _params) => ({
       success: true,
       status: "running",
@@ -320,11 +327,15 @@ describe("bash_status tool", () => {
       output_preview: null,
     }));
     const result = await statusTool.execute({ taskId: "bgb-abc123" }, createMockSdkContext());
-    expect(result).toBe("Task bgb-abc123: running 3s");
+    // Header line preserved.
+    expect(result).toContain("Task bgb-abc123: running 3s");
+    // Anti-polling reminder appended to running tasks. Same wording as the
+    // initial spawn line so the agent sees consistent guidance.
+    expect(result).toContain("A completion reminder will be delivered automatically; don't poll.");
     expect(result).not.toContain("null");
   });
 
-  test("returns completed status with exit code and output preview", async () => {
+  test("completed status renders preview without anti-polling suffix", async () => {
     const { statusTool } = makeCtx((_cmd, _params) => ({
       success: true,
       status: "completed",
@@ -336,6 +347,22 @@ describe("bash_status tool", () => {
     expect(result).toContain("Task bgb-6b454047: completed (exit 0) 15s");
     expect(result).toContain("test 1: bg starting at");
     expect(result).toContain("test 1: bg done at");
+    // Terminal statuses must NOT carry the anti-polling reminder — agent is
+    // already consuming the result and shouldn't get noise.
+    expect(result).not.toContain("don't poll");
+  });
+
+  test("failed/killed/timed_out terminal statuses do not append anti-polling reminder", async () => {
+    for (const status of ["failed", "killed", "timed_out"] as const) {
+      const { statusTool } = makeCtx((_cmd, _params) => ({
+        success: true,
+        status,
+        exit_code: status === "killed" ? null : 1,
+        duration_ms: 5000,
+      }));
+      const result = await statusTool.execute({ taskId: "bgb-end" }, createMockSdkContext());
+      expect(result).not.toContain("don't poll");
+    }
   });
 
   test("forwards task_id as snake_case to bridge", async () => {

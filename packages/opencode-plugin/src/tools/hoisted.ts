@@ -1538,13 +1538,18 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
 
 /**
  * Returns hoisted tools keyed by opencode's built-in names.
- * Overrides: read, write, edit, apply_patch.
+ * Overrides: read, write, edit, apply_patch (always when hoisting is on).
+ *
+ * Bash hoisting is opt-in: `bash`, `bash_status`, and `bash_kill` are only
+ * registered when at least one `experimental.bash.*` flag is enabled
+ * (rewrite, compress, or background). When all flags are off, opencode's
+ * native bash stays in place — users without bash experimentals get zero
+ * AFT code in their bash path. `bash_status` and `bash_kill` register
+ * specifically when `experimental.bash.background` is true, since those
+ * tools only have meaning for background tasks.
  */
 export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition> {
-  return {
-    bash: createBashTool(ctx),
-    bash_status: createBashStatusTool(ctx),
-    bash_kill: createBashKillTool(ctx),
+  const tools: Record<string, ToolDefinition> = {
     read: createReadTool(ctx),
     write: createWriteTool(ctx, "edit"),
     edit: createEditTool(ctx, "write"),
@@ -1552,6 +1557,23 @@ export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition>
     aft_delete: createDeleteTool(ctx),
     aft_move: createMoveTool(ctx),
   };
+
+  // Read nested user-facing config shape — the flat experimental_bash_* keys
+  // are an internal Rust-configure detail, not the surface users write to.
+  const bashRewrite = ctx.config.experimental?.bash?.rewrite === true;
+  const bashCompress = ctx.config.experimental?.bash?.compress === true;
+  const bashBackground = ctx.config.experimental?.bash?.background === true;
+  const anyBashExperimental = bashRewrite || bashCompress || bashBackground;
+
+  if (anyBashExperimental) {
+    tools.bash = createBashTool(ctx);
+  }
+  if (bashBackground) {
+    tools.bash_status = createBashStatusTool(ctx);
+    tools.bash_kill = createBashKillTool(ctx);
+  }
+
+  return tools;
 }
 
 function formatError(error: unknown): string {

@@ -19,6 +19,10 @@ describe("Pi buildWorkflowHints", () => {
     expect(out).toContain("`grep` or `aft_search`");
     expect(out).toContain("Use `aft_navigate`");
     expect(out).toContain("**Long-running commands**");
+    // Anti-polling guidance must be present so agents stop calling
+    // bash_status back-to-back. Mirrors OpenCode plugin parity.
+    expect(out).toContain("A completion reminder is delivered automatically");
+    expect(out).toContain("do not poll");
   });
 
   test("omits bg-bash section when background is disabled", () => {

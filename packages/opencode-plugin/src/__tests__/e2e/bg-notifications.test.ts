@@ -134,7 +134,13 @@ async function spawnBackground(
     ask: async () => {},
     callID: `call-${Date.now()}`,
   } as ToolContext);
-  const taskId = String(output).replace("Background task started: ", "");
+  // Spawn-line format: "Background task started: <taskId>. <anti-poll reminder>."
+  // Match the taskId between the colon and the trailing period so the test
+  // works regardless of any anti-poll text we append. taskId charset is
+  // [a-zA-Z0-9_-] (Rust's bash_background::registry::generate_task_id).
+  const match = String(output).match(/Background task started:\s+([\w-]+)/);
+  if (!match) throw new Error(`could not extract taskId from output: ${output}`);
+  const taskId = match[1];
   trackBgTask("e2e-session", taskId);
   return taskId;
 }

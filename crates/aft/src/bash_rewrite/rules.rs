@@ -32,11 +32,7 @@ impl RewriteRule for GrepRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = grep_request(command, "grep").ok_or("not a grep rewrite")?;
-        try_call_and_footer(
-            crate::commands::grep::handle_grep(&request("grep", params, session_id), ctx),
-            command,
-            "grep",
-        )
+        try_call_and_footer(crate::commands::grep::handle_grep(&request("grep", params, session_id), ctx), "grep")
     }
 }
 
@@ -56,11 +52,7 @@ impl RewriteRule for RgRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = grep_request(command, "rg").ok_or("not an rg rewrite")?;
-        try_call_and_footer(
-            crate::commands::grep::handle_grep(&request("grep", params, session_id), ctx),
-            command,
-            "grep",
-        )
+        try_call_and_footer(crate::commands::grep::handle_grep(&request("grep", params, session_id), ctx), "grep")
     }
 }
 
@@ -80,11 +72,7 @@ impl RewriteRule for FindRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = find_request(command).ok_or("not a find rewrite")?;
-        try_call_and_footer(
-            crate::commands::glob::handle_glob(&request("glob", params, session_id), ctx),
-            command,
-            "glob",
-        )
+        try_call_and_footer(crate::commands::glob::handle_glob(&request("glob", params, session_id), ctx), "glob")
     }
 }
 
@@ -104,11 +92,7 @@ impl RewriteRule for CatRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = cat_read_request(command).ok_or("not a cat rewrite")?;
-        try_call_and_footer(
-            crate::commands::read::handle_read(&request("read", params, session_id), ctx),
-            command,
-            "read",
-        )
+        try_call_and_footer(crate::commands::read::handle_read(&request("read", params, session_id), ctx), "read")
     }
 }
 
@@ -128,14 +112,10 @@ impl RewriteRule for CatAppendRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = append_request(command).ok_or("not an append rewrite")?;
-        try_call_and_footer(
-            crate::commands::edit_match::handle_edit_match(
-                &request("edit_match", params, session_id),
-                ctx,
-            ),
-            command,
-            "edit",
-        )
+        try_call_and_footer(crate::commands::edit_match::handle_edit_match(
+            &request("edit_match", params, session_id),
+            ctx,
+        ), "edit")
     }
 }
 
@@ -155,11 +135,7 @@ impl RewriteRule for SedRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = sed_request(command).ok_or("not a sed rewrite")?;
-        try_call_and_footer(
-            crate::commands::read::handle_read(&request("read", params, session_id), ctx),
-            command,
-            "read",
-        )
+        try_call_and_footer(crate::commands::read::handle_read(&request("read", params, session_id), ctx), "read")
     }
 }
 
@@ -179,11 +155,7 @@ impl RewriteRule for LsRule {
         ctx: &AppContext,
     ) -> Result<Response, String> {
         let params = ls_request(command).ok_or("not an ls rewrite")?;
-        try_call_and_footer(
-            crate::commands::read::handle_read(&request("read", params, session_id), ctx),
-            command,
-            "read",
-        )
+        try_call_and_footer(crate::commands::read::handle_read(&request("read", params, session_id), ctx), "read")
     }
 }
 
@@ -202,11 +174,7 @@ fn request(command: &str, params: Value, session_id: Option<&str>) -> RawRequest
 /// — the agent's intent was bash, the rewrite is a transparent optimization.
 /// Returning a wrapped error response would surprise the agent (e.g. read's
 /// `outside project root` rejecting a sed that bash would have allowed).
-fn try_call_and_footer(
-    response: Response,
-    original_command: &str,
-    replacement_tool: &str,
-) -> Result<Response, String> {
+fn try_call_and_footer(response: Response, replacement_tool: &str) -> Result<Response, String> {
     if !response.success {
         let message = response
             .data
@@ -216,20 +184,12 @@ fn try_call_and_footer(
             .unwrap_or("error");
         return Err(format!("{} declined: {}", replacement_tool, message));
     }
-    Ok(call_and_footer(
-        response,
-        original_command,
-        replacement_tool,
-    ))
+    Ok(call_and_footer(response, replacement_tool))
 }
 
-fn call_and_footer(
-    mut response: Response,
-    original_command: &str,
-    replacement_tool: &str,
-) -> Response {
+fn call_and_footer(mut response: Response, replacement_tool: &str) -> Response {
     let output = response_output(&response.data);
-    let output = add_footer(&output, original_command, replacement_tool);
+    let output = add_footer(&output, replacement_tool);
 
     if let Some(object) = response.data.as_object_mut() {
         object.insert("output".to_string(), Value::String(output.clone()));

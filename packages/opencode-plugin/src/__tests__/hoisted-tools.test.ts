@@ -960,3 +960,72 @@ describe("Hoisted tool execute handlers", () => {
     expect(deleteEntry?.deletions).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Verify the bash hoisting gate. Hoisted bash replaces OpenCode's built-in
+ * bash, so registering it without any `experimental.bash.*` flag set means
+ * users with default config silently get our (untested-against-them) bash
+ * code path with zero experimental benefit. The fix is to register `bash`
+ * (and the background siblings `bash_status` / `bash_kill`) only when the
+ * user has opted into at least one bash experimental.
+ */
+describe("Hoisted bash gating", () => {
+  function toolsWithBashConfig(bash: Record<string, boolean> | undefined) {
+    const pool = { getBridge: () => ({ send: async () => ({}) }) } as unknown as BridgePool;
+    const ctx: PluginContext = {
+      pool,
+      client: createMockClient(),
+      config: { experimental: bash ? { bash } : undefined } as PluginContext["config"],
+      storageDir: "/tmp/aft-test",
+    };
+    return hoistedTools(ctx);
+  }
+
+  test("no experimental.bash config → bash/bash_status/bash_kill NOT registered", () => {
+    const tools = toolsWithBashConfig(undefined);
+    expect(tools.bash).toBeUndefined();
+    expect(tools.bash_status).toBeUndefined();
+    expect(tools.bash_kill).toBeUndefined();
+    // Other hoisted tools are unaffected by the bash gate.
+    expect(tools.read).toBeDefined();
+    expect(tools.edit).toBeDefined();
+  });
+
+  test("empty experimental.bash object → bash NOT registered", () => {
+    const tools = toolsWithBashConfig({});
+    expect(tools.bash).toBeUndefined();
+    expect(tools.bash_status).toBeUndefined();
+    expect(tools.bash_kill).toBeUndefined();
+  });
+
+  test("experimental.bash.rewrite=true → bash registered, but NOT bash_status/bash_kill", () => {
+    const tools = toolsWithBashConfig({ rewrite: true });
+    expect(tools.bash).toBeDefined();
+    // bash_status/bash_kill are background-only — they only manage detached
+    // background tasks, so registering them without `background: true` is
+    // dead surface area.
+    expect(tools.bash_status).toBeUndefined();
+    expect(tools.bash_kill).toBeUndefined();
+  });
+
+  test("experimental.bash.compress=true alone → bash registered, no background tools", () => {
+    const tools = toolsWithBashConfig({ compress: true });
+    expect(tools.bash).toBeDefined();
+    expect(tools.bash_status).toBeUndefined();
+    expect(tools.bash_kill).toBeUndefined();
+  });
+
+  test("experimental.bash.background=true → bash AND bash_status AND bash_kill all registered", () => {
+    const tools = toolsWithBashConfig({ background: true });
+    expect(tools.bash).toBeDefined();
+    expect(tools.bash_status).toBeDefined();
+    expect(tools.bash_kill).toBeDefined();
+  });
+
+  test("all three bash flags true → full bash surface registered", () => {
+    const tools = toolsWithBashConfig({ rewrite: true, compress: true, background: true });
+    expect(tools.bash).toBeDefined();
+    expect(tools.bash_status).toBeDefined();
+    expect(tools.bash_kill).toBeDefined();
+  });
+});

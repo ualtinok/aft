@@ -225,6 +225,17 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
         task_id: taskId,
       };
 
+      // Background spawn path — surface a concise started line with the
+      // anti-polling reminder. Without text, agents would see Rust's empty
+      // output and not understand the background flow. The wording matches
+      // the OpenCode plugin so identical agent behavior is enforced across
+      // both harnesses. See packages/opencode-plugin/src/tools/bash.ts for
+      // the rationale on the "completion reminder" sentence.
+      if (response.status === "running" && taskId) {
+        const startedLine = `Background task started: ${taskId}. A completion reminder will be delivered automatically; don't poll bash_status.`;
+        return bashResult(startedLine, details);
+      }
+
       const output = (response.output as string | undefined) ?? "";
       return bashResult(output, details);
     },
@@ -236,8 +247,17 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
     },
   });
 
-  pi.registerTool<typeof BashTaskParams, BashStatusDetails>(createBashStatusTool(ctx));
-  pi.registerTool<typeof BashTaskParams, BashKillDetails>(createBashKillTool(ctx));
+  // bash_status and bash_kill only have meaning for background tasks. Gate
+  // them on `experimental.bash.background` — when background is disabled, the
+  // user can't spawn anything that would need polling/killing, so registering
+  // these tools just adds noise to the agent's tool list. Caller is already
+  // gating the entire registerBashTool() on `any experimental.bash.* enabled`,
+  // so the bash tool itself is registered for compress/rewrite users; only
+  // bash_status/bash_kill require the background-specific gate.
+  if (ctx.config.experimental?.bash?.background === true) {
+    pi.registerTool<typeof BashTaskParams, BashStatusDetails>(createBashStatusTool(ctx));
+    pi.registerTool<typeof BashTaskParams, BashKillDetails>(createBashKillTool(ctx));
+  }
 }
 
 function bashTransportTimeoutMs(timeout: number | undefined): number {
@@ -341,6 +361,13 @@ function formatBashStatus(taskId: string, details: BashStatusDetails): string {
   let text = `Task ${taskId}: ${details.status}${exit}${dur}`;
   if (isTerminalStatus(details.status) && details.output_preview) {
     text += `\n${details.output_preview.slice(0, 2000)}`;
+  }
+  // Anti-polling reminder for still-running tasks. Mirrors OpenCode plugin
+  // wording exactly so agent behavior is consistent across both harnesses.
+  // Terminal statuses get no suffix so the agent can consume the result
+  // cleanly when the task is actually done.
+  if (!isTerminalStatus(details.status)) {
+    text += `\nA completion reminder will be delivered automatically; don't poll.`;
   }
   return text;
 }

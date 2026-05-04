@@ -444,3 +444,74 @@ describe("bash tool adapter", () => {
     expect(result.content[0].text).toBe("Simple output");
   });
 });
+
+/**
+ * Verify the bash_status / bash_kill gating inside `registerBashTool`.
+ *
+ * The outer gate (whether `registerBashTool` is called at all) lives in
+ * Pi's `index.ts` and depends on any `experimental.bash.*` flag being set.
+ * The inner gate, tested here, controls whether the *background-only*
+ * sibling tools (`bash_status` / `bash_kill`) get registered alongside the
+ * primary `bash` tool — they only have meaning for background tasks, so
+ * registering them when `experimental.bash.background` is off would just
+ * add dead surface area to the agent's tool list.
+ *
+ * The bash hoisting gate test in OpenCode covers the equivalent outer gate.
+ * Pi's outer gate lives in `index.ts` (not in this file's surface), but the
+ * logic is a straight or-of-three of the same nested config keys so the
+ * OpenCode coverage transfers. The inner gate below is Pi-specific
+ * because Pi puts `bash_status` / `bash_kill` inside `registerBashTool`
+ * rather than alongside it.
+ */
+describe("registerBashTool gating of bash_status/bash_kill", () => {
+  function registerWithBashConfig(bash: Record<string, boolean> | undefined) {
+    const tools = new Map<string, MockToolDef>();
+    const api = makeMockApi(tools);
+    const bridge = makeMockBridge();
+    const ctx: PluginContext = {
+      pool: { getBridge: () => bridge } as unknown as PluginContext["pool"],
+      config: { experimental: bash ? { bash } : undefined } as PluginContext["config"],
+      storageDir: "/tmp/test",
+    };
+    registerBashTool(api, ctx);
+    return tools;
+  }
+
+  test("no experimental.bash → bash registered (caller already gated), no bash_status/bash_kill", () => {
+    // registerBashTool is called by the caller — caller does the outer gate.
+    // The function itself always registers `bash`; only the background siblings
+    // require the explicit background flag.
+    const tools = registerWithBashConfig(undefined);
+    expect(tools.get("bash")).toBeDefined();
+    expect(tools.get("bash_status")).toBeUndefined();
+    expect(tools.get("bash_kill")).toBeUndefined();
+  });
+
+  test("experimental.bash.rewrite=true → bash registered, but NOT bash_status/bash_kill", () => {
+    const tools = registerWithBashConfig({ rewrite: true });
+    expect(tools.get("bash")).toBeDefined();
+    expect(tools.get("bash_status")).toBeUndefined();
+    expect(tools.get("bash_kill")).toBeUndefined();
+  });
+
+  test("experimental.bash.compress=true alone → no background siblings", () => {
+    const tools = registerWithBashConfig({ compress: true });
+    expect(tools.get("bash")).toBeDefined();
+    expect(tools.get("bash_status")).toBeUndefined();
+    expect(tools.get("bash_kill")).toBeUndefined();
+  });
+
+  test("experimental.bash.background=true → bash_status AND bash_kill registered", () => {
+    const tools = registerWithBashConfig({ background: true });
+    expect(tools.get("bash")).toBeDefined();
+    expect(tools.get("bash_status")).toBeDefined();
+    expect(tools.get("bash_kill")).toBeDefined();
+  });
+
+  test("all three flags true → full bash surface registered", () => {
+    const tools = registerWithBashConfig({ rewrite: true, compress: true, background: true });
+    expect(tools.get("bash")).toBeDefined();
+    expect(tools.get("bash_status")).toBeDefined();
+    expect(tools.get("bash_kill")).toBeDefined();
+  });
+});
