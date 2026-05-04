@@ -25,7 +25,7 @@
   "scripts": {
     "build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external '@cortexkit/aft-*' && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "echo 'no tests in @cortexkit/aft-bridge yet'",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
