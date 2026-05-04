@@ -26,10 +26,7 @@ afterEach(() => {
  * shape. Used by tests that exercise prompt-context resolution which the
  * wake path performs against the real OpenCode messages API.
  */
-function clientWithMessages(
-  promptAsync: (input: unknown) => Promise<void>,
-  messages: unknown[],
-) {
+function clientWithMessages(promptAsync: (input: unknown) => Promise<void>, messages: unknown[]) {
   return {
     session: {
       promptAsync,

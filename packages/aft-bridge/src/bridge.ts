@@ -291,7 +291,7 @@ export class BinaryBridge {
           // semantic-index build). Without this, background log lines
           // emitted by configure threads appear with no session prefix.
           const sessionIdForConfigure =
-            typeof params["session_id"] === "string" ? (params["session_id"] as string) : undefined;
+            typeof params.session_id === "string" ? (params.session_id as string) : undefined;
           this._configurePromise = (async () => {
             try {
               const configResult = await this.send("configure", {

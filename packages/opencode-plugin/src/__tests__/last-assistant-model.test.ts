@@ -1,9 +1,6 @@
 /// <reference path="../bun-test.d.ts" />
 import { describe, expect, test } from "bun:test";
-import {
-  getLastAssistantModel,
-  resolvePromptContext,
-} from "../shared/last-assistant-model.js";
+import { getLastAssistantModel, resolvePromptContext } from "../shared/last-assistant-model.js";
 
 function makeClient(messages: unknown[]) {
   return {

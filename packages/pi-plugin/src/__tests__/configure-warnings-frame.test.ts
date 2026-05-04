@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __test__ } from "../index.js";
+
 const { handleConfigureWarningsForSession } = __test__;
 
 const tempRoots = new Set<string>();

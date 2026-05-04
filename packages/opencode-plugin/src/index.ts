@@ -43,9 +43,7 @@ import { NPM_LSP_TABLE } from "./lsp-npm-table.js";
 import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import {
-  type ConfigureWarning,
   cleanupWarnings,
-  deliverConfigureWarnings,
   type NotificationOptions,
   sendFeatureAnnouncement,
   sendWarning,
