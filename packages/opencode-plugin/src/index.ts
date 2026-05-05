@@ -8,6 +8,7 @@ import {
   ensureOnnxRuntime,
   findBinary,
   getManualInstallHint,
+  isHomeDirectoryRoot,
   isOrtAutoDownloadSupported,
   setActiveLogger,
 } from "@cortexkit/aft-bridge";
@@ -502,6 +503,19 @@ const plugin: Plugin = async (input) => {
   // though ONNX downloaded successfully.
   void (async () => {
     try {
+      // Note #65: skip eager configure when OpenCode launched the plugin
+      // from the user's home directory. Configuring on `$HOME` walks 100k–10M
+      // files (entire user home), times out the 30s configure budget, gets
+      // killed, then silently retries on every reload. Subsequent real tool
+      // calls will still arrive with proper per-session project roots and
+      // get their own bridges; the eager warmup just doesn't help here.
+      if (isHomeDirectoryRoot(input.directory)) {
+        log(
+          `Eager configure skipped: input.directory=${input.directory} is the user home directory. ` +
+            `The first real tool call from a session will warm the correct project bridge.`,
+        );
+        return;
+      }
       if (onnxRuntimePromise) {
         // Await ONNX resolution so _ort_dylib_dir is set on the pool BEFORE
         // we spawn the bridge. Cap at 60s so a slow/broken download doesn't

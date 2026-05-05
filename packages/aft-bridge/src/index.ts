@@ -38,7 +38,7 @@ export {
 // --- platform helpers ---
 export { PLATFORM_ARCH_MAP, PLATFORM_ASSET_MAP } from "./platform.js";
 export type { PoolOptions } from "./pool.js";
-export { BridgePool } from "./pool.js";
+export { BridgePool, HomeProjectRootError, isHomeDirectoryRoot } from "./pool.js";
 // --- wire contract ---
 export type {
   AftErrorResponse,

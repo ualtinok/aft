@@ -38,6 +38,7 @@ import {
   ensureOnnxRuntime,
   findBinary,
   getManualInstallHint,
+  isHomeDirectoryRoot,
   setActiveLogger,
 } from "@cortexkit/aft-bridge";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -499,7 +500,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // the next real tool call will surface a proper error.
   void (async () => {
     try {
-      const bridge = pool.getBridge(process.cwd());
+      // Note #65: skip eager configure when Pi was launched from the user's
+      // home directory. Configuring on `$HOME` walks the entire user home
+      // tree (100k–10M files), times out the 30s configure budget, gets
+      // killed, then silently retries on every reload. The first real tool
+      // call from a session will still warm the correct project bridge.
+      const cwd = process.cwd();
+      if (isHomeDirectoryRoot(cwd)) {
+        log(
+          `Eager configure skipped: cwd=${cwd} is the user home directory. ` +
+            `The first real tool call will warm the correct project bridge.`,
+        );
+        return;
+      }
+      const bridge = pool.getBridge(cwd);
       // No session_id: runs before any user session exists; configure
       // threads spawned by this warmup will log with no [ses_xxx] prefix.
       await bridge.send("status", {});

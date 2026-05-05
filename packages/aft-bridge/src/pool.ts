@@ -1,10 +1,63 @@
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { error, log } from "./active-logger.js";
 import { BinaryBridge, type BridgeOptions } from "./bridge.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = Infinity; // keep alive as long as the host is running
 const DEFAULT_MAX_POOL_SIZE = 8;
 const CLEANUP_INTERVAL_MS = 60 * 1000; // check every minute
+
+/**
+ * Error thrown when {@link BridgePool.getBridge} is called with a project root
+ * that resolves to the user's home directory.
+ *
+ * Note #65: when OpenCode Desktop / Pi launches from `~` and a session has no
+ * stored project directory, the resolver hands the plugin the home dir as the
+ * "project root". Configuring an aft bridge against `$HOME` walks 100k–10M
+ * files (entire user home), times out the 30s configure budget, gets killed
+ * by the bridge timeout, and silently retries on every reload — wasting one
+ * full bridge spawn per restart with no agent-visible benefit.
+ *
+ * Callers should detect this and decline to call `getBridge()` for `$HOME`.
+ * The pool throws as a defense-in-depth check so any future regression is
+ * loud rather than silent.
+ */
+export class HomeProjectRootError extends Error {
+  constructor(public readonly projectRoot: string) {
+    super(
+      `aft refuses to spawn a bridge with project_root=${projectRoot} (user home directory). ` +
+        `Open OpenCode/Pi from a project subdirectory instead, or set the session's ` +
+        `directory to a real project root.`,
+    );
+    this.name = "HomeProjectRootError";
+  }
+}
+
+/** Canonicalize the user's home directory for stable comparison with bridge keys. */
+function canonicalHomeDir(): string | null {
+  try {
+    const home = homedir();
+    if (!home) return null;
+    try {
+      return realpathSync(home);
+    } catch {
+      return home.replace(/[/\\]+$/, "");
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Test whether the given normalized project root matches the user's home
+ * directory exactly. Subdirectories of `$HOME` are valid project roots and
+ * pass through.
+ */
+export function isHomeDirectoryRoot(normalizedKey: string): boolean {
+  const home = canonicalHomeDir();
+  if (!home) return false;
+  return normalizedKey === home;
+}
 
 interface PoolEntry {
   bridge: BinaryBridge;
@@ -94,6 +147,18 @@ export class BridgePool {
    */
   getBridge(projectRoot: string): BinaryBridge {
     const key = normalizeKey(projectRoot);
+
+    // Defense-in-depth: refuse to spawn a bridge when the resolved project
+    // root is the user's home directory. Configuring on `$HOME` walks the
+    // entire user home tree (often hundreds of thousands of files), times
+    // out the configure budget, gets killed, then silently retries on every
+    // reload. Callers should detect this case BEFORE getBridge() and skip
+    // (e.g. eager configure logs and continues), but throwing here makes
+    // any future regression loud rather than silent.
+    if (isHomeDirectoryRoot(key)) {
+      throw new HomeProjectRootError(key);
+    }
+
     const existing = this.bridges.get(key);
     if (existing) {
       existing.lastUsed = Date.now();
