@@ -113,6 +113,13 @@ echo "→ Syncing versions to $VERSION..."
 bun scripts/version-sync.mjs "$VERSION"
 echo ""
 
+# Refresh bun.lock so workspace package versions match the bumped
+# package.json files. Without this, CI's `bun install --frozen-lockfile`
+# fails because the lockfile still pins the old versions.
+echo "→ Refreshing bun.lock..."
+bun install --silent 2>&1 || { echo "Error: bun install failed after version sync"; exit 1; }
+echo ""
+
 # Step 2: Commit (skip if versions were already at target)
 echo "→ Committing version bump..."
 git add -A
