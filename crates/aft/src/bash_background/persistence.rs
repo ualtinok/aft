@@ -38,10 +38,20 @@ pub struct PersistedTask {
     pub completion_delivered: bool,
     #[serde(default = "default_notify_on_completion")]
     pub notify_on_completion: bool,
+    /// Per-call output compression opt-in. Defaults to `true` so existing
+    /// behavior (compression when `experimental.bash.compress=true`) is
+    /// unchanged. Agents can pass `compressed: false` to disable compression
+    /// for a single bash call without flipping the global flag.
+    #[serde(default = "default_compressed")]
+    pub compressed: bool,
     pub status_reason: Option<String>,
 }
 
 fn default_notify_on_completion() -> bool {
+    true
+}
+
+fn default_compressed() -> bool {
     true
 }
 
@@ -59,6 +69,7 @@ impl PersistedTask {
         workdir: PathBuf,
         timeout_ms: Option<u64>,
         notify_on_completion: bool,
+        compressed: bool,
     ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -76,6 +87,7 @@ impl PersistedTask {
             pgid: None,
             completion_delivered: !notify_on_completion,
             notify_on_completion,
+            compressed,
             status_reason: None,
         }
     }

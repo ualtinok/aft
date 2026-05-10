@@ -566,10 +566,59 @@ tools instead of spawning bash:
 Each rewrite returns the AFT tool's result with a footer hint reminding the agent to call the
 direct tool next time.
 
-**Compression** — when `experimental.bash.compress: true` (default-on once enabled), output for
-known commands is compressed via per-command compressors (`git`, `cargo`, `npm`, `bun`, `pnpm`,
-`pytest`, `tsc`). Everything else uses generic ANSI stripping and deduplication. Pass
-`compressed: false` to opt out for a single call.
+**Compression** — when `experimental.bash.compress: true` (default-on once enabled), bash output
+flows through three tiers in order:
+
+1. **Built-in Rust compressors** — stateful parsers for high-traffic tools where heuristics like
+   JSON parsing or section detection are required. Always wins when matched. Currently:
+   `git` (status / diff / show / log / branch / blame / add / commit / push / pull / fetch /
+   stash), `cargo`, `tsc`, `npm`, `bun`, `pnpm`, `pytest`, `eslint`, `vitest` / `jest`, `biome`.
+2. **Built-in TOML filters** — declarative strip + truncate + cap + shortcircuit rules covering
+   the long tail of CLI tools. v0.21 ships 15 filters: `make`, `ls`, `tree`, `df`, `du`, `find`,
+   `wc`, `gradle`, `xcodebuild`, `terraform`, `helm`, `docker`, `kubectl`, `gh`,
+   `ansible-playbook`. User-supplied filters at `<storage_dir>/filters/*.toml` override built-ins;
+   project-supplied filters at `<project>/.aft/filters/*.toml` override both but require explicit
+   trust via `npx @cortexkit/aft doctor filters trust`.
+3. **Generic fallback** — ANSI stripping plus consecutive-line deduplication and middle-truncate.
+
+Use `npx @cortexkit/aft doctor filters` to inspect what's loaded for the current project. Pass
+`compressed: false` on a bash call to opt out for that invocation.
+
+#### Writing a custom TOML filter
+
+```toml
+# ~/.local/share/opencode/storage/plugin/aft/filters/my-tool.toml
+
+[filter]
+matches = ["my-tool"]                # program name (after stripping env vars + path)
+description = "Compact my-tool output"
+
+[strip]
+patterns = [                          # regex per line; matching lines are dropped
+  '^Loading config from',
+  '^Resolving \d+ dependencies',
+]
+
+[truncate]
+line_max = 500                        # middle-truncate per-line over N chars
+
+[cap]
+max_lines = 80                        # head|tail|middle
+keep = "tail"
+
+[shortcircuit]                        # if remainder matches `when`, replace whole output
+when = '^\s*$'
+replacement = "my-tool: ok"
+
+[ansi]
+strip = true                          # default true
+```
+
+Project filters under `.aft/filters/` are an attack vector — a malicious repo could ship a filter
+that strips real failures and replaces them with `tests: ok`. AFT therefore **only loads project
+filters from explicitly trusted projects**. Run `npx @cortexkit/aft doctor filters trust` to
+review and approve them. Inspect the active set with `npx @cortexkit/aft doctor filters` and dump
+a single filter's resolved content with `--show <name>`.
 
 **Background** — when `experimental.bash.background: true`, pass `background: true` to spawn
 detached. The call returns `task_id`; inspect with `bash_status({ "task_id": "..." })`; kill

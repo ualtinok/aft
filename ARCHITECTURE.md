@@ -155,6 +155,35 @@
 
 **Where this is documented in code:** `crates/aft/src/protocol.rs` `Response` doc comment carries the canonical rule and the approved field set. New tools must follow this convention; existing tools are migrating.
 
+## Bash Output Compression
+
+**Goal:** reduce hoisted-bash output to fewer tokens while keeping the information the agent actually needs (errors, summaries, ref updates) and discarding the noise (progress bars, repeated headers, deep nested directory listings).
+
+**Three-tier dispatch in `crates/aft/src/compress/mod.rs`:**
+
+1. **Rust [`Compressor`] modules** — stateful, hand-written parsers for high-traffic tools where heuristics like JSON parsing or section detection are required. Always wins when matched. Each module lives in its own file under `crates/aft/src/compress/` (e.g. `git.rs`, `cargo.rs`, `eslint.rs`) and implements the `Compressor` trait (`fn matches(&str) -> bool` + `fn compress(&str, &str) -> String`).
+2. **Declarative TOML filters** — strip + truncate + cap + shortcircuit rules for the long tail of CLI tools, loaded from three sources at startup with project > user > builtin priority by filename:
+    - **Builtin**: shipped via `include_str!()` from `crates/aft/src/compress/builtin_filters/*.toml`, registered in `crates/aft/src/compress/builtin_filters.rs::ALL`
+    - **User**: `<storage_dir>/filters/*.toml` (XDG-aware via the active `storage_dir`)
+    - **Project**: `<project_root>/.aft/filters/*.toml` — gated by [`crate::compress::trust`]; never loaded for an untrusted project
+3. **Generic fallback** — ANSI strip + consecutive-line dedup + middle-truncate. Always applies when no Rust module or TOML filter matches.
+
+**Pipeline for TOML filters** (in `crates/aft/src/compress/toml_filter.rs::apply_filter`):
+
+1. ANSI strip (when `[ansi].strip` is true; default true)
+2. `[strip]` regexes drop matching lines (multiline mode)
+3. `[shortcircuit]` checks remaining content; if matched, return `replacement`
+4. `[truncate]` middle-truncates per line at `line_max` chars
+5. `[cap]` enforces `max_lines` with `keep = "head" | "tail" | "middle"`
+
+**Trust model** (`crates/aft/src/compress/trust.rs`): project filters can lie about output (e.g. strip real failures and replace with `tests: ok`). They are off by default. Users opt in via `npx @cortexkit/aft doctor filters trust`, which records the canonicalized project root in `<storage_dir>/trusted-filter-projects.json` (atomic temp-file rename, deserialized fail-closed). The CLI also exposes `untrust`, `trust --list`, `--show <name>`, and the default list view.
+
+**Concurrency:** the filter registry is exposed as `Arc<RwLock<FilterRegistry>>` so the `BgTaskRegistry` watchdog thread can compress completed task output without holding `AppContext`. The compressor is installed as a closure on `BgTaskRegistry` from `crates/aft/src/main.rs` after `AppContext::new` constructs both.
+
+**Configure invalidation:** `crates/aft/src/commands/configure.rs::handle_configure` calls `ctx.sync_bash_compress_flag()` and `ctx.reset_filter_registry()` on every configure so changes to `experimental.bash.compress`, `storage_dir`, `project_root`, or trust state pick up immediately without restart.
+
+**Compression site:** terminal-state output only. Live tail of running tasks (via `bash_status` polling) is shown raw so agents debugging long commands see exactly what the process emitted. Compression fires inside `BgTaskRegistry::maybe_compress_snapshot` (status / list paths) and `enqueue_completion_locked` (completion frame + `bash_drain_completions` cache).
+
 ## Cross-Cutting Concerns
 
 **Logging:** Write plugin logs through `packages/opencode-plugin/src/logger.ts` and Rust logs through `env_logger` in `crates/aft/src/main.rs`.

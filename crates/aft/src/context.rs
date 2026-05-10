@@ -244,10 +244,26 @@ pub struct AppContext {
     stdout_writer: SharedStdoutWriter,
     progress_sender: SharedProgressSender,
     bash_background: BgTaskRegistry,
+    /// Thread-safe registry of TOML output filters. Lazy-built on first
+    /// access; populated atomically via `RwLock`. Shared between command
+    /// handlers (which use it through `filter_registry()` -> read guard) and
+    /// the `BgTaskRegistry` watchdog thread (which uses it through
+    /// `compress::compress_with_registry`). Reloaded when configure changes
+    /// the project root or storage_dir; see [`AppContext::reset_filter_registry`].
+    filter_registry: crate::compress::SharedFilterRegistry,
+    /// Set to true once the filter_registry has been populated. Avoids
+    /// double-loading on hot paths without holding a write lock.
+    filter_registry_loaded: std::sync::atomic::AtomicBool,
+    /// Live `experimental.bash.compress` flag, kept in sync with `config`
+    /// from the configure handler. Exposed via [`AppContext::bash_compress_flag`]
+    /// so the BgTaskRegistry's watchdog-thread compressor can read it without
+    /// holding the config refcell.
+    bash_compress_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppContext {
     pub fn new(provider: Box<dyn LanguageProvider>, config: Config) -> Self {
+        let bash_compress_enabled = config.experimental_bash_compress;
         let progress_sender = Arc::new(Mutex::new(None));
         let stdout_writer = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
         let symbol_cache = provider
@@ -278,6 +294,80 @@ impl AppContext {
             stdout_writer,
             progress_sender: Arc::clone(&progress_sender),
             bash_background: BgTaskRegistry::new(progress_sender),
+            filter_registry: Arc::new(std::sync::RwLock::new(
+                crate::compress::toml_filter::FilterRegistry::default(),
+            )),
+            filter_registry_loaded: std::sync::atomic::AtomicBool::new(false),
+            bash_compress_flag: Arc::new(std::sync::atomic::AtomicBool::new(bash_compress_enabled)),
+        }
+    }
+
+    /// Shared atomic mirror of `experimental.bash.compress`. Updated by the
+    /// configure handler. Read by the BgTaskRegistry compressor closure.
+    pub fn bash_compress_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.bash_compress_flag)
+    }
+
+    /// Update the shared `bash_compress_flag` mirror. Call this from the
+    /// configure handler whenever `experimental.bash.compress` changes so the
+    /// BgTaskRegistry watchdog sees the new value on the next completion.
+    pub fn sync_bash_compress_flag(&self) {
+        let value = self.config().experimental_bash_compress;
+        self.bash_compress_flag
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_bash_compress_enabled(&self, enabled: bool) {
+        self.config_mut().experimental_bash_compress = enabled;
+        self.bash_compress_flag
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read-only access to the TOML filter registry, building it lazily on
+    /// first use. Returns an `RwLockReadGuard` that callers can `lookup`
+    /// against directly.
+    pub fn filter_registry(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::compress::toml_filter::FilterRegistry> {
+        self.ensure_filter_registry_loaded();
+        match self.filter_registry.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Returns the shared `Arc<RwLock<FilterRegistry>>` handle so threads
+    /// outside `AppContext` (notably the bash watchdog) can read it without
+    /// touching the rest of the context.
+    pub fn shared_filter_registry(&self) -> crate::compress::SharedFilterRegistry {
+        self.ensure_filter_registry_loaded();
+        Arc::clone(&self.filter_registry)
+    }
+
+    /// Force a fresh load of the TOML filter registry. Called when configure
+    /// changes the project root, storage_dir, or trust state so subsequent
+    /// `compress::compress` calls pick up new filters.
+    pub fn reset_filter_registry(&self) {
+        let new_registry = crate::compress::build_registry_for_context(self);
+        match self.filter_registry.write() {
+            Ok(mut slot) => *slot = new_registry,
+            Err(poisoned) => *poisoned.into_inner() = new_registry,
+        }
+        self.filter_registry_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn ensure_filter_registry_loaded(&self) {
+        use std::sync::atomic::Ordering;
+        if self.filter_registry_loaded.load(Ordering::Acquire) {
+            return;
+        }
+        // Build outside the lock to avoid blocking other readers during a
+        // multi-file TOML parse.
+        let new_registry = crate::compress::build_registry_for_context(self);
+        if let Ok(mut slot) = self.filter_registry.write() {
+            *slot = new_registry;
+            self.filter_registry_loaded.store(true, Ordering::Release);
         }
     }
 

@@ -100,6 +100,12 @@ pub(crate) struct RegistryInner {
     pub(crate) shutdown: AtomicBool,
     pub(crate) long_running_reminder_enabled: AtomicBool,
     pub(crate) long_running_reminder_interval_ms: AtomicU64,
+    /// Output compression callback. Set by `AppContext` after construction.
+    /// Takes (command, raw_output) and returns compressed text. Called from
+    /// the watchdog thread when a task reaches a terminal state and from
+    /// `bash_status`/`list` snapshot reads. When `None`, output is returned
+    /// uncompressed.
+    pub(crate) compressor: Mutex<Option<Box<dyn Fn(&str, String) -> String + Send + Sync>>>,
 }
 
 pub(crate) struct BgTask {
@@ -130,7 +136,33 @@ impl BgTaskRegistry {
                 shutdown: AtomicBool::new(false),
                 long_running_reminder_enabled: AtomicBool::new(true),
                 long_running_reminder_interval_ms: AtomicU64::new(600_000),
+                compressor: Mutex::new(None),
             }),
+        }
+    }
+
+    /// Install the output-compression callback. Called by `main.rs` after
+    /// `AppContext` is constructed so that snapshot/completion paths can
+    /// invoke `compress::compress_with_registry` without holding a context
+    /// reference. When called multiple times, the latest installation wins.
+    pub fn set_compressor<F>(&self, compressor: F)
+    where
+        F: Fn(&str, String) -> String + Send + Sync + 'static,
+    {
+        if let Ok(mut slot) = self.inner.compressor.lock() {
+            *slot = Some(Box::new(compressor));
+        }
+    }
+
+    /// Apply the installed compressor (if any) to `output`. Returns `output`
+    /// untouched when no compressor is installed.
+    pub(crate) fn compress_output(&self, command: &str, output: String) -> String {
+        let Ok(slot) = self.inner.compressor.lock() else {
+            return output;
+        };
+        match slot.as_ref() {
+            Some(compressor) => compressor(command, output),
+            None => output,
         }
     }
 
@@ -144,6 +176,7 @@ impl BgTaskRegistry {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &self,
         command: &str,
@@ -154,6 +187,7 @@ impl BgTaskRegistry {
         storage_dir: PathBuf,
         max_running: usize,
         notify_on_completion: bool,
+        compressed: bool,
     ) -> Result<String, String> {
         self.start_watchdog();
 
@@ -178,6 +212,7 @@ impl BgTaskRegistry {
             workdir.clone(),
             timeout_ms,
             notify_on_completion,
+            compressed,
         );
         write_task(&paths.json, &metadata)
             .map_err(|e| format!("failed to persist background task metadata: {e}"))?;
@@ -222,6 +257,7 @@ impl BgTaskRegistry {
     }
 
     #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &self,
         command: &str,
@@ -232,6 +268,7 @@ impl BgTaskRegistry {
         storage_dir: PathBuf,
         max_running: usize,
         notify_on_completion: bool,
+        compressed: bool,
     ) -> Result<String, String> {
         self.start_watchdog();
 
@@ -256,6 +293,7 @@ impl BgTaskRegistry {
             workdir.clone(),
             timeout_ms,
             notify_on_completion,
+            compressed,
         );
         write_task(&paths.json, &metadata)
             .map_err(|e| format!("failed to persist background task metadata: {e}"))?;
@@ -382,7 +420,9 @@ impl BgTaskRegistry {
     ) -> Option<BgTaskSnapshot> {
         let task = self.task_for_session(task_id, session_id)?;
         let _ = self.poll_task(&task);
-        Some(task.snapshot(preview_bytes))
+        let mut snapshot = task.snapshot(preview_bytes);
+        self.maybe_compress_snapshot(&task, &mut snapshot);
+        Some(snapshot)
     }
 
     pub fn list(&self, preview_bytes: usize) -> Vec<BgTaskSnapshot> {
@@ -396,9 +436,32 @@ impl BgTaskRegistry {
             .into_iter()
             .map(|task| {
                 let _ = self.poll_task(&task);
-                task.snapshot(preview_bytes)
+                let mut snapshot = task.snapshot(preview_bytes);
+                self.maybe_compress_snapshot(&task, &mut snapshot);
+                snapshot
             })
             .collect()
+    }
+
+    /// Compress `output_preview` in place when the task is in a terminal
+    /// state. Live tail of running tasks stays raw so agents debugging
+    /// long-running bash see exactly what the process emitted, not a
+    /// heuristic-collapsed view. Per-task opt-out via the `compressed`
+    /// field on `PersistedTask` short-circuits before the compress pipeline.
+    fn maybe_compress_snapshot(&self, task: &Arc<BgTask>, snapshot: &mut BgTaskSnapshot) {
+        if !snapshot.info.status.is_terminal() {
+            return;
+        }
+        let compressed_flag = task
+            .state
+            .lock()
+            .map(|state| state.metadata.compressed)
+            .unwrap_or(true);
+        if !compressed_flag {
+            return;
+        }
+        let raw = std::mem::take(&mut snapshot.output_preview);
+        snapshot.output_preview = self.compress_output(&snapshot.info.command, raw);
     }
 
     pub fn kill(&self, task_id: &str, session_id: &str) -> Result<BgTaskSnapshot, String> {
@@ -743,9 +806,18 @@ impl BgTaskRegistry {
         // both the push-frame consumer (running session) and any later
         // `bash_drain_completions` poll (different session, restart) see the
         // same preview without racing against rotation.
-        let (output_preview, output_truncated) = match buffer {
+        let (raw_preview, output_truncated) = match buffer {
             Some(buf) => buf.read_tail(BG_COMPLETION_PREVIEW_BYTES),
             None => (String::new(), false),
+        };
+        // Compress at completion time so push-frame consumers and later
+        // `bash_drain_completions` poll-callers see the same compressed text.
+        // Per-task `compressed: false` opts out; otherwise the compressor is
+        // a no-op when `experimental.bash.compress=false`.
+        let output_preview = if metadata.compressed {
+            self.compress_output(&metadata.command, raw_preview)
+        } else {
+            raw_preview
         };
         let completion = BgCompletion {
             task_id: metadata.task_id.clone(),
@@ -1328,6 +1400,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 10,
                 true,
+                false,
             )
             .unwrap();
         registry
@@ -1362,6 +1435,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 10,
                 true,
+                false,
             )
             .unwrap();
 
@@ -1456,6 +1530,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 10,
                 true,
+                false,
             )
             .unwrap();
 
@@ -1522,6 +1597,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 10,
                 true,
+                false,
             )
             .unwrap();
 
@@ -1562,6 +1638,7 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 dir.path().to_path_buf(),
                 10,
+                false,
             )
             .unwrap();
         (registry, dir, task_id)

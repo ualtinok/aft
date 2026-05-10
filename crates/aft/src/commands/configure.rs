@@ -1006,7 +1006,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         .get("experimental_bash_compress")
         .and_then(|v| v.as_bool())
     {
-        ctx.config_mut().experimental_bash_compress = v;
+        ctx.set_bash_compress_enabled(v);
     }
     if let Some(v) = params
         .get("experimental_bash_background")
@@ -1553,6 +1553,13 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     install_project_watcher(ctx, &root_path);
 
     slog_info!("project root set: {}", root_path.display());
+
+    // Sync compression state before spawning the async configure-warnings
+    // worker. If this work happens after spawn, very small projects can emit
+    // their push frame before the configure response is written, and clients
+    // that wait for the response first may discard that early frame.
+    ctx.sync_bash_compress_flag();
+    ctx.reset_filter_registry();
 
     let config_snapshot = ctx.config().clone();
 

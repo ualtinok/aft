@@ -47,6 +47,10 @@ async function main(): Promise<number> {
       const { runLspDoctor } = await import("./commands/lsp.js");
       return runLspDoctor({ argv: args.slice(1) });
     }
+    if (args[0] === "filters") {
+      const { runDoctorFilters } = await import("./commands/doctor-filters.js");
+      return runDoctorFilters({ argv: args.slice(1) });
+    }
     const { runDoctor } = await import("./commands/doctor.js");
     const force = args.includes("--force");
     const clear = args.includes("--clear");

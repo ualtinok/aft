@@ -50,6 +50,7 @@ impl BgTaskStatus {
 }
 
 /// Spawn a bash command in the background. Returns a task_id immediately.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     request_id: &str,
     session_id: &str,
@@ -60,6 +61,7 @@ pub fn spawn(
     ctx: &AppContext,
     require_background_flag: bool,
     notify_on_completion: bool,
+    compressed: bool,
 ) -> Response {
     if require_background_flag && !ctx.config().experimental_bash_background {
         return Response::error(
@@ -87,6 +89,7 @@ pub fn spawn(
         storage_dir,
         max_running,
         notify_on_completion,
+        compressed,
     ) {
         Ok(task_id) => Response::success(
             request_id,

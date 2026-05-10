@@ -43,7 +43,7 @@ struct BashParams {
     #[serde(default = "default_notify_on_completion")]
     notify_on_completion: bool,
     #[serde(default = "default_compressed")]
-    _compressed: bool,
+    compressed: bool,
     #[serde(default)]
     permissions_granted: Vec<String>,
     #[serde(default)]
@@ -124,6 +124,7 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
         ctx,
         params.background,
         params.notify_on_completion,
+        params.compressed,
     )
 }
 

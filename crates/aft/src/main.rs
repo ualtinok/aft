@@ -33,6 +33,29 @@ fn main() {
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
     install_signal_handler(ctx.bash_background().clone(), ctx.lsp_child_registry());
+
+    // Install bash output-compression closure on the BgTaskRegistry. The
+    // closure captures the shared filter-registry handle and the shared
+    // compress-flag (atomic) so the watchdog thread can compress without
+    // touching the rest of AppContext. The flag is updated from `configure`
+    // when `experimental.bash.compress` changes; the filter registry is
+    // updated when `reset_filter_registry` is called.
+    {
+        let filter_registry_handle = ctx.shared_filter_registry();
+        let compress_flag = ctx.bash_compress_flag();
+        ctx.bash_background()
+            .set_compressor(move |command: &str, output: String| {
+                if !compress_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return output;
+                }
+                let registry_guard = match filter_registry_handle.read() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                aft::compress::compress_with_registry(command, &output, &registry_guard)
+            });
+    }
+
     let stdout_writer = ctx.stdout_writer();
     ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(
         move |frame: PushFrame| {
@@ -222,6 +245,13 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         "grep" => aft::commands::grep::handle_grep(&req, ctx),
         "semantic_search" => aft::commands::semantic_search::handle_semantic_search(&req, ctx),
         "status" => aft::commands::status::handle_status(&req, ctx),
+        "list_filters" => aft::commands::list_filters::handle_list_filters(&req, ctx),
+        "trust_filter_project" => {
+            aft::commands::trust_filter_project::handle_trust_filter_project(&req, ctx)
+        }
+        "untrust_filter_project" => {
+            aft::commands::untrust_filter_project::handle_untrust_filter_project(&req, ctx)
+        }
         "call_tree" => aft::commands::call_tree::handle_call_tree(&req, ctx),
         "callers" => aft::commands::callers::handle_callers(&req, ctx),
         "trace_to" => aft::commands::trace_to::handle_trace_to(&req, ctx),

@@ -174,6 +174,7 @@ fn pre_spawn_metadata_starting_replays_as_failed() {
         tempfile::tempdir().unwrap().path().to_path_buf(),
         None,
         true,
+        true,
     );
     let path = task_file(storage.path(), SESSION, task_id, "json");
     write_task(&path, &metadata).unwrap();
@@ -400,6 +401,7 @@ fn replay_stale_running_task_marks_killed_orphaned() {
         "sleep 99".to_string(),
         tempfile::tempdir().unwrap().path().to_path_buf(),
         None,
+        true,
         true,
     );
     metadata.status = BgTaskStatus::Running;
