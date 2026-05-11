@@ -259,6 +259,13 @@ pub struct AppContext {
     /// so the BgTaskRegistry's watchdog-thread compressor can read it without
     /// holding the config refcell.
     bash_compress_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Project gitignore matcher, rebuilt by [`AppContext::rebuild_gitignore`]
+    /// whenever `project_root` changes or a watcher event reports a
+    /// `.gitignore` write. Used by the watcher event filter to decide which
+    /// path-changes are interesting to AFT's caches. `None` when no project
+    /// root is configured or when the project has no gitignore files; in that
+    /// case the watcher falls back to a small hardcoded infra-directory skip.
+    gitignore: RefCell<Option<Arc<ignore::gitignore::Gitignore>>>,
 }
 
 impl AppContext {
@@ -299,6 +306,96 @@ impl AppContext {
             )),
             filter_registry_loaded: std::sync::atomic::AtomicBool::new(false),
             bash_compress_flag: Arc::new(std::sync::atomic::AtomicBool::new(bash_compress_enabled)),
+            gitignore: RefCell::new(None),
+        }
+    }
+
+    /// Borrow the cached project gitignore matcher. Returns `None` when no
+    /// project_root is configured or when the project has no gitignore files.
+    pub fn gitignore(&self) -> Option<Arc<ignore::gitignore::Gitignore>> {
+        self.gitignore.borrow().clone()
+    }
+
+    /// Rebuild the gitignore matcher from the current `project_root` and
+    /// cache it. Called by the configure handler whenever the project root
+    /// changes, and by the watcher event drain when a `.gitignore` file
+    /// itself is modified.
+    ///
+    /// The builder honors:
+    /// - `<project_root>/.gitignore`
+    /// - `<project_root>/.git/info/exclude` (via the `ignore::gitignore`
+    ///   crate's default behavior when constructed from a repo root)
+    /// - nested `.gitignore` files (each `.gitignore` discovered during
+    ///   the recursive walk)
+    ///
+    /// Stores `None` if there's no project_root or no matchable gitignore
+    /// files. Logs build errors but never fails configure.
+    pub fn rebuild_gitignore(&self) {
+        use ignore::gitignore::GitignoreBuilder;
+        use std::path::Path;
+        let root = match self.config().project_root.clone() {
+            Some(r) => r,
+            None => {
+                *self.gitignore.borrow_mut() = None;
+                return;
+            }
+        };
+        let mut builder = GitignoreBuilder::new(&root);
+        // Add root .gitignore (the most common case)
+        let root_ignore = Path::new(&root).join(".gitignore");
+        if root_ignore.exists() {
+            if let Some(err) = builder.add(&root_ignore) {
+                log::warn!(
+                    "gitignore parse error in {}: {}",
+                    root_ignore.display(),
+                    err
+                );
+            }
+        }
+        // Walk the project to pick up nested .gitignore files. Cap the walk
+        // at the same SOURCE_WALK_LIMIT used by other configure-time walks
+        // (currently 20000 files); gitignore lookup-cost stays bounded for
+        // huge monorepos. Skip the obvious infra dirs so we don't accidentally
+        // load a vendored repo's .gitignore that doesn't apply to ours.
+        let walker = ignore::WalkBuilder::new(&root)
+            .standard_filters(true)
+            // Hidden files are filtered by default, but `.gitignore` starts with
+            // `.` so we need to traverse "hidden" entries to find nested ones.
+            .hidden(false)
+            .max_depth(Some(8))
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    "node_modules" | "target" | ".git" | ".opencode" | ".alfonso"
+                )
+            })
+            .build();
+        for entry in walker.flatten() {
+            if entry.file_name() == ".gitignore" && entry.path() != root_ignore {
+                if let Some(err) = builder.add(entry.path()) {
+                    log::warn!(
+                        "nested gitignore parse error in {}: {}",
+                        entry.path().display(),
+                        err
+                    );
+                }
+            }
+        }
+        match builder.build() {
+            Ok(gi) => {
+                let count = gi.num_ignores();
+                if count > 0 {
+                    log::info!("gitignore matcher built: {} pattern(s)", count);
+                    *self.gitignore.borrow_mut() = Some(Arc::new(gi));
+                } else {
+                    *self.gitignore.borrow_mut() = None;
+                }
+            }
+            Err(err) => {
+                log::warn!("gitignore matcher build failed: {}", err);
+                *self.gitignore.borrow_mut() = None;
+            }
         }
     }
 
@@ -867,5 +964,156 @@ impl AppContext {
             "local_entries": entries,
             "warm_entries": 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn make_ctx_with_root(root: &Path) -> AppContext {
+        let provider = Box::new(crate::parser::TreeSitterProvider::new());
+        let config = Config {
+            project_root: Some(root.to_path_buf()),
+            ..Config::default()
+        };
+        AppContext::new(provider, config)
+    }
+
+    /// Helper: returns true when the matcher would skip `path` (as if it
+    /// arrived via a watcher event for this project root).
+    fn is_ignored(ctx: &AppContext, path: &Path) -> bool {
+        let Some(matcher) = ctx.gitignore() else {
+            return false;
+        };
+        let is_dir = path.is_dir();
+        matcher
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
+    }
+
+    #[test]
+    fn rebuild_gitignore_returns_none_without_project_root() {
+        let provider = Box::new(crate::parser::TreeSitterProvider::new());
+        let ctx = AppContext::new(provider, Config::default());
+        ctx.rebuild_gitignore();
+        assert!(ctx.gitignore().is_none());
+    }
+
+    #[test]
+    fn rebuild_gitignore_returns_none_for_project_with_no_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+        assert!(ctx.gitignore().is_none());
+    }
+
+    #[test]
+    fn matcher_filters_files_in_ignored_dist_dir() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "dist/\nbuild/\n").unwrap();
+        fs::create_dir_all(tmp.path().join("dist")).unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let dist_file = tmp.path().join("dist").join("bundle.js");
+        let src_file = tmp.path().join("src").join("app.ts");
+        fs::write(&dist_file, "x").unwrap();
+        fs::write(&src_file, "y").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+
+        assert!(ctx.gitignore().is_some());
+        assert!(
+            is_ignored(&ctx, &dist_file),
+            "dist/bundle.js should be ignored"
+        );
+        assert!(
+            !is_ignored(&ctx, &src_file),
+            "src/app.ts should NOT be ignored"
+        );
+    }
+
+    #[test]
+    fn matcher_handles_node_modules_and_target() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "node_modules/\ntarget/\n").unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules/foo")).unwrap();
+        fs::create_dir_all(tmp.path().join("target/debug")).unwrap();
+        let nm_file = tmp.path().join("node_modules/foo/index.js");
+        let target_file = tmp.path().join("target/debug/aft");
+        fs::write(&nm_file, "x").unwrap();
+        fs::write(&target_file, "x").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+
+        assert!(is_ignored(&ctx, &nm_file));
+        assert!(is_ignored(&ctx, &target_file));
+    }
+
+    #[test]
+    fn matcher_honors_negation_pattern() {
+        // .gitignore: ignore all *.log files EXCEPT important.log
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "*.log\n!important.log\n").unwrap();
+        let random_log = tmp.path().join("random.log");
+        let important_log = tmp.path().join("important.log");
+        fs::write(&random_log, "x").unwrap();
+        fs::write(&important_log, "y").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+
+        assert!(is_ignored(&ctx, &random_log));
+        assert!(
+            !is_ignored(&ctx, &important_log),
+            "negation pattern should un-ignore important.log"
+        );
+    }
+
+    #[test]
+    fn rebuild_picks_up_gitignore_changes() {
+        let tmp = TempDir::new().unwrap();
+        let ignore_path = tmp.path().join(".gitignore");
+        fs::write(&ignore_path, "foo.txt\n").unwrap();
+        let foo = tmp.path().join("foo.txt");
+        let bar = tmp.path().join("bar.txt");
+        fs::write(&foo, "").unwrap();
+        fs::write(&bar, "").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+        assert!(is_ignored(&ctx, &foo));
+        assert!(!is_ignored(&ctx, &bar));
+
+        // Now flip the rules: ignore bar.txt instead of foo.txt
+        fs::write(&ignore_path, "bar.txt\n").unwrap();
+        ctx.rebuild_gitignore();
+        assert!(!is_ignored(&ctx, &foo));
+        assert!(is_ignored(&ctx, &bar));
+    }
+
+    #[test]
+    fn matcher_picks_up_nested_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        // Root .gitignore is intentionally empty — only the nested one ignores
+        fs::write(tmp.path().join(".gitignore"), "").unwrap();
+        let sub = tmp.path().join("packages/foo");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join(".gitignore"), "generated/\n").unwrap();
+        let generated_file = sub.join("generated").join("out.js");
+        fs::create_dir_all(generated_file.parent().unwrap()).unwrap();
+        fs::write(&generated_file, "x").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+
+        assert!(
+            is_ignored(&ctx, &generated_file),
+            "nested gitignore in packages/foo/.gitignore should ignore generated/"
+        );
     }
 }

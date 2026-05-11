@@ -918,6 +918,12 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     // Set project root on config
     ctx.config_mut().project_root = Some(root_path.clone());
 
+    // Rebuild gitignore matcher used by the watcher event filter to honor the
+    // user's `.gitignore` files instead of a hardcoded directory list.
+    // Cheap (~ms for typical projects) and bounded for huge monorepos via the
+    // walker's depth/filter_entry settings in `rebuild_gitignore`.
+    ctx.rebuild_gitignore();
+
     // Optional feature flags from plugin config
     // Optional feature flags from plugin config
     if let Some(v) = params.get("format_on_edit").and_then(|v| v.as_bool()) {

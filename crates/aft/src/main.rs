@@ -431,18 +431,35 @@ fn drain_watcher_events(ctx: &AppContext) {
                     continue;
                 }
                 for path in event.paths {
-                    // Skip internal directories that generate frequent non-source events.
-                    // Use path components for exact name matching so `.gitproject/` is
-                    // not filtered by the `.git` rule.
+                    // First-pass hardcoded skip for VCS / host-internal dirs that
+                    // gitignore typically doesn't list because they ARE the metadata
+                    // it manages, plus the two universal package-manager outputs
+                    // (defense in depth for projects without a .gitignore). Use path
+                    // components for exact name matching so `.gitproject/` is not
+                    // filtered by the `.git` rule.
                     use std::path::Component;
-                    let skip = path.components().any(|c| {
+                    let infra_skip = path.components().any(|c| {
                         matches!(c, Component::Normal(name) if matches!(
                             name.to_str().unwrap_or(""),
-                            ".git" | "node_modules" | "target" | ".opencode"
+                            ".git" | ".opencode" | ".alfonso" | ".gsd"
+                                | "node_modules" | "target"
                         ))
                     });
-                    if skip {
+                    if infra_skip {
                         continue;
+                    }
+                    // Delegate everything else (node_modules, target, dist, build,
+                    // .next, coverage, __pycache__, venv, …) to the user's
+                    // gitignore. Matches the same source of truth as `git status`
+                    // and ripgrep/fd, instead of an ever-growing hardcoded list.
+                    if let Some(matcher) = ctx.gitignore() {
+                        let is_dir = path.is_dir();
+                        if matcher
+                            .matched_path_or_any_parents(&path, is_dir)
+                            .is_ignore()
+                        {
+                            continue;
+                        }
                     }
                     paths.insert(path);
                 }
@@ -453,6 +470,16 @@ fn drain_watcher_events(ctx: &AppContext) {
 
     if changed.is_empty() {
         return;
+    }
+
+    // If any .gitignore file changed, rebuild the matcher so the next watcher
+    // drain picks up the new rules. Cheap (~ms) and bounded.
+    if changed
+        .iter()
+        .any(|p| p.file_name().map(|n| n == ".gitignore").unwrap_or(false))
+    {
+        log::debug!("watcher: .gitignore changed, rebuilding matcher");
+        ctx.rebuild_gitignore();
     }
 
     if let Ok(mut symbol_cache) = ctx.symbol_cache().write() {
