@@ -48,11 +48,6 @@ import {
 import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import {
-  clearSharedBridgePool,
-  getOrInitPluginState,
-  setSharedBridgePool,
-} from "./shared/runtime.js";
-import {
   getSessionDirectory,
   getSessionDirectoryCached,
   warmSessionDirectory,
@@ -205,27 +200,14 @@ const ANNOUNCEMENT_FEATURES: string[] = [
  * - Refactoring: aft_refactor
  * - LSP: aft_lsp_diagnostics (inline diagnostics on edits are automatic)
  */
-type AftHooksReturn = Awaited<ReturnType<typeof initializePluginForDirectory>>;
-
-const plugin: Plugin = async (input) => {
-  // Defend against OpenCode loading our bundle twice (different module
-  // instances, same canonical project directory). Without this guard, the
-  // second invocation would spawn its own BridgePool + AftRpcServer and
-  // OpenCode's `for (const hook of hooks)` iteration would fire every
-  // tool.execute.after/event/config callback twice. See shared/runtime.ts
-  // for the cache implementation.
-  const { value: hooks, isFirst } = await getOrInitPluginState<AftHooksReturn>(
-    input.directory,
-    () => initializePluginForDirectory(input),
-  );
-  if (!isFirst) {
-    warn(
-      "Duplicate plugin init detected (OpenCode invoked plugin(input) more than once for the same project). Returning empty hooks to avoid double-firing callbacks; the first init owns the bridge pool and RPC server.",
-    );
-    return {};
-  }
-  return hooks;
-};
+// OpenCode currently calls this function more than once per process when a
+// single plugin is configured — see https://github.com/anomalyco/opencode/issues/26812.
+// The duplicate calls run in independent ESM module graphs with isolated
+// `globalThis` / `process.env` / `Symbol.for` registries, so there is no
+// in-process state we can use to dedupe from the plugin side. Earlier
+// in-process dedup attempts (globalThis-keyed Map, see commit 05af89e) did
+// not work and have been removed. The fix belongs upstream in OpenCode.
+const plugin: Plugin = async (input) => initializePluginForDirectory(input);
 
 async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
   const binaryPath = await findBinary();
@@ -501,8 +483,6 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
     config: aftConfig,
     storageDir: configOverrides.storage_dir as string,
   };
-  setSharedBridgePool(pool);
-
   // Settle the ONNX runtime download promise (started above) and patch the
   // resolved path into the pool's configure overrides. Bridges spawned AFTER
   // this resolves will pass `_ort_dylib_dir` through configure and pick up
@@ -966,7 +946,6 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       unregisterShutdown();
       await Promise.allSettled([abortInFlightAutoInstalls(), abortInFlightGithubInstalls()]);
       rpcServer.stop();
-      clearSharedBridgePool();
       await pool.shutdown();
     },
   };
