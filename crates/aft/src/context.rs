@@ -323,8 +323,8 @@ impl AppContext {
     ///
     /// The builder honors:
     /// - `<project_root>/.gitignore`
-    /// - `<project_root>/.git/info/exclude` (via the `ignore::gitignore`
-    ///   crate's default behavior when constructed from a repo root)
+    /// - `<project_root>/.git/info/exclude` (loaded explicitly because
+    ///   `GitignoreBuilder::new` does not auto-discover it)
     /// - nested `.gitignore` files (each `.gitignore` discovered during
     ///   the recursive walk)
     ///
@@ -356,6 +356,18 @@ impl AppContext {
                 log::warn!(
                     "gitignore parse error in {}: {}",
                     root_ignore.display(),
+                    err
+                );
+            }
+        }
+        // .git/info/exclude — manually added because GitignoreBuilder::new()
+        // does not auto-discover it (verified against ignore-0.4.25 source).
+        let info_exclude = Path::new(&root).join(".git").join("info").join("exclude");
+        if info_exclude.exists() {
+            if let Some(err) = builder.add(&info_exclude) {
+                log::warn!(
+                    "gitignore parse error in {}: {}",
+                    info_exclude.display(),
                     err
                 );
             }
@@ -1110,6 +1122,24 @@ mod gitignore_tests {
         ctx.rebuild_gitignore();
         assert!(!is_ignored(&ctx, &foo));
         assert!(is_ignored(&ctx, &bar));
+    }
+
+    #[test]
+    fn gitignore_loads_info_exclude_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let info_dir = tmp.path().join(".git/info");
+        fs::create_dir_all(&info_dir).unwrap();
+        fs::write(info_dir.join("exclude"), "secrets.txt\n").unwrap();
+        let secrets = tmp.path().join("secrets.txt");
+        let public = tmp.path().join("public.txt");
+        fs::write(&secrets, "token").unwrap();
+        fs::write(&public, "ok").unwrap();
+
+        let ctx = make_ctx_with_root(tmp.path());
+        ctx.rebuild_gitignore();
+
+        assert!(is_ignored(&ctx, &secrets));
+        assert!(!is_ignored(&ctx, &public));
     }
 
     #[test]

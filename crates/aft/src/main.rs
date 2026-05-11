@@ -389,12 +389,64 @@ pub(crate) fn watcher_event_invalidates(kind: &notify::EventKind) -> bool {
     }
 }
 
+fn watcher_path_is_infra_skip(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    path.components().any(|c| {
+        matches!(c, Component::Normal(name) if matches!(
+            name.to_str().unwrap_or(""),
+            ".git" | ".opencode" | ".alfonso" | ".gsd" | "node_modules" | "target"
+        ))
+    })
+}
+
+fn watcher_path_is_gitignore(path: &std::path::Path) -> bool {
+    path.file_name().map(|n| n == ".gitignore").unwrap_or(false)
+}
+
+fn filter_watcher_raw_paths<I>(ctx: &AppContext, raw_paths: I) -> HashSet<std::path::PathBuf>
+where
+    I: IntoIterator<Item = std::path::PathBuf>,
+{
+    let raw_paths: Vec<std::path::PathBuf> = raw_paths.into_iter().collect();
+
+    // If any .gitignore file changed, rebuild the matcher before filtering
+    // this same batch so sibling events are checked against fresh rules.
+    if raw_paths.iter().any(|path| watcher_path_is_gitignore(path)) {
+        log::debug!("watcher: .gitignore changed, rebuilding matcher before filter");
+        ctx.rebuild_gitignore();
+    }
+
+    raw_paths
+        .into_iter()
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+        .filter(|path| {
+            if watcher_path_is_infra_skip(path) {
+                return false;
+            }
+
+            if let Some(matcher) = ctx.gitignore() {
+                if path.starts_with(matcher.path()) {
+                    let is_dir = path.is_dir();
+                    if matcher
+                        .matched_path_or_any_parents(path, is_dir)
+                        .is_ignore()
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect()
+}
+
 /// Borrows the watcher receiver and callgraph in separate phases to avoid
 /// RefCell borrow conflicts. Events are deduplicated by PathBuf — notify
 /// fires multiple events per file write (Create, Modify, etc.).
 fn drain_watcher_events(ctx: &AppContext) {
-    // Phase 1: collect changed paths from the receiver, filtering out
-    // non-project directories that cause excessive invalidation noise.
+    // Phase 1: collect changed paths from the receiver without applying the
+    // gitignore matcher yet; .gitignore writes in this same batch must rebuild
+    // the matcher before any sibling path is filtered.
     let changed: HashSet<std::path::PathBuf> = {
         let rx_ref = ctx.watcher_rx().borrow();
         let rx = match rx_ref.as_ref() {
@@ -402,7 +454,7 @@ fn drain_watcher_events(ctx: &AppContext) {
             None => return, // No watcher configured
         };
 
-        let mut paths = HashSet::new();
+        let mut raw_paths = Vec::new();
         while let Ok(event_result) = rx.try_recv() {
             if let Ok(event) = event_result {
                 // Only process events that indicate actual file content changes.
@@ -431,65 +483,15 @@ fn drain_watcher_events(ctx: &AppContext) {
                     continue;
                 }
                 for path in event.paths {
-                    // First-pass hardcoded skip for VCS / host-internal dirs that
-                    // gitignore typically doesn't list because they ARE the metadata
-                    // it manages, plus the two universal package-manager outputs
-                    // (defense in depth for projects without a .gitignore). Use path
-                    // components for exact name matching so `.gitproject/` is not
-                    // filtered by the `.git` rule.
-                    use std::path::Component;
-                    let infra_skip = path.components().any(|c| {
-                        matches!(c, Component::Normal(name) if matches!(
-                            name.to_str().unwrap_or(""),
-                            ".git" | ".opencode" | ".alfonso" | ".gsd"
-                                | "node_modules" | "target"
-                        ))
-                    });
-                    if infra_skip {
-                        continue;
-                    }
-                    // Delegate everything else (node_modules, target, dist, build,
-                    // .next, coverage, __pycache__, venv, …) to the user's
-                    // gitignore. Matches the same source of truth as `git status`
-                    // and ripgrep/fd, instead of an ever-growing hardcoded list.
-                    //
-                    // The `ignore` crate panics if the query path isn't lexically
-                    // under the matcher's root. We guard two ways:
-                    // 1. `rebuild_gitignore` canonicalizes its root.
-                    // 2. Here we only query when the event path is under that
-                    //    same root. If it isn't (e.g. a stray event from outside
-                    //    the project), we keep the path — it's the conservative
-                    //    "no rule matched, don't skip" outcome.
-                    if let Some(matcher) = ctx.gitignore() {
-                        if path.starts_with(matcher.path()) {
-                            let is_dir = path.is_dir();
-                            if matcher
-                                .matched_path_or_any_parents(&path, is_dir)
-                                .is_ignore()
-                            {
-                                continue;
-                            }
-                        }
-                    }
-                    paths.insert(path);
+                    raw_paths.push(path);
                 }
             }
         }
-        paths
+        filter_watcher_raw_paths(ctx, raw_paths)
     }; // receiver borrow dropped here
 
     if changed.is_empty() {
         return;
-    }
-
-    // If any .gitignore file changed, rebuild the matcher so the next watcher
-    // drain picks up the new rules. Cheap (~ms) and bounded.
-    if changed
-        .iter()
-        .any(|p| p.file_name().map(|n| n == ".gitignore").unwrap_or(false))
-    {
-        log::debug!("watcher: .gitignore changed, rebuilding matcher");
-        ctx.rebuild_gitignore();
     }
 
     if let Ok(mut symbol_cache) = ctx.symbol_cache().write() {
@@ -652,12 +654,26 @@ fn drain_lsp_events(ctx: &AppContext) {
 
 #[cfg(test)]
 mod watcher_filter_tests {
-    use super::watcher_event_invalidates;
+    use super::{filter_watcher_raw_paths, watcher_event_invalidates};
+    use aft::config::Config;
+    use aft::context::AppContext;
+    use aft::parser::TreeSitterProvider;
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
         RenameMode,
     };
     use notify::EventKind;
+    use tempfile::TempDir;
+
+    fn make_ctx_with_root(root: &std::path::Path) -> AppContext {
+        AppContext::new(
+            Box::new(TreeSitterProvider::new()),
+            Config {
+                project_root: Some(root.to_path_buf()),
+                ..Config::default()
+            },
+        )
+    }
 
     #[test]
     fn create_and_remove_invalidate() {
@@ -760,5 +776,31 @@ mod watcher_filter_tests {
         // already handle the meaningful catch-all cases.
         assert!(!watcher_event_invalidates(&EventKind::Other));
         assert!(!watcher_event_invalidates(&EventKind::Any));
+    }
+
+    #[test]
+    fn gitignore_write_rebuilds_before_filtering_same_batch_paths() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let gitignore = root.join(".gitignore");
+        let ignored = root.join("foo.txt");
+        let kept = root.join("bar.txt");
+        std::fs::write(&ignored, "ignored").unwrap();
+        std::fs::write(&kept, "kept").unwrap();
+
+        let ctx = make_ctx_with_root(root);
+        ctx.rebuild_gitignore();
+        assert!(ctx.gitignore().is_none());
+
+        std::fs::write(&gitignore, "foo.txt\n").unwrap();
+        let changed =
+            filter_watcher_raw_paths(&ctx, vec![gitignore.clone(), ignored.clone(), kept.clone()]);
+
+        let gitignore = std::fs::canonicalize(gitignore).unwrap();
+        let ignored = std::fs::canonicalize(ignored).unwrap();
+        let kept = std::fs::canonicalize(kept).unwrap();
+        assert!(changed.contains(&gitignore));
+        assert!(!changed.contains(&ignored));
+        assert!(changed.contains(&kept));
     }
 }

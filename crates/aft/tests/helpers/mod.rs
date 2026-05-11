@@ -381,7 +381,14 @@ impl AftProcess {
     /// Close stdin and wait for the process to exit. Returns the exit status.
     pub fn shutdown(mut self) -> std::process::ExitStatus {
         drop(self.child.stdin.take());
-        self.child.wait().expect("wait for process exit")
+        let status = self.child.wait().expect("wait for process exit");
+        if let Some(handle) = self.stderr_capture_thread.take() {
+            // Join the AFT_TEST_DIAG=1 capture thread before returning so
+            // parallel test processes cannot leave detached stderr writers
+            // interleaving with later tests.
+            let _ = handle.join();
+        }
+        status
     }
 
     /// Return the PID of the spawned aft process.
@@ -454,8 +461,8 @@ impl AftProcess {
         let pending_frames = describe_pending_frames(&self.pending_frames);
         let grace_read_result = self.grace_read_result(Duration::from_secs(5));
 
-        let stderr_capture = read_log_file(self.stderr_log_path.as_deref());
-        let stdout_trace = read_log_file(self.stdout_trace_log_path.as_deref());
+        let stderr_capture = read_log_file_tail(self.stderr_log_path.as_deref(), 64 * 1024);
+        let stdout_trace = read_log_file_tail(self.stdout_trace_log_path.as_deref(), 64 * 1024);
 
         eprintln!("===== aft child stderr capture ({stderr_log_path}) =====\n{stderr_capture}");
         eprintln!("===== aft stdout trace ({stdout_trace_log_path}) =====\n{stdout_trace}");
@@ -550,10 +557,35 @@ fn truncate_for_trace(line: &str) -> String {
     rendered
 }
 
-fn read_log_file(path: Option<&Path>) -> String {
+fn read_log_file_tail(path: Option<&Path>, max_bytes: usize) -> String {
+    const MAX: usize = 64 * 1024;
+    let max_bytes = max_bytes.min(MAX);
     match path {
-        Some(path) => std::fs::read_to_string(path)
-            .unwrap_or_else(|error| format!("<failed to read {}: {error}>", path.display())),
+        Some(path) => {
+            let result = (|| -> std::io::Result<String> {
+                let mut file = std::fs::File::open(path)?;
+                let len = file.metadata()?.len() as usize;
+                if len <= max_bytes {
+                    let mut s = String::new();
+                    use std::io::Read;
+                    file.read_to_string(&mut s)?;
+                    return Ok(s);
+                }
+
+                use std::io::{Read, Seek, SeekFrom};
+                file.seek(SeekFrom::End(-(max_bytes as i64)))?;
+                let mut buf = Vec::with_capacity(max_bytes);
+                file.read_to_end(&mut buf)?;
+                let lossy = String::from_utf8_lossy(&buf).into_owned();
+                // Drop the (potentially mid-multibyte) first line so output starts clean.
+                let after_first_newline = lossy.find('\n').map(|i| i + 1).unwrap_or(0);
+                Ok(format!(
+                    "...[truncated to tail {max_bytes}B of total {len}B]\n{}",
+                    &lossy[after_first_newline..]
+                ))
+            })();
+            result.unwrap_or_else(|error| format!("<failed to read {}: {error}>", path.display()))
+        }
         None => "<disabled>".to_string(),
     }
 }
