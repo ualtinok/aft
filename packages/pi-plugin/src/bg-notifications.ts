@@ -27,7 +27,6 @@ type SessionBgState = {
   pendingCompletions: BgCompletion[];
   pendingLongRunning: BgLongRunningReminder[];
   debounceTimer: NodeJS.Timeout | null;
-  wakeFiredThisIdle: boolean;
   firstCompletionAt: number | null;
   scheduledFireAt: number | null;
   scheduledCompletionCount: number;
@@ -165,7 +164,6 @@ async function triggerWakeIfPending(
   skipDrain: boolean,
 ): Promise<void> {
   const state = stateFor(drainContext.sessionID);
-  if (state.wakeFiredThisIdle) return;
   if (drainContext.isActive?.()) return;
 
   if (!skipDrain && state.outstandingTaskIds.size > 0) {
@@ -204,10 +202,6 @@ async function triggerWakeIfPending(
       );
     },
   );
-}
-
-export function resetBgWake(sessionID: string | undefined): void {
-  stateFor(sessionID).wakeFiredThisIdle = false;
 }
 
 export function formatSystemReminder(completions: readonly BgCompletion[]): string {
@@ -313,7 +307,6 @@ function scheduleWake(
     void sendWake(reminder)
       .then(() => {
         state.retryDelayMs = null;
-        state.wakeFiredThisIdle = true;
       })
       .catch((err) => {
         state.pendingCompletions = [...pending, ...state.pendingCompletions];
@@ -337,7 +330,6 @@ function stateFor(sessionID: string | undefined): SessionBgState {
       pendingCompletions: [],
       pendingLongRunning: [],
       debounceTimer: null,
-      wakeFiredThisIdle: false,
       firstCompletionAt: null,
       scheduledFireAt: null,
       scheduledCompletionCount: 0,

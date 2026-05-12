@@ -23,6 +23,8 @@
 import { warn } from "./logger.js";
 import { type ConfigureWarning, deliverConfigureWarnings } from "./notifications.js";
 
+const pendingEagerWarnings = new Map<string, ConfigureWarning[]>();
+
 function isConfigureWarning(value: unknown): value is ConfigureWarning {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const warning = value as Record<string, unknown>;
@@ -38,6 +40,12 @@ function coerceConfigureWarnings(warnings: unknown[]): ConfigureWarning[] {
   return warnings.filter(isConfigureWarning);
 }
 
+export function drainPendingEagerWarnings(projectRoot: string): ConfigureWarning[] {
+  const pending = pendingEagerWarnings.get(projectRoot) ?? [];
+  pendingEagerWarnings.delete(projectRoot);
+  return pending;
+}
+
 export async function handleConfigureWarningsForSession(context: {
   projectRoot: string;
   sessionId?: string | null;
@@ -47,14 +55,21 @@ export async function handleConfigureWarningsForSession(context: {
   storageDir: string;
   pluginVersion: string;
 }): Promise<void> {
+  const validWarnings = coerceConfigureWarnings(context.warnings);
+
   if (!context.sessionId) {
+    if (validWarnings.length === 0) return;
+    const pending = pendingEagerWarnings.get(context.projectRoot) ?? [];
+    pending.push(...validWarnings);
+    pendingEagerWarnings.set(context.projectRoot, pending);
     warn(
-      `[configure] deferred warnings for ${context.projectRoot} arrived without session_id; skipping notification`,
+      `[configure] deferred warnings for ${context.projectRoot} arrived without session_id; buffering until first session-bound call`,
     );
     return;
   }
-  const validWarnings = coerceConfigureWarnings(context.warnings);
-  if (validWarnings.length === 0) return;
+  const pendingWarnings = drainPendingEagerWarnings(context.projectRoot);
+  const combinedWarnings = [...pendingWarnings, ...validWarnings];
+  if (combinedWarnings.length === 0) return;
   await deliverConfigureWarnings(
     {
       client: context.client ?? context.fallbackClient,
@@ -63,6 +78,6 @@ export async function handleConfigureWarningsForSession(context: {
       pluginVersion: context.pluginVersion,
       projectRoot: context.projectRoot,
     },
-    validWarnings,
+    combinedWarnings,
   );
 }

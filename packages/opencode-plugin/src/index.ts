@@ -20,7 +20,6 @@ import {
   handleIdleBgCompletions,
   handlePushedBgCompletion,
   handlePushedBgLongRunning,
-  resetBgWake,
 } from "./bg-notifications.js";
 import {
   loadAftConfig,
@@ -45,7 +44,6 @@ import {
   sendFeatureAnnouncement,
   sendWarning,
 } from "./notifications.js";
-import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import {
   getSessionDirectory,
@@ -111,7 +109,10 @@ function throwSentinel(command: string): never {
 // value pushed into the hooks array — `undefined` returns then crash
 // the host on every `hook.config?.(cfg)` / `hook.provider?.(...)` /
 // etc. iteration. Helpers stay in sibling modules.
-import { handleConfigureWarningsForSession } from "./configure-warnings.js";
+import {
+  drainPendingEagerWarnings,
+  handleConfigureWarningsForSession,
+} from "./configure-warnings.js";
 
 async function sendIgnoredMessage(client: unknown, sessionID: string, text: string): Promise<void> {
   const typedClient = client as {
@@ -121,21 +122,10 @@ async function sendIgnoredMessage(client: unknown, sessionID: string, text: stri
     };
   };
 
-  // Pass the last assistant message's model + variant explicitly so
-  // OpenCode's createUserMessage doesn't fall back to agent.variant or
-  // undefined and bust the provider prefix cache. Even though noReply: true
-  // keeps this turn from triggering an assistant response, the synthetic
-  // user message we create still pins the variant for the *next* real
-  // assistant turn. See shared/last-assistant-model.ts for the reasoning.
-  const lastModel = await getLastAssistantModel(client, sessionID);
-  const body: Record<string, unknown> = {
+  const body = {
     noReply: true,
     parts: [{ type: "text", text, ignored: true }],
   };
-  if (lastModel) {
-    body.model = { providerID: lastModel.providerID, modelID: lastModel.modelID };
-    if (lastModel.variant) body.variant = lastModel.variant;
-  }
   const promptInput = { path: { id: sessionID }, body };
 
   if (typeof typedClient.session?.prompt === "function") {
@@ -435,11 +425,12 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       );
     },
     onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
+      const pendingWarnings = sessionId ? drainPendingEagerWarnings(projectRoot) : [];
       await handleConfigureWarningsForSession({
         projectRoot,
         sessionId,
         client,
-        warnings,
+        warnings: [...pendingWarnings, ...warnings],
         fallbackClient: input.client,
         storageDir: configOverrides.storage_dir as string,
         pluginVersion: PLUGIN_VERSION,
@@ -859,7 +850,6 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       id?: string;
     }) => {
       const sid = messageInput.sessionID ?? messageInput.sessionId ?? messageInput.id;
-      resetBgWake(sid);
       // Eagerly warm the session-directory cache so the first tool call from
       // this turn routes to the right project (covers `opencode -s`-from-cwd).
       warmSessionDirectory(input.client, sid, input.directory);

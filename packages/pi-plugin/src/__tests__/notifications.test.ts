@@ -197,4 +197,51 @@ describe("deliverConfigureWarnings", () => {
 
     expect(messages).toHaveLength(2);
   });
+
+  test("parallel configure-warning delivery uses lockfile dedupe and atomic merge", async () => {
+    const storageDir = createStorageDir();
+    const { client, messages } = createClient();
+
+    await Promise.all([
+      deliverConfigureWarnings(
+        {
+          client,
+          sessionId: "session-1",
+          storageDir,
+          pluginVersion: "1.0.0",
+          projectRoot: "/repo",
+        },
+        [baseWarning()],
+      ),
+      deliverConfigureWarnings(
+        {
+          client,
+          sessionId: "session-1",
+          storageDir,
+          pluginVersion: "1.0.0",
+          projectRoot: "/repo",
+        },
+        [baseWarning({ kind: "checker_not_installed", tool: "tsc", hint: "Install typescript." })],
+      ),
+      deliverConfigureWarnings(
+        {
+          client,
+          sessionId: "session-1",
+          storageDir,
+          pluginVersion: "1.0.0",
+          projectRoot: "/repo",
+        },
+        [baseWarning()],
+      ),
+    ]);
+
+    expect(
+      messages.filter((message) => message.includes("Formatter is not installed")),
+    ).toHaveLength(1);
+    expect(messages.filter((message) => message.includes("Checker is not installed"))).toHaveLength(
+      1,
+    );
+    const persisted = JSON.parse(readFileSync(join(storageDir, "warned_tools.json"), "utf-8"));
+    expect(Object.keys(persisted)).toHaveLength(2);
+  });
 });

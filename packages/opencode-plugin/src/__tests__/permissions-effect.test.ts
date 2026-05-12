@@ -48,6 +48,16 @@ describe("runAsk + Effect (real runtime)", () => {
     expect(result).toBeUndefined();
   });
 
+  test("askEditPermission reports unsupported host when context.ask is missing", async () => {
+    const ctx = {
+      ...makeMockContext(() => Effect.sync(() => {})),
+      ask: undefined,
+    } as unknown as ToolContext;
+    const result = await askEditPermission(ctx, ["src/foo.ts"]);
+    expect(result).toContain("OpenCode 1.14.39 or newer");
+    expect(result).not.toContain("denied");
+  });
+
   test("askEditPermission surfaces deny message when the Effect fails", async () => {
     const ctx = makeMockContext(
       () =>

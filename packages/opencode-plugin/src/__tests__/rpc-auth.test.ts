@@ -1,7 +1,7 @@
 /// <reference path="../bun-test.d.ts" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AftRpcClient } from "../shared/rpc-client.js";
@@ -36,6 +36,11 @@ describe("AFT RPC auth", () => {
       ) as { port: number; token: string };
       expect(portFile.port).toBe(port);
       expect(portFile.token).toMatch(/^[0-9a-f]{64}$/);
+      if (process.platform !== "win32") {
+        expect(statSync(rpcPortFilePath(fixture.storageDir, fixture.directory)).mode & 0o777).toBe(
+          0o600,
+        );
+      }
 
       const forbidden = await fetch(`http://127.0.0.1:${port}/rpc/echo`, {
         method: "POST",

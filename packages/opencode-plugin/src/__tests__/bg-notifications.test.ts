@@ -8,7 +8,6 @@ import {
   handleIdleBgCompletions,
   handlePushedBgCompletion,
   ingestBgCompletions,
-  resetBgWake,
   SESSION_BG_STATE_IDLE_TTL_MS,
   sessionBgStates,
   trackBgTask,
@@ -413,7 +412,7 @@ describe("OpenCode background notifications", () => {
     expect(Date.now() - started).toBeLessThan(1400);
   });
 
-  test("rapid idle events are deduped after wake until chat message reset", async () => {
+  test("second pushed background completion wakes without chat message reset", async () => {
     const promptAsync = mock(async () => {});
     let responses: BridgeResponse[] = [
       { success: true, bg_completions: [completion("task-1", "one")] },
@@ -437,7 +436,6 @@ describe("OpenCode background notifications", () => {
     await sleep(260);
     expect(promptAsync).toHaveBeenCalledTimes(1);
 
-    resetBgWake("s1");
     responses = [{ success: true, bg_completions: [completion("task-2", "two")] }];
     trackBgTask("s1", "task-2");
     await handleIdleBgCompletions({

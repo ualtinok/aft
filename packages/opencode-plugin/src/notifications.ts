@@ -14,7 +14,7 @@
  * when no longer relevant (Desktop only — TUI toasts are inherently transient).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { sessionLog } from "./logger.js";
@@ -412,13 +412,35 @@ function writeWarnedTools(storageDir: string, warned: Record<string, string>): v
   try {
     mkdirSync(storageDir, { recursive: true });
     const warnedToolsPath = join(storageDir, WARNED_TOOLS_FILE);
-    // Direct write — this state is best-effort and rapid sequential calls
-    // (e.g. inside tests) hit Date.now() collisions on fast runners, making
-    // a temp+rename strategy no safer than a plain write here.
-    writeFileSync(warnedToolsPath, `${JSON.stringify(warned, null, 2)}\n`);
+    const tmpPath = join(
+      storageDir,
+      `${WARNED_TOOLS_FILE}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    writeFileSync(tmpPath, `${JSON.stringify(warned, null, 2)}\n`);
+    renameSync(tmpPath, warnedToolsPath);
   } catch {
     // best-effort
   }
+}
+
+async function withWarnedToolsLock<T>(storageDir: string, fn: () => Promise<T>): Promise<T | null> {
+  const lockDir = join(storageDir, "warned_tools.lock");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      mkdirSync(storageDir, { recursive: true });
+      mkdirSync(lockDir, { mode: 0o700 });
+      try {
+        return await fn();
+      } finally {
+        rmSync(lockDir, { recursive: true, force: true });
+      }
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "EEXIST") return null;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+  return null;
 }
 
 function warningKey(warning: ConfigureWarning, projectRoot?: string): string {
@@ -464,26 +486,37 @@ export async function deliverConfigureWarnings(
 ): Promise<void> {
   if (warnings.length === 0) return;
 
-  const warned = readWarnedTools(opts.storageDir);
-  let changed = false;
+  const deliveredWithLock = await withWarnedToolsLock(opts.storageDir, async () => {
+    const warned = readWarnedTools(opts.storageDir);
+    let changed = false;
 
+    for (const warning of warnings) {
+      const key = warningKey(warning, opts.projectRoot);
+      if (Object.hasOwn(warned, key)) continue;
+
+      const delivered = await sendIgnoredMessage(
+        opts.client,
+        opts.sessionId,
+        formatConfigureWarning(warning),
+      );
+      if (!delivered) continue;
+
+      warned[key] = opts.pluginVersion;
+      changed = true;
+    }
+
+    if (changed) {
+      const merged = { ...readWarnedTools(opts.storageDir), ...warned };
+      writeWarnedTools(opts.storageDir, merged);
+    }
+    return true;
+  });
+  if (deliveredWithLock) return;
+
+  // If the lock is contended or unavailable, still emit the warning. Losing
+  // persistence under contention is acceptable; dropping the warning is not.
   for (const warning of warnings) {
-    const key = warningKey(warning, opts.projectRoot);
-    if (Object.hasOwn(warned, key)) continue;
-
-    const delivered = await sendIgnoredMessage(
-      opts.client,
-      opts.sessionId,
-      formatConfigureWarning(warning),
-    );
-    if (!delivered) continue;
-
-    warned[key] = opts.pluginVersion;
-    changed = true;
-  }
-
-  if (changed) {
-    writeWarnedTools(opts.storageDir, warned);
+    await sendIgnoredMessage(opts.client, opts.sessionId, formatConfigureWarning(warning));
   }
 }
 

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 
@@ -21,6 +22,54 @@ interface PackageLockfile {
 interface AutoUpdateInstallContext {
   installDir: string;
   packageJsonPath: string;
+}
+
+interface AutoUpdateSnapshot {
+  packageJsonPath: string;
+  packageJson: string | null;
+  lockfilePath: string;
+  lockfile: string | null;
+  packageDir: string;
+  stagedPackageDir: string | null;
+  tempDir: string;
+}
+
+const pendingSnapshots = new Map<string, AutoUpdateSnapshot>();
+
+function createAutoUpdateSnapshot(
+  installDir: string,
+  packageJsonPath: string,
+  packageName: string,
+) {
+  const packageDir = join(installDir, "node_modules", packageName);
+  const lockfilePath = join(installDir, "package-lock.json");
+  const tempDir = mkdtempSync(join(tmpdir(), "aft-auto-update-"));
+  const stagedPackageDir = existsSync(packageDir) ? join(tempDir, "package") : null;
+  if (stagedPackageDir) cpSync(packageDir, stagedPackageDir, { recursive: true });
+  return {
+    packageJsonPath,
+    packageJson: existsSync(packageJsonPath) ? readFileSync(packageJsonPath, "utf-8") : null,
+    lockfilePath,
+    lockfile: existsSync(lockfilePath) ? readFileSync(lockfilePath, "utf-8") : null,
+    packageDir,
+    stagedPackageDir,
+    tempDir,
+  };
+}
+
+function restoreAutoUpdateSnapshot(snapshot: AutoUpdateSnapshot): void {
+  try {
+    if (snapshot.packageJson === null) rmSync(snapshot.packageJsonPath, { force: true });
+    else writeFileSync(snapshot.packageJsonPath, snapshot.packageJson);
+    if (snapshot.lockfile === null) rmSync(snapshot.lockfilePath, { force: true });
+    else writeFileSync(snapshot.lockfilePath, snapshot.lockfile);
+    rmSync(snapshot.packageDir, { recursive: true, force: true });
+    if (snapshot.stagedPackageDir) {
+      cpSync(snapshot.stagedPackageDir, snapshot.packageDir, { recursive: true });
+    }
+  } finally {
+    rmSync(snapshot.tempDir, { recursive: true, force: true });
+  }
 }
 
 function stripPackageNameFromPath(pathValue: string, packageName: string): string | null {
@@ -149,7 +198,18 @@ export function preparePackageUpdate(
       return null;
     }
 
-    if (!ensureDependencyVersion(installContext.packageJsonPath, packageName, version)) return null;
+    const snapshot = createAutoUpdateSnapshot(
+      installContext.installDir,
+      installContext.packageJsonPath,
+      packageName,
+    );
+    pendingSnapshots.set(installContext.installDir, snapshot);
+
+    if (!ensureDependencyVersion(installContext.packageJsonPath, packageName, version)) {
+      pendingSnapshots.delete(installContext.installDir);
+      restoreAutoUpdateSnapshot(snapshot);
+      return null;
+    }
 
     const packageRemoved = removeInstalledPackage(installContext.installDir, packageName);
     const lockRemoved = removeFromPackageLock(installContext.installDir, packageName);
@@ -192,7 +252,7 @@ export async function runNpmInstallSafe(
     if (options.signal?.aborted) return false;
     const proc = spawn("npm", ["install", "--no-audit", "--no-fund", "--no-progress"], {
       cwd: installDir,
-      stdio: "pipe",
+      stdio: "ignore",
     });
 
     const abortProcess = () => {
@@ -216,11 +276,27 @@ export async function runNpmInstallSafe(
 
     if (result === "timeout" || options.signal?.aborted) {
       abortProcess();
+      const snapshot = pendingSnapshots.get(installDir);
+      if (snapshot) {
+        pendingSnapshots.delete(installDir);
+        restoreAutoUpdateSnapshot(snapshot);
+      }
       return false;
     }
-
+    const snapshot = pendingSnapshots.get(installDir);
+    pendingSnapshots.delete(installDir);
+    if (!result && snapshot) {
+      restoreAutoUpdateSnapshot(snapshot);
+    } else if (snapshot) {
+      rmSync(snapshot.tempDir, { recursive: true, force: true });
+    }
     return result;
   } catch (err) {
+    const snapshot = pendingSnapshots.get(installDir);
+    if (snapshot) {
+      pendingSnapshots.delete(installDir);
+      restoreAutoUpdateSnapshot(snapshot);
+    }
     warn(`[auto-update-checker] npm install error: ${String(err)}`);
     return false;
   } finally {

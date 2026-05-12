@@ -197,8 +197,17 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       if (globDenied) return permissionDeniedResponse(globDenied);
 
       if (globPath) {
+        let kind: "file" | "directory" = "directory";
+        try {
+          const abs = path.isAbsolute(globPath)
+            ? globPath
+            : path.resolve(context.directory, globPath);
+          if (fs.lstatSync(abs).isFile()) kind = "file";
+        } catch {
+          // Stat failed; keep "directory" as conservative default for glob.
+        }
         const externalDenied = await assertExternalDirectoryPermission(context, globPath, {
-          kind: "directory",
+          kind,
         });
         if (externalDenied) return permissionDeniedResponse(externalDenied);
       }

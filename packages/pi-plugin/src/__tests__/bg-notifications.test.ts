@@ -8,7 +8,6 @@ import {
   formatSystemReminder,
   handlePushedBgCompletion,
   handleTurnEndBgCompletions,
-  resetBgWake,
   SESSION_BG_STATE_IDLE_TTL_MS,
   sessionBgStates,
   trackBgTask,
@@ -285,7 +284,7 @@ describe("Pi background notifications", () => {
     expect(Date.now() - started).toBeLessThan(1400);
   });
 
-  test("rapid turn_end events are deduped after wake until input reset", async () => {
+  test("second background completion wakes without input reset", async () => {
     const sendUserMessage = mock(() => {});
     let responses: BridgeResponse[] = [
       { success: true, bg_completions: [completion("task-1", "one")] },
@@ -309,7 +308,6 @@ describe("Pi background notifications", () => {
     await sleep(260);
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
 
-    resetBgWake("s1");
     responses = [{ success: true, bg_completions: [completion("task-2", "two")] }];
     trackBgTask("s1", "task-2");
     await handleTurnEndBgCompletions({

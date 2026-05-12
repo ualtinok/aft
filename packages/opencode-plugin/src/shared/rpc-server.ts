@@ -46,9 +46,12 @@ export class AftRpcServer {
         // Write port file atomically
         try {
           const dir = dirname(this.portFilePath);
-          mkdirSync(dir, { recursive: true });
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
           const tmpPath = `${this.portFilePath}.tmp`;
-          writeFileSync(tmpPath, JSON.stringify({ port: this.port, token: this.token }), "utf-8");
+          writeFileSync(tmpPath, JSON.stringify({ port: this.port, token: this.token }), {
+            encoding: "utf-8",
+            mode: 0o600,
+          });
           renameSync(tmpPath, this.portFilePath);
           log(`RPC server listening on 127.0.0.1:${this.port}`);
         } catch (err) {

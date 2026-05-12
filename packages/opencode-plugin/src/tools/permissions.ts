@@ -3,6 +3,9 @@ import * as path from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { Effect } from "effect";
 
+const UNSUPPORTED_ASK_HOST =
+  "AFT requires OpenCode 1.14.39 or newer for permission asks; please upgrade OpenCode";
+
 /**
  * Execute a `ctx.ask(...)` result.
  *
@@ -58,6 +61,7 @@ export async function askEditPermission(
   patterns: string[],
   metadata: Record<string, unknown> = {},
 ): Promise<string | undefined> {
+  if (typeof context.ask !== "function") return UNSUPPORTED_ASK_HOST;
   try {
     await runAsk(
       context.ask({
@@ -179,6 +183,7 @@ export async function assertExternalDirectoryPermission(
   options?: { kind?: "file" | "directory" },
 ): Promise<string | undefined> {
   if (!target) return undefined;
+  if (typeof context.ask !== "function") return UNSUPPORTED_ASK_HOST;
 
   const resolved = path.isAbsolute(target) ? target : path.resolve(context.directory, target);
   // Windows: realpath + drive-case normalize so containsPath comparisons line
@@ -244,6 +249,7 @@ export async function askGrepPermission(
   pattern: string,
   metadata: { path?: string; include?: string } = {},
 ): Promise<string | undefined> {
+  if (typeof context.ask !== "function") return UNSUPPORTED_ASK_HOST;
   try {
     await runAsk(
       context.ask({
@@ -274,6 +280,7 @@ export async function askGlobPermission(
   pattern: string,
   metadata: { path?: string } = {},
 ): Promise<string | undefined> {
+  if (typeof context.ask !== "function") return UNSUPPORTED_ASK_HOST;
   try {
     await runAsk(
       context.ask({

@@ -28,7 +28,6 @@ type SessionBgState = {
   pendingCompletions: BgCompletion[];
   pendingLongRunning: BgLongRunningReminder[];
   debounceTimer: NodeJS.Timeout | null;
-  wakeFiredThisIdle: boolean;
   firstCompletionAt: number | null;
   scheduledFireAt: number | null;
   scheduledCompletionCount: number;
@@ -169,25 +168,6 @@ async function triggerWakeIfPending(
   skipDrain: boolean,
 ): Promise<void> {
   const state = stateFor(drainContext.sessionID);
-  // `wakeFiredThisIdle` was originally meant to prevent runaway wake spam
-  // during a single idle period. But it had a real failure mode: if a wake
-  // fires for completion A, then the user's prompt arrives and starts a new
-  // turn (which doesn't reset wakeFiredThisIdle until the next chat.message
-  // hook), then completion B arrives during that new turn but no in-turn
-  // tool call is happening (e.g. the assistant is mid-thinking), B's wake
-  // gets suppressed because wakeFiredThisIdle is still true from A.
-  //
-  // Empirically: 3 of ~14 bg-bash completions in this session were lost.
-  // Pattern matched: each lost wake was the second completion in an idle
-  // window after a prior wake had already fired but before chat.message
-  // had a chance to reset state.
-  //
-  // Fix: don't gate on `wakeFiredThisIdle` here. The debouncer in
-  // `scheduleWake` already coalesces multiple completions into one wake.
-  // Each NEW pending completion deserves its own wake even if a prior one
-  // already fired in this idle window. The only loss this introduces is
-  // potential duplicate-wake within a few hundred ms, which the debouncer
-  // already prevents via `state.scheduledCompletionCount`.
   if (drainContext.isActive?.()) return;
 
   if (!skipDrain && state.outstandingTaskIds.size > 0) {
@@ -235,10 +215,6 @@ async function triggerWakeIfPending(
       );
     },
   );
-}
-
-export function resetBgWake(sessionID: string | undefined): void {
-  stateFor(sessionID).wakeFiredThisIdle = false;
 }
 
 export function formatSystemReminder(completions: readonly BgCompletion[]): string {
@@ -358,7 +334,6 @@ function scheduleWake(
     void sendWake(reminder)
       .then(() => {
         state.retryDelayMs = null;
-        state.wakeFiredThisIdle = true;
       })
       .catch((err) => {
         state.pendingCompletions = [...pending, ...state.pendingCompletions];
@@ -382,7 +357,6 @@ function stateFor(sessionID: string | undefined): SessionBgState {
       pendingCompletions: [],
       pendingLongRunning: [],
       debounceTimer: null,
-      wakeFiredThisIdle: false,
       firstCompletionAt: null,
       scheduledFireAt: null,
       scheduledCompletionCount: 0,
