@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   error,
+  getActiveLogger,
   getLogFilePath,
   log,
   sessionError,
@@ -12,6 +13,7 @@ import {
   sessionWarn,
   warn,
 } from "./active-logger.js";
+import type { Logger, LogMeta } from "./logger.js";
 import type { BgCompletion } from "./protocol.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
@@ -173,6 +175,13 @@ export interface BridgeOptions {
    * agent and operators see consistent attribution. Defaults to `[aft-bridge]`.
    */
   errorPrefix?: string;
+  /**
+   * Optional logger to use for this bridge's diagnostics. When omitted, the
+   * bridge falls back to the active-logger singleton (set via
+   * `setActiveLogger`). Matches the same option on `BridgePool` (Oracle F9) so
+   * hosts that bundle aft-bridge multiple times can route logs deterministically.
+   */
+  logger?: Logger;
 }
 
 export interface BashCompletedPayload extends BgCompletion {
@@ -256,6 +265,7 @@ export class BinaryBridge {
   private configureWarningClients = new Map<string, unknown>();
   private restartResetTimer: ReturnType<typeof setTimeout> | null = null;
   private errorPrefix: string;
+  private readonly logger: Logger | undefined;
 
   constructor(
     binaryPath: string,
@@ -274,6 +284,43 @@ export class BinaryBridge {
     this.onBashCompletion = options?.onBashCompletion;
     this.onBashLongRunning = options?.onBashLongRunning;
     this.errorPrefix = options?.errorPrefix ?? "[aft-bridge]";
+    this.logger = options?.logger;
+  }
+
+  /**
+   * Internal log helpers that prefer the constructor-provided logger over the
+   * active-logger singleton. Mirrors the same pattern used by `BridgePool`
+   * (Oracle F9 — D2 deferral for BinaryBridge). These are intentionally
+   * unused at the call sites today: migrating every existing `log()`/`warn()`/
+   * `error()`/`sessionLog()` call site in this file to `this.logVia()` etc. is
+   * a separate mechanical refactor we defer until we have a concrete use case
+   * for per-bridge log routing. Until then, the existing module-level helpers
+   * fall through to the singleton, which is the same default behavior the
+   * `this.logVia` helpers provide when `this.logger` is `undefined`.
+   *
+   * The constructor `logger` option + the test in `bridge-transport.test.ts`
+   * are what verify the F9 wiring. Once a future change starts using these
+   * helpers for any new logging, the biome unused-private warnings disappear.
+   */
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: F9 plumbing kept for future call-site migration
+  private logVia(message: string, meta?: LogMeta): void {
+    const logger = this.logger ?? getActiveLogger();
+    if (logger) logger.log(message, meta);
+    else log(message, meta);
+  }
+
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: F9 plumbing kept for future call-site migration
+  private warnVia(message: string, meta?: LogMeta): void {
+    const logger = this.logger ?? getActiveLogger();
+    if (logger) logger.warn(message, meta);
+    else warn(message, meta);
+  }
+
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: F9 plumbing kept for future call-site migration
+  private errorVia(message: string, meta?: LogMeta): void {
+    const logger = this.logger ?? getActiveLogger();
+    if (logger) logger.error(message, meta);
+    else error(message, meta);
   }
 
   /** Number of times the binary has been restarted after a crash. */

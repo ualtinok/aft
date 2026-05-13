@@ -223,8 +223,23 @@ fn collect_redirection_targets(
     cwd: &Path,
     mut on_target: impl FnMut(RedirectTarget),
 ) {
-    let mut cursor = command.walk();
-    for child in command.children(&mut cursor) {
+    // In tree-sitter-bash, redirects on `echo hi > /tmp/out` are siblings of
+    // the `command` node, wrapped inside `redirected_statement`. Walking
+    // `command.children` would miss them. Walk from the parent
+    // (`redirected_statement`) when present, otherwise fall back to walking
+    // `command` itself in case a future grammar version inlines redirections
+    // under `command`.
+    let walk_root = match command.parent() {
+        Some(parent) if parent.kind() == "redirected_statement" => parent,
+        _ => command,
+    };
+    let mut cursor = walk_root.walk();
+    for child in walk_root.children(&mut cursor) {
+        // Skip the inner `command` node itself — its children are arguments,
+        // not redirections, and re-walking them is just wasted work.
+        if child.id() == command.id() {
+            continue;
+        }
         collect_redirection_targets_from_node(source, child, cwd, &mut on_target);
     }
 }
@@ -235,7 +250,14 @@ fn collect_redirection_targets_from_node(
     cwd: &Path,
     on_target: &mut impl FnMut(RedirectTarget),
 ) {
-    if node.kind() == "redirection" {
+    // tree-sitter-bash 0.25.x emits `file_redirect` and `heredoc_redirect`
+    // (and `redirection` in some shapes). All three carry a redirect target
+    // as a child `word`/`file`/`raw_string`/`string`/`concatenation`/
+    // `simple_expansion`/`expansion`/`command_substitution`.
+    if matches!(
+        node.kind(),
+        "file_redirect" | "heredoc_redirect" | "herestring_redirect" | "redirection"
+    ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if is_dynamic_node(child) {

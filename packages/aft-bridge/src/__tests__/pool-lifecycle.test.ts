@@ -2,8 +2,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { setActiveLogger } from "../active-logger.js";
-import { BridgePool } from "../pool.js";
 import type { Logger } from "../logger.js";
+import { BridgePool } from "../pool.js";
 
 function makeLogger() {
   const messages: string[] = [];

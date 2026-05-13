@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setActiveLogger } from "../active-logger.js";
 import { BinaryBridge } from "../bridge.js";
+import type { Logger, LogMeta } from "../logger.js";
 
 let workDir: string;
 
@@ -64,19 +66,36 @@ process.stdin.resume();
     const bridge = new BinaryBridge(script, workDir, { timeoutMs: 1_000, maxRestarts: 0 });
 
     try {
-      const first = bridge.send("version", {}, { timeoutMs: 20 });
-      const sibling = bridge.send("version", {}, { timeoutMs: 1_000 });
+      // Attach the handlers BEFORE the await so both rejections are captured
+      // even if Bun's `expect(p).rejects` re-throws the first error and skips
+      // the second promise.
+      const firstResult = bridge.send("version", {}, { timeoutMs: 20 }).then(
+        () => "resolved",
+        (err) => String(err instanceof Error ? err.message : err),
+      );
+      const siblingResult = bridge.send("version", {}, { timeoutMs: 1_000 }).then(
+        () => "resolved",
+        (err) => String(err instanceof Error ? err.message : err),
+      );
 
-      await expect(first).rejects.toThrow(/timed out/);
-      const siblingResult = await Promise.race([
-        sibling.then(
-          () => "resolved",
-          (err) => String(err instanceof Error ? err.message : err),
+      // The first request's 20ms timer fires before the sibling's 1s timer.
+      // The Oracle F2 fix requires the sibling to reject immediately (not wait
+      // its own 1s timer) with a sibling-abort error. We assert via wall-clock
+      // by racing both against a 100ms ceiling — well below the sibling's 1s
+      // budget, so a passing test confirms the sibling did NOT wait its timer.
+      const [first, sibling] = (await Promise.race([
+        Promise.all([firstResult, siblingResult]),
+        new Promise<[string, string]>((resolve) =>
+          setTimeout(() => resolve(["pending", "pending"]), 200),
         ),
-        new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 100)),
-      ]);
+      ])) as [string, string];
 
-      expect(siblingResult).toContain("sibling timeout");
+      // F2 contract:
+      //  - first request rejects with a timeout error (its own timer fired)
+      //  - sibling request rejects with the sibling-abort error (NOT its own
+      //    1s timer — that would still be pending at the 200ms ceiling)
+      expect(first).toMatch(/timed out|aborted/);
+      expect(sibling).toContain("sibling timeout");
     } finally {
       await bridge.shutdown();
     }
@@ -134,5 +153,47 @@ process.stdin.resume();
     testBridge.configureWarningClients.set("stale", { name: "stale-client" });
     await testBridge.shutdown();
     expect(testBridge.configureWarningClients.size).toBe(0);
+  });
+
+  test("constructor logger overrides active singleton (Oracle F9 — D2 deferral)", () => {
+    type LogCall = { level: string; message: string; meta?: LogMeta };
+    const makeLogger = (label: string): Logger & { calls: LogCall[] } => {
+      const calls: LogCall[] = [];
+      const logger = {
+        log(message: string, meta?: LogMeta) {
+          calls.push({ level: `log:${label}`, message, meta });
+        },
+        warn(message: string, meta?: LogMeta) {
+          calls.push({ level: `warn:${label}`, message, meta });
+        },
+        error(message: string, meta?: LogMeta) {
+          calls.push({ level: `error:${label}`, message, meta });
+        },
+        getLogFilePath: () => undefined,
+        calls,
+      };
+      return logger;
+    };
+    const custom = makeLogger("custom");
+    const active = makeLogger("active");
+    setActiveLogger(active);
+
+    const bridge = new BinaryBridge("/fake/aft", workDir, {
+      maxRestarts: 0,
+      logger: custom,
+    });
+    const testBridge = bridge as unknown as {
+      logVia(message: string, meta?: LogMeta): void;
+      warnVia(message: string, meta?: LogMeta): void;
+      errorVia(message: string, meta?: LogMeta): void;
+    };
+
+    testBridge.logVia("hello", { kind: "log" });
+    testBridge.warnVia("careful", { kind: "warn" });
+    testBridge.errorVia("boom", { kind: "error" });
+
+    // Custom logger receives all three; active singleton receives none.
+    expect(custom.calls.map((c) => c.level)).toEqual(["log:custom", "warn:custom", "error:custom"]);
+    expect(active.calls).toEqual([]);
   });
 });

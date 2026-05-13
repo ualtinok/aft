@@ -454,8 +454,13 @@ impl BgTaskRegistry {
                     }
                 }
                 _ if metadata.status.is_terminal() => {
-                    self.insert_rehydrated_task(metadata.clone(), paths, true)?;
+                    // Borrow `paths` for the completion enqueue BEFORE
+                    // `insert_rehydrated_task` consumes it. The completion
+                    // helper only reads from `paths` (stdout/stderr/exit) to
+                    // reconstruct a tail preview, so it must see the same
+                    // paths the rehydrated task will own.
                     self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
+                    self.insert_rehydrated_task(metadata, paths, true)?;
                 }
                 _ => {}
             }

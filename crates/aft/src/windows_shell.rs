@@ -728,9 +728,14 @@ mod tests {
         let bash = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
         let shell = WindowsShell::Posix(bash);
         let script = shell.wrapper_script("echo hi", Path::new(r"C:\Temp\bash.exit"));
-        // Must use sh -c with single-quoted command, then printf $? to a
-        // tmp file, then mv it atomically into place.
-        assert!(script.contains("sh -c 'echo hi'"), "{script}");
+        // The F2 wrapper invokes the resolved shell path directly (not a bare
+        // `sh -c`), so users get bash semantics (`[[ ]]`, arrays, pipefail)
+        // rather than dash. It then captures `$?` via `printf` into a tmp file
+        // and `mv`s atomically into place.
+        assert!(
+            script.contains(r"'C:\Program Files\Git\bin\bash.exe' -c 'echo hi'"),
+            "wrapper must invoke the resolved shell directly: {script}",
+        );
         assert!(script.contains("printf '%s' \"$?\""), "{script}");
         assert!(script.contains("mv "), "{script}");
         assert!(script.contains(r"C:\Temp\bash.exit"), "{script}");
