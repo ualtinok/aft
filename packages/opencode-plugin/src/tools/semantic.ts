@@ -12,22 +12,21 @@ function arg(schema: unknown): ToolArg {
 export function semanticTools(ctx: PluginContext): Record<string, ToolDefinition> {
   const searchTool: ToolDefinition = {
     description: [
-      "Find symbols by concept when grep keywords fall short. Returns ranked code matches with similarity scores.",
+      "Find symbols by concept using hybrid semantic + lexical search. Returns ranked code matches with similarity scores and provenance tags.",
       "",
       "When to reach for it:",
       "- Exploring an unfamiliar area: 'where is rate limiting handled', 'how does auth flow work'",
       "- Concept doesn't appear as a literal string: 'retry logic', 'cache invalidation', 'graceful shutdown'",
+      "- Filename-shaped concepts: 'the bridge spawn helper', 'the session detection module'",
       "- After 2+ grep attempts that came back empty or noisy",
       "- You know roughly what the function does but not what it's named",
       "",
       "When NOT to use:",
-      "- You have a specific symbol name → use grep",
       "- You have an error message or stack trace → use grep",
-      "- Exact identifiers, error messages, and path-shaped queries should start with grep",
       "- You want the file/module structure → use aft_outline",
       "- You're following a call chain → use aft_navigate",
       "",
-      "Scores below ~0.4 are usually weak matches; treat them as 'maybe relevant' and verify with read.",
+      "Each result tags `source` as one of: 'semantic' (embedding match only), 'lexical' (trigram exact-token match the embedding lane missed), or 'hybrid' (both lanes agreed — strongest signal).",
     ].join("\n"),
     args: {
       query: arg(

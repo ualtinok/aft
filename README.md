@@ -372,7 +372,7 @@ Always registered with `aft_` prefix regardless of hoisting setting.
 | `aft_zoom` | Inspect symbols with call-graph annotations | `filePath`, `symbol`, `symbols[]` |
 | `aft_import` | Language-aware import add/remove/organize | `op`, `filePath`, `module`, `names[]` |
 | `aft_conflicts` | Show all git merge conflicts with line-numbered regions | *(none)* |
-| `aft_search` | Semantic code search by meaning *(experimental)* | `query`, `topK` |
+| `aft_search` | Hybrid semantic + lexical code search by meaning | `query`, `topK` |
 | `aft_safety` | Undo, history, checkpoints, restore | `op`, `filePath`, `name` |
 
 **All tier** (set `tool_surface: "all"`):
@@ -894,11 +894,12 @@ Parameters: `pattern` (required), `path` (optional — scope to subdirectory or 
 
 ---
 
-### aft_search *(experimental)*
+### aft_search
 
 Find symbols by **concept** when grep keywords fall short. Returns ranked code matches with
-similarity scores. Requires `semantic_search: true` and
-[ONNX Runtime](https://onnxruntime.ai/) installed on the system.
+similarity scores plus provenance (semantic, lexical, or hybrid). Requires
+`semantic_search: true` and [ONNX Runtime](https://onnxruntime.ai/) installed on the system
+when using the default `fastembed` backend.
 
 **When to use it:**
 - Exploring an unfamiliar area: *"where is rate limiting handled"*
@@ -907,16 +908,26 @@ similarity scores. Requires `semantic_search: true` and
 - You know roughly what the function does but not its name
 
 **When NOT to use it:**
-- Specific symbol name → use grep
 - Error message or stack trace → use grep
 - File/module structure → use `aft_outline`
 - Following a call chain → use `aft_navigate`
 
-Uses a local embedding model (all-MiniLM-L6-v2, ~22MB, downloaded on first use) to embed
-**code symbols only** (functions, classes, methods, structs, etc.) and matches queries by
-cosine similarity. Markdown headings are **not** indexed — they tend to dominate result
-lists and crowd out actual code matches; use grep for prose. No API keys or external
-services needed.
+**How it works — hybrid retrieval:** AFT classifies each query by shape (identifier, path,
+error-code, mixed, natural-language) and routes through two lanes:
+
+- **Semantic lane** — local embedding model (all-MiniLM-L6-v2, ~22MB, downloaded on first
+  use) embeds code symbols (functions, classes, methods, structs, file-level summaries for
+  thin files) and matches by cosine similarity. Always runs.
+- **Lexical lane** — trigram-index scoring over the same code files, runs for identifier,
+  path, error-code, and mixed shapes. Disabled for pure natural-language queries to avoid
+  noise.
+
+Results are fused: files that surface in both lanes get a boost and tag `source: hybrid`.
+Semantic-only matches tag `source: semantic`. Lexical-only matches (files the embedding
+lane missed but the trigram lane found by exact identifier hit) tag `source: lexical` and
+render with `[lexical match — score: <X>]` instead of a symbol range. Indexes code
+extensions only; markdown, HTML, and config files are intentionally excluded — they
+crowd out real code matches. Use grep for prose.
 
 **Install ONNX Runtime:**
 - **macOS:** `brew install onnxruntime`
@@ -930,26 +941,34 @@ Without ONNX Runtime, all other AFT tools work normally — only `aft_search` is
 { "query": "authentication middleware that validates JWT tokens" }
 ```
 
-Returns ranked results with relevance scores and code snippets:
+Returns ranked results with relevance scores, provenance tags, and code snippets:
 
 ```
 crates/aft/src/commands/configure.rs
-  handle_configure (function, exported) 17:253 [0.42]
+handle_configure [function] lines 17-253 score 0.648 source hybrid
     pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
       let root = match req.params.get("project_root")...
       ...
 
 packages/opencode-plugin/src/bridge.ts
-  checkVersion (function) 150:175 [0.38]
+checkVersion [method] lines 150-175 score 0.482 source semantic
     private async checkVersion(): Promise<void> {
       ...
 
-Found 10 results [semantic index: ready]
+packages/pi-plugin/src/commands/aft-status.ts
+aft-status [file-summary] [file summary] score 0.504 source hybrid
+    /**
+     * /aft-status — show AFT status (version, indexes, LSP, storage).
+
+Found 10 semantic result(s). [index: ready]
 ```
 
 The index is built in a background thread at session start, persisted to disk for fast cold
 start, and uses cAST-style enrichment (file path + kind + name + signature + body snippet)
-for better embedding quality.
+for better embedding quality. Files with ≤2 top-level exports additionally produce a
+synthetic "file-summary" chunk that captures filename, parent directory, leading doc
+comment, and export list — this lifts recall for filename-shaped concept queries like
+*"the bridge spawn helper"*.
 
 Parameters: `query` (required — natural language description), `topK` (optional — default 10).
 
@@ -1015,13 +1034,15 @@ time. The key itself is never stored in config or logs.
 | `ollama` | You want a local self-hosted model larger than `all-MiniLM-L6-v2` without paying per-token. |
 
 **Switching backends rebuilds the index.** AFT stores a fingerprint
-(`backend`, `model`, `base_url`, `dimension`) with every persisted index. Changing any of
-these fields deletes the cached index on the next session start and rebuilds from scratch
-in the background — necessary because different models produce different vector dimensions
-and incompatible semantic spaces. For OpenAI-compatible backends on a large repo this can
+(`backend`, `model`, `base_url`, `dimension`, plus an internal `chunking_version` for the
+synthetic file-summary chunk format) with every persisted index. Changing any fingerprint
+field deletes the cached index on the next session start and rebuilds from scratch in the
+background — necessary because different models produce different vector dimensions and
+incompatible semantic spaces. For OpenAI-compatible backends on a large repo this can
 mean hundreds of API calls and a few minutes of wall-clock time. `aft_search` returns
-`[semantic index: building]` while the rebuild runs; status is also visible via
-`/aft-status` and the OpenCode TUI sidebar.
+`[index: building]` while the rebuild runs; status is also visible via `/aft-status` and
+the OpenCode TUI sidebar. **First launch on AFT v0.23+** triggers a one-time rebuild
+because `chunking_version` bumped to add file-summary chunks.
 
 Switching API keys (rotating `OPENAI_API_KEY` without changing `api_key_env`) does **not**
 trigger a rebuild — the key isn't part of the fingerprint.
