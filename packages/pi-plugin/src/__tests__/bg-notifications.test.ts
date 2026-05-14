@@ -185,7 +185,7 @@ describe("Pi background notifications", () => {
     expect(sessionBgStates.get("s1")?.debounceTimer).not.toBeNull();
   });
 
-  test("drain is skipped when session id is unknown", async () => {
+  test("drain uses Rust's default session when Pi session id is unknown", async () => {
     trackBgTask(undefined, "task-1");
     const send = mock(async () => ({
       success: true,
@@ -197,8 +197,9 @@ describe("Pi background notifications", () => {
       { type: "text", text: "normal" },
     ]);
 
-    expect(send).toHaveBeenCalledTimes(0);
-    expect(sessionBgStates.get("__default__")?.outstandingTaskIds.has("task-1")).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toEqual({});
+    expect(sessionBgStates.get("__default__")?.outstandingTaskIds.has("task-1")).toBe(false);
   });
 
   test("push completion lands in pending without wake when active", async () => {

@@ -75,6 +75,7 @@ function childEnv(configDir: string): Record<string, string> {
   result.OPENAI_API_KEY = "sk-mock";
   result.PI_OFFLINE = "1";
   result.PI_SKIP_VERSION_CHECK = "1";
+  result.PATH = `${join(REPO_ROOT, "target", "release")}${process.platform === "win32" ? ";" : ":"}${result.PATH ?? ""}`;
   return result;
 }
 

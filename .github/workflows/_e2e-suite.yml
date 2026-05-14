@@ -72,6 +72,45 @@ jobs:
         run: docker run --rm --platform linux/amd64 aft-e2e-linux-x64
 
   # ---------------------------------------------------------------------------
+  # Pi RPC e2e — exercises the real Pi runtime + AFT Pi plugin via RPC against
+  # aimock. Runs on Linux only for now; failures are blocking.
+  # ---------------------------------------------------------------------------
+  pi-rpc-e2e:
+    name: E2E (Pi RPC)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build AFT binary (Linux native)
+        run: cargo build --release -p agent-file-tools
+
+      - name: Build aft-bridge dist
+        run: bun run --cwd packages/aft-bridge build
+
+      - name: Build Pi plugin dist
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Run Pi RPC E2E suite
+        run: bun test
+        working-directory: tests/pi-rpc
+
+  # ---------------------------------------------------------------------------
   # Windows native e2e — exercises the same OpenCode + plugin + binary stack
   # on a real Windows runner. No containers. This is the only job that catches
   # Windows-specific bugs at the integration level (bash spawning + timeout

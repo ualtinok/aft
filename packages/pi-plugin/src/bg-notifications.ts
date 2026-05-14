@@ -244,8 +244,8 @@ export function __resetBgNotificationStateForTests(): void {
 async function drainCompletions({ ctx, directory, sessionID }: DrainContext): Promise<void> {
   try {
     const bridge = ctx.pool.getActiveBridgeForRoot(directory) ?? ctx.pool.getBridge(directory);
-    if (!sessionID) return;
-    const response = await bridge.send("bash_drain_completions", { session_id: sessionID });
+    const params = sessionID ? { session_id: sessionID } : {};
+    const response = await bridge.send("bash_drain_completions", params);
     if (response.success === false) {
       sessionWarn(
         sessionID ?? "",

@@ -20,10 +20,8 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function lastToolCallId(request: unknown): string | undefined {
   const messages = asRecord(request)?.messages;
   const messageList = Array.isArray(messages) ? messages : [];
-  const toolMessage = [...messageList]
-    .reverse()
-    .map(asRecord)
-    .find((message) => message?.role === "tool");
+  const toolMessage = asRecord(messageList.at(-1));
+  if (toolMessage?.role !== "tool") return undefined;
   return typeof toolMessage?.tool_call_id === "string" ? toolMessage.tool_call_id : undefined;
 }
 
