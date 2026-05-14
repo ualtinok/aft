@@ -503,6 +503,39 @@ fn test_zoom_symbol_not_found() {
 }
 
 #[test]
+fn test_zoom_code_symbol_lookup_keeps_hash_prefix_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_temp_file(
+        dir.path(),
+        "lib.rs",
+        r#"#[derive(Debug)]
+pub struct Thing;
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    aft.configure(dir.path());
+
+    let resp = aft.send(&format!(
+        r##"{{"id":"z-rust-hash","command":"zoom","file":"{}","symbol":"#[derive(Debug)]"}}"##,
+        file.display()
+    ));
+
+    assert_eq!(
+        resp["success"], false,
+        "attribute text should not be normalized as a code symbol: {resp:?}"
+    );
+    assert_eq!(resp["code"], "symbol_not_found");
+    assert!(resp["message"]
+        .as_str()
+        .unwrap()
+        .contains("#[derive(Debug)]"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn test_zoom_context_lines_param() {
     let mut aft = AftProcess::spawn();
     let file = fixture_path("calls.ts");

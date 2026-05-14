@@ -235,6 +235,53 @@ fn zoom_html_heading_returns_content_with_context() {
 }
 
 #[test]
+fn zoom_html_heading_accepts_outline_style_prefix() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "page.html",
+        r#"<html>
+<body>
+  <h1>Welcome</h1>
+  <p>Intro paragraph</p>
+  <h2 class="section">Features</h2>
+  <p>Feature list here</p>
+</body>
+</html>
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let bare = send(
+        &mut aft,
+        json!({"id": "zoom-html-bare", "command": "zoom", "file": file, "symbol": "Features"}),
+    );
+    let prefixed = send(
+        &mut aft,
+        json!({"id": "zoom-html-prefixed", "command": "zoom", "file": file, "symbol": "<h2 class=\"section\">Features"}),
+    );
+
+    assert_eq!(
+        bare["success"], true,
+        "bare heading should succeed: {bare:?}"
+    );
+    assert_eq!(
+        prefixed["success"], true,
+        "prefixed html heading should succeed: {prefixed:?}"
+    );
+    assert_eq!(prefixed["range"], bare["range"]);
+    assert!(prefixed["content"]
+        .as_str()
+        .unwrap()
+        .contains("Feature list here"));
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
 fn zoom_html_last_heading_range_stays_within_file() {
     let dir = TempDir::new().unwrap();
     let file = write_file(

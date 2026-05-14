@@ -198,6 +198,57 @@ fn markdown_zoom_by_heading_name() {
 }
 
 #[test]
+fn markdown_zoom_accepts_copied_heading_prefixes() {
+    let dir = TempDir::new().unwrap();
+    let md_file = dir.path().join("readme.md");
+    fs::write(&md_file, SAMPLE_MD).unwrap();
+
+    let mut aft = AftProcess::spawn();
+    aft.configure(dir.path());
+
+    let bare = aft.send(&format!(
+        r#"{{"id":"md-prefix-bare","command":"zoom","file":"{}","symbol":"Architecture"}}"#,
+        md_file.display()
+    ));
+    assert_eq!(bare["success"], true, "bare heading should work: {bare:?}");
+
+    for (id, symbol, expected) in [
+        (
+            "md-prefix-h2",
+            "## Architecture",
+            "The architecture section",
+        ),
+        (
+            "md-prefix-h3",
+            "### Sub-feature A",
+            "Details about sub-feature A",
+        ),
+        ("md-prefix-h1", "# Project Title", "Some introduction text"),
+    ] {
+        let resp = aft.send(&format!(
+            r#"{{"id":"{}","command":"zoom","file":"{}","symbol":"{}"}}"#,
+            id,
+            md_file.display(),
+            symbol
+        ));
+        assert_eq!(
+            resp["success"], true,
+            "prefixed markdown heading {symbol:?} should work: {resp:?}"
+        );
+        if symbol == "## Architecture" {
+            assert_eq!(
+                resp["range"], bare["range"],
+                "## Architecture should match the bare heading range"
+            );
+        }
+        assert!(
+            resp["content"].as_str().unwrap().contains(expected),
+            "content should include {expected:?}: {resp:?}"
+        );
+    }
+}
+
+#[test]
 fn markdown_zoom_heading_not_found() {
     let dir = TempDir::new().unwrap();
     let md_file = dir.path().join("readme.md");

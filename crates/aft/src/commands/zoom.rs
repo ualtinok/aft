@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::context::AppContext;
 use crate::edit::line_col_to_byte;
 use crate::lsp_hints;
-use crate::parser::{FileParser, LangId};
+use crate::parser::{detect_language, FileParser, LangId};
 use crate::protocol::{RawRequest, Response};
 use crate::symbols::Range;
 
@@ -210,8 +210,14 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    // Resolve the target symbol
-    let matches = match ctx.provider().resolve_symbol(&path, symbol_name) {
+    // Resolve the target symbol. Markdown/HTML headings are often copied from outline output
+    // with a visible level prefix (e.g. "## Basic usage" or "<h2>Features"); normalize only
+    // that heading lookup path so code-symbol resolution keeps exact matching semantics.
+    let lookup_name = match detect_language(&path) {
+        Some(LangId::Markdown | LangId::Html) => normalize_heading_query(symbol_name),
+        _ => symbol_name,
+    };
+    let matches = match ctx.provider().resolve_symbol(&path, lookup_name) {
         Ok(m) => m,
         Err(e) => {
             return Response::error(&req.id, e.code(), e.to_string());
@@ -410,6 +416,23 @@ pub fn handle_zoom(req: &RawRequest, ctx: &AppContext) -> Response {
             format!("zoom: failed to serialize response: {err}"),
         ),
     }
+}
+
+fn normalize_heading_query(input: &str) -> &str {
+    let trimmed = input.trim_start();
+    let hash_stripped = trimmed.trim_start_matches('#').trim_start();
+
+    if let Some(after_open) = hash_stripped.strip_prefix('<') {
+        let after_slash = after_open.strip_prefix('/').unwrap_or(after_open);
+        let mut chars = after_slash.chars();
+        if matches!(chars.next(), Some('h' | 'H')) && matches!(chars.next(), Some('1'..='6')) {
+            if let Some(end) = hash_stripped.find('>') {
+                return hash_stripped[end + 1..].trim_start();
+            }
+        }
+    }
+
+    hash_stripped
 }
 
 /// Extract call expression names within a byte range of the AST.
