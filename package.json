@@ -1,6 +1,6 @@
 {
   "private": true,
-  "workspaces": ["packages/*", "benchmarks"],
+  "workspaces": ["packages/*", "benchmarks", "tests/pi-rpc"],
   "author": "ualtinok",
   "license": "MIT",
   "scripts": {
@@ -13,6 +13,7 @@
     "format": "biome format --write . && cargo fmt",
     "format:check": "biome format . && cargo fmt --check",
     "test": "bun run --filter '*' test",
+    "pi-rpc-e2e": "cd tests/pi-rpc && bun test",
     "test:rust": "cargo test",
     "test:windows-e2e": "bun run scripts/windows-vm/test.ts",
     "windows-vm:setup": "bun run scripts/windows-vm/setup.ts",

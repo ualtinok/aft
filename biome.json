@@ -40,7 +40,13 @@
     }
   },
   "files": {
-    "includes": ["packages/**/*.ts", "packages/**/*.tsx", "packages/**/*.js", "scripts/**/*.mjs"]
+    "includes": [
+      "packages/**/*.ts",
+      "packages/**/*.tsx",
+      "packages/**/*.js",
+      "scripts/**/*.mjs",
+      "tests/pi-rpc/**/*.ts"
+    ]
   },
   "overrides": [
     {

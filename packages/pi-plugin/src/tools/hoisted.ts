@@ -19,7 +19,7 @@
 
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -40,6 +40,27 @@ import { formatDiffForPi } from "./diff-format.js";
 interface RenderContextLike {
   lastComponent: Component | undefined;
   isError: boolean;
+}
+
+function containsPath(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+async function assertExternalDirectoryPermission(
+  extCtx: { cwd: string; ui?: { confirm?: (title: string, message: string) => Promise<boolean> } },
+  target: string,
+): Promise<void> {
+  if (!target) return;
+  const absoluteTarget = isAbsolute(target) ? target : resolve(extCtx.cwd, target);
+  if (containsPath(extCtx.cwd, absoluteTarget)) return;
+
+  const confirmed = await extCtx.ui?.confirm?.(
+    "Allow external directory access?",
+    `AFT wants to modify a file outside the project: ${absoluteTarget}`,
+  );
+  if (confirmed === true) return;
+  throw new Error("Permission denied: external directory access was cancelled.");
 }
 
 const ReadParams = Type.Object({
@@ -197,6 +218,7 @@ export function registerHoistedTools(
         _onUpdate,
         extCtx,
       ) {
+        await assertExternalDirectoryPermission(extCtx, params.filePath);
         const bridge = bridgeFor(ctx, extCtx.cwd);
         const response = await callBridge(
           bridge,
@@ -241,6 +263,7 @@ export function registerHoistedTools(
         _onUpdate,
         extCtx,
       ) {
+        await assertExternalDirectoryPermission(extCtx, params.filePath);
         const bridge = bridgeFor(ctx, extCtx.cwd);
 
         // Append mode: explicitly route through the Rust `append` op, which
