@@ -1640,13 +1640,12 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
     let graph = CallGraph::new(root_path.clone());
     *ctx.callgraph().borrow_mut() = Some(graph);
 
-    if let Some(bg_storage_dir) = ctx.config().storage_dir.clone() {
-        if let Err(error) = ctx
-            .bash_background()
-            .replay_session(&bg_storage_dir, req.session())
-        {
-            slog_warn!("failed to replay background bash tasks: {error}");
-        }
+    let bg_storage_dir = crate::bash_background::storage_dir(ctx.config().storage_dir.as_deref());
+    if let Err(error) =
+        ctx.bash_background()
+            .replay_session_for_project(&bg_storage_dir, req.session(), &root_path)
+    {
+        slog_warn!("failed to replay background bash tasks: {error}");
     }
 
     // Spawn file watcher for live invalidation off the configure foreground.

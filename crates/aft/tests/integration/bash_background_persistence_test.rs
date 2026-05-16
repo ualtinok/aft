@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,21 @@ fn configure_background(aft: &mut AftProcess, project: &Path, storage: &Path, se
             "command": "configure",
             "project_root": project,
             "storage_dir": storage,
+            "experimental_bash_background": true,
+            "max_background_bash_tasks": 32,
+        })
+        .to_string(),
+    );
+    assert_eq!(response["success"], true, "configure failed: {response:?}");
+}
+
+fn configure_background_without_storage(aft: &mut AftProcess, project: &Path, session: &str) {
+    let response = aft.send(
+        &json!({
+            "id": format!("cfg-no-storage-{session}"),
+            "session_id": session,
+            "command": "configure",
+            "project_root": project,
             "experimental_bash_background": true,
             "max_background_bash_tasks": 32,
         })
@@ -838,6 +854,41 @@ fn spawn_detached_survives_parent_restart() {
 }
 
 #[test]
+fn configure_replays_background_tasks_from_default_storage_dir() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let storage = cache.path().join("aft");
+
+    let task_id = {
+        let mut aft = AftProcess::spawn_with_env(&[("AFT_CACHE_DIR", cache.path().as_os_str())]);
+        configure_background_without_storage(&mut aft, project.path(), SESSION);
+        let task_id = spawn_bg(&mut aft, SESSION, "printf default-replay", None);
+        wait_for_path(&task_file(&storage, SESSION, &task_id, "exit"));
+        assert!(aft.shutdown().success());
+        task_id
+    };
+
+    let mut aft = AftProcess::spawn_with_env(&[("AFT_CACHE_DIR", cache.path().as_os_str())]);
+    configure_background_without_storage(&mut aft, project.path(), SESSION);
+    let drained = drain(&mut aft, SESSION);
+    assert_eq!(drained["success"], true, "drain failed: {drained:?}");
+    let completion = drained["bg_completions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|completion| completion["task_id"] == task_id)
+        .unwrap_or_else(|| panic!("missing replayed completion: {drained:?}"));
+
+    assert_eq!(completion["status"], "completed");
+    assert_eq!(completion["exit_code"], 0);
+    assert!(completion["output_preview"]
+        .as_str()
+        .unwrap()
+        .contains("default-replay"));
+    assert!(aft.shutdown().success());
+}
+
+#[test]
 fn exit_file_atomicity_many_short_tasks() {
     let project = tempfile::tempdir().unwrap();
     let storage = spawn_storage_dir("storage");
@@ -1177,6 +1228,84 @@ fn replay_session_preserves_started_at_relative_offset() {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "watchdog did not preserve elapsed timeout offset: {snapshot:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn watchdog_marks_rehydrated_detached_task_failed_when_pid_dies_without_marker() {
+    let storage = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let task_id = "bash-detached-dead-no-marker";
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn stand-in child process");
+    let child_pid = child.id();
+    let paths = task_paths(storage.path(), SESSION, task_id);
+    let mut metadata = PersistedTask::starting(
+        task_id.to_string(),
+        SESSION.to_string(),
+        "sleep 60".to_string(),
+        project.path().to_path_buf(),
+        Some(project.path().to_path_buf()),
+        Some(60_000),
+        true,
+        true,
+    );
+    metadata.status = BgTaskStatus::Running;
+    metadata.child_pid = Some(child_pid);
+    metadata.pgid = Some(child_pid as i32);
+    write_task(&paths.json, &metadata).unwrap();
+    fs::write(&paths.stdout, "").unwrap();
+    fs::write(&paths.stderr, "").unwrap();
+
+    let registry = registry();
+    registry.replay_session(storage.path(), SESSION).unwrap();
+    let running = registry
+        .status(
+            task_id,
+            SESSION,
+            Some(project.path()),
+            Some(storage.path()),
+            1024,
+        )
+        .expect("rehydrated task should be present");
+    assert_eq!(running.info.status, BgTaskStatus::Running);
+
+    child.kill().expect("kill stand-in child process");
+    child.wait().expect("reap stand-in child process");
+
+    let started = Instant::now();
+    loop {
+        let snapshot = registry
+            .status(
+                task_id,
+                SESSION,
+                Some(project.path()),
+                Some(storage.path()),
+                1024,
+            )
+            .expect("rehydrated task should remain present");
+        if snapshot.info.status == BgTaskStatus::Failed {
+            let replayed = read_json(storage.path(), SESSION, task_id);
+            assert_eq!(
+                replayed["status_reason"],
+                "process exited without exit marker"
+            );
+            assert_eq!(snapshot.exit_code, None);
+            let completions = registry.drain_completions_for_session(Some(SESSION));
+            assert_eq!(completions.len(), 1);
+            assert_eq!(completions[0].status, BgTaskStatus::Failed);
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "watchdog did not fail detached dead task: {snapshot:?}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }

@@ -371,6 +371,24 @@ impl BgTaskRegistry {
     }
 
     pub fn replay_session(&self, storage_dir: &Path, session_id: &str) -> Result<(), String> {
+        self.replay_session_inner(storage_dir, session_id, None)
+    }
+
+    pub fn replay_session_for_project(
+        &self,
+        storage_dir: &Path,
+        session_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        self.replay_session_inner(storage_dir, session_id, Some(project_root))
+    }
+
+    fn replay_session_inner(
+        &self,
+        storage_dir: &Path,
+        session_id: &str,
+        project_root: Option<&Path>,
+    ) -> Result<(), String> {
         self.start_watchdog();
         if !self.inner.persisted_gc_started.swap(true, Ordering::SeqCst) {
             if let Err(error) = self.maybe_gc_persisted(storage_dir) {
@@ -382,6 +400,7 @@ impl BgTaskRegistry {
             return Ok(());
         }
 
+        let canonical_project = project_root.map(canonicalized_path);
         let entries = fs::read_dir(&dir)
             .map_err(|e| format!("failed to read background task dir {}: {e}", dir.display()))?;
         for entry in entries.flatten() {
@@ -394,6 +413,12 @@ impl BgTaskRegistry {
             };
             if metadata.session_id != session_id {
                 continue;
+            }
+            if let Some(canonical_project) = canonical_project.as_deref() {
+                let metadata_project = metadata.project_root.as_deref().map(canonicalized_path);
+                if metadata_project.as_deref() != Some(canonical_project) {
+                    continue;
+                }
             }
 
             let paths = task_paths(storage_dir, session_id, &metadata.task_id);
@@ -876,26 +901,37 @@ impl BgTaskRegistry {
                 // cycle finalize from it.
                 state.child = None;
                 state.detached = true;
-                if state.metadata.status.is_terminal() {
-                    return;
-                }
-                if matches!(read_exit_marker(&task.paths.exit), Ok(Some(_))) {
-                    return;
-                }
-                let updated = update_task(&task.paths.json, |metadata| {
-                    metadata.mark_terminal(
-                        BgTaskStatus::Failed,
-                        None,
-                        Some("process exited without exit marker".to_string()),
-                    );
-                });
-                if let Ok(metadata) = updated {
-                    state.metadata = metadata;
-                    task.mark_terminal_now();
-                    state.buffer.enforce_terminal_cap();
-                    self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
-                }
+                self.fail_without_exit_marker_if_needed(task, &mut state);
             }
+        } else if state.detached
+            && state
+                .metadata
+                .child_pid
+                .is_some_and(|pid| !is_process_alive(pid))
+        {
+            self.fail_without_exit_marker_if_needed(task, &mut state);
+        }
+    }
+
+    fn fail_without_exit_marker_if_needed(&self, task: &Arc<BgTask>, state: &mut BgTaskState) {
+        if state.metadata.status.is_terminal() {
+            return;
+        }
+        if matches!(read_exit_marker(&task.paths.exit), Ok(Some(_))) {
+            return;
+        }
+        let updated = update_task(&task.paths.json, |metadata| {
+            metadata.mark_terminal(
+                BgTaskStatus::Failed,
+                None,
+                Some("process exited without exit marker".to_string()),
+            );
+        });
+        if let Ok(metadata) = updated {
+            state.metadata = metadata;
+            task.mark_terminal_now();
+            state.buffer.enforce_terminal_cap();
+            self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
         }
     }
 
@@ -2032,11 +2068,8 @@ mod tests {
             state.metadata.duration_ms = None;
             // Persist the reset state to disk so update_task's terminal
             // rollback guard sees a non-terminal starting point.
-            crate::bash_background::persistence::write_task(
-                &task.paths.json,
-                &state.metadata,
-            )
-            .expect("persist reset Running metadata for reap_child test");
+            crate::bash_background::persistence::write_task(&task.paths.json, &state.metadata)
+                .expect("persist reset Running metadata for reap_child test");
             // If the watchdog already nulled state.child, we need to
             // simulate "child exists and is dead" so reap_child's
             // try_wait path runs. Spawn a quick-exit child as a stand-in.
