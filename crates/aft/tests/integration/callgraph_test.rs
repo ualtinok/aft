@@ -507,6 +507,128 @@ export function runWorkspaceImport(): string {
 }
 
 #[test]
+fn callgraph_prefers_workspace_package_source_over_existing_dist() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("package.json"),
+        r#"{"private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+
+    let pkg_a = root.join("packages/pkg-a");
+    let pkg_b = root.join("packages/pkg-b");
+    fs::create_dir_all(pkg_a.join("dist")).unwrap();
+    fs::create_dir_all(pkg_a.join("src")).unwrap();
+    fs::create_dir_all(pkg_b.join("src")).unwrap();
+    fs::write(
+        pkg_a.join("package.json"),
+        r#"{"name":"@scope/pkg-a","main":"dist/index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg_a.join("dist/index.js"),
+        r#"export const bundledValue = 1;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg_a.join("src/index.ts"),
+        r#"export { workspaceTarget } from "./target.js";
+"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg_a.join("src/target.ts"),
+        r#"export function workspaceTarget(): string {
+  return "ok";
+}
+"#,
+    )
+    .unwrap();
+    fs::write(pkg_b.join("package.json"), r#"{"name":"pkg-b"}"#).unwrap();
+    fs::write(
+        pkg_b.join("src/main.ts"),
+        r#"import { workspaceTarget } from "@scope/pkg-a";
+
+export function runWorkspaceImport(): string {
+  return workspaceTarget();
+}
+"#,
+    )
+    .unwrap();
+
+    let mut aft = AftProcess::spawn();
+    let root_display = root.display().to_string();
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root_display
+    ));
+    assert_eq!(
+        resp["success"], true,
+        "configure should succeed: {:?}",
+        resp
+    );
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"callers","file":"{}","symbol":"workspaceTarget","depth":1}}"#,
+        pkg_a.join("src/target.ts").display()
+    ));
+    assert_eq!(resp["success"], true, "callers should succeed: {:?}", resp);
+    assert_eq!(
+        resp["total_callers"], 1,
+        "workspace import caller should resolve through source even when dist exists: {:?}",
+        resp
+    );
+    let callers = resp["callers"].as_array().expect("callers array");
+    let pkg_b_group = callers.iter().find(|group| {
+        group["file"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("packages/pkg-b/src/main.ts")
+    });
+    assert!(
+        pkg_b_group.is_some(),
+        "caller should be pkg-b main.ts, not dist/index.js: {:?}",
+        callers
+    );
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"3","command":"call_tree","file":"{}","symbol":"runWorkspaceImport","depth":2}}"#,
+        pkg_b.join("src/main.ts").display()
+    ));
+    assert_eq!(
+        resp["success"], true,
+        "call_tree should succeed: {:?}",
+        resp
+    );
+    let children = resp["children"].as_array().expect("children array");
+    let target_child = children
+        .iter()
+        .find(|child| child["name"] == "workspaceTarget")
+        .expect("runWorkspaceImport should call workspaceTarget");
+    assert_eq!(target_child["resolved"], true);
+    assert!(
+        target_child["file"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("packages/pkg-a/src/target.ts"),
+        "workspaceTarget should resolve to source target instead of dist bundle: {:?}",
+        target_child
+    );
+    assert!(
+        !target_child["file"]
+            .as_str()
+            .unwrap_or("")
+            .contains("/dist/"),
+        "workspaceTarget should not resolve to dist bundle: {:?}",
+        target_child
+    );
+
+    aft.shutdown();
+}
+
+#[test]
 fn callgraph_indexes_relative_calls_inside_test_callbacks() {
     let temp = tempdir().unwrap();
     let root = temp.path();

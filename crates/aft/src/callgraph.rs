@@ -2889,11 +2889,15 @@ fn export_condition_target(value: &Value) -> Option<String> {
 
 fn resolve_package_target(package_root: &Path, target: &str) -> Option<PathBuf> {
     let target = target.strip_prefix("./").unwrap_or(target);
-    resolve_file_like_path(&package_root.join(target)).or_else(|| {
-        target.strip_prefix("dist/").and_then(|src_relative| {
-            resolve_file_like_path(&package_root.join("src").join(src_relative))
-        })
-    })
+    // Prefer source over compiled bundle when both exist: the callgraph
+    // walks source files and cannot extract symbols from a built JS bundle.
+    if let Some(src_relative) = target.strip_prefix("dist/") {
+        if let Some(path) = resolve_file_like_path(&package_root.join("src").join(src_relative)) {
+            return Some(path);
+        }
+    }
+
+    resolve_file_like_path(&package_root.join(target))
 }
 
 fn resolve_package_fallback(package_root: &Path, subpath: Option<&str>) -> Option<PathBuf> {
