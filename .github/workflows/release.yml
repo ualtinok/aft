@@ -338,8 +338,25 @@ jobs:
       # Uses npm Trusted Publishing (OIDC) — configured per-package on npmjs.com
       - name: Publish platform packages
         run: |
+          set -euo pipefail
+
+          publish_or_skip() {
+            local pkg_dir="$1"
+            local pkg_name
+            local version
+            pkg_name=$(node -p "require('./${pkg_dir}/package.json').name")
+            version=$(node -p "require('./${pkg_dir}/package.json').version")
+
+            if npm view "${pkg_name}@${version}" version >/dev/null 2>&1; then
+              echo "::notice::${pkg_name}@${version} already published; skipping"
+              return 0
+            fi
+
+            npm publish --access public --provenance "$pkg_dir"
+          }
+
           for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
-            npm publish --access public --provenance "packages/npm/$pkg"
+            publish_or_skip "packages/npm/$pkg"
           done
 
       # aft-bridge MUST publish before the plugins, because @cortexkit/aft-opencode
@@ -353,27 +370,50 @@ jobs:
       # whole release. Mirrors the crates.io publish step above.
       - name: Publish @cortexkit/aft-bridge
         run: |
-          set +e
-          out=$(npm publish --access public --provenance 2>&1)
-          ec=$?
-          echo "$out"
-          if [ $ec -ne 0 ] && echo "$out" | grep -q "cannot publish over the previously published versions"; then
-            echo "::notice::aft-bridge version already published; treating as success"
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${VERSION} already published; skipping"
             exit 0
           fi
-          exit $ec
+          npm publish --access public --provenance
         working-directory: packages/aft-bridge
 
       - name: Publish @cortexkit/aft-opencode
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
         working-directory: packages/opencode-plugin
 
       - name: Publish @cortexkit/aft-pi
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
         working-directory: packages/pi-plugin
 
       - name: Publish @cortexkit/aft (unified CLI)
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
         working-directory: packages/aft-cli
 
   # GitHub release must complete before npm publish so that checksums.sha256

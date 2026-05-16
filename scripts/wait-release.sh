@@ -50,7 +50,19 @@ fi
 
 echo "⏳ Waiting for release workflow on ${TAG} (max ${MAX_WAIT}s)..."
 
+if ! GH_AUTH_OUTPUT=$(gh auth status --hostname github.com 2>&1); then
+  echo "ERROR: gh auth status failed:" >&2
+  echo "$GH_AUTH_OUTPUT" >&2
+  exit 1
+fi
+
 START_TIME=$(date +%s)
+GH_RUN_LIST_FAILURES=0
+MAX_GH_RUN_LIST_FAILURES=3
+
+gh_run_list() {
+  gh run list --repo "$REPO" --workflow release.yml --branch "$TAG" --limit 1 --json status,conclusion,databaseId
+}
 
 while true; do
   NOW=$(date +%s)
@@ -62,7 +74,17 @@ while true; do
   fi
 
   # Get the latest run for the release workflow triggered by this tag
-  RUN_JSON=$(gh run list --repo "$REPO" --workflow release.yml --branch "$TAG" --limit 1 --json status,conclusion,databaseId 2>/dev/null || echo "[]")
+  if ! RUN_JSON=$(gh_run_list 2>&1); then
+    GH_RUN_LIST_FAILURES=$((GH_RUN_LIST_FAILURES + 1))
+    echo "ERROR: gh run list failed (attempt ${GH_RUN_LIST_FAILURES}/${MAX_GH_RUN_LIST_FAILURES}):" >&2
+    echo "$RUN_JSON" >&2
+    if (( GH_RUN_LIST_FAILURES >= MAX_GH_RUN_LIST_FAILURES )); then
+      exit 1
+    fi
+    sleep "$INTERVAL"
+    continue
+  fi
+  GH_RUN_LIST_FAILURES=0
 
   STATUS=$(echo "$RUN_JSON" | jq -r '.[0].status // "not_found"')
   CONCLUSION=$(echo "$RUN_JSON" | jq -r '.[0].conclusion // ""')

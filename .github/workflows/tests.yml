@@ -19,14 +19,17 @@ on:
       - "crates/**"
       - "packages/**"
       - "tests/**"
+      - "scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "package.json"
       - "bun.lock"
       - ".github/opencode-version.txt"
       - ".github/workflows/tests.yml"
+      - ".github/workflows/release.yml"
       - ".github/workflows/_unit-suite.yml"
       - ".github/workflows/_e2e-suite.yml"
+      - ".github/workflows/bump-opencode.yml"
   push:
     branches:
       - main
@@ -34,14 +37,17 @@ on:
       - "crates/**"
       - "packages/**"
       - "tests/**"
+      - "scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "package.json"
       - "bun.lock"
       - ".github/opencode-version.txt"
       - ".github/workflows/tests.yml"
+      - ".github/workflows/release.yml"
       - ".github/workflows/_unit-suite.yml"
       - ".github/workflows/_e2e-suite.yml"
+      - ".github/workflows/bump-opencode.yml"
   workflow_dispatch:
     inputs:
       ref:

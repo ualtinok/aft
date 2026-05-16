@@ -176,23 +176,25 @@ PLUGIN_NPM_DIR="$HOME/.cache/opencode/packages"
 mkdir -p "$PLUGIN_NPM_DIR"
 (
     cd "$PLUGIN_NPM_DIR"
-    npm install --silent @cortexkit/aft-opencode@latest @cortexkit/aft-darwin-arm64@latest 2>/dev/null || true
+    npm install --silent @cortexkit/aft-opencode@latest @cortexkit/aft-darwin-arm64@latest
 )
 
 # Inject locally-built AFT binary into the versioned cache
-AFT_VER=$(node -p "require('$PLUGIN_NPM_DIR/node_modules/@cortexkit/aft-opencode/package.json').version" 2>/dev/null || echo "0.19.5")
+AFT_VER=$(node -p "require('$PLUGIN_NPM_DIR/node_modules/@cortexkit/aft-opencode/package.json').version")
 mkdir -p "$HOME/.cache/aft/bin/v${AFT_VER}"
 cp "$AFT_BINARY_PATH" "$HOME/.cache/aft/bin/v${AFT_VER}/aft"
 chmod +x "$HOME/.cache/aft/bin/v${AFT_VER}/aft"
 
 # Inject locally-built plugin dist over the npm-installed one so TS-side fixes
 # (e.g. onnx-runtime.ts) get exercised too.
-PLUGIN_DIST_DEST=$(find "$PLUGIN_NPM_DIR" -path '*/node_modules/@cortexkit/aft-opencode/dist' -type d 2>/dev/null | head -1)
-if [ -n "$PLUGIN_DIST_DEST" ]; then
-    rm -rf "$PLUGIN_DIST_DEST"
-    cp -R "$AFT_PLUGIN_DIST" "$PLUGIN_DIST_DEST"
-    echo "  Injected local plugin dist into: $PLUGIN_DIST_DEST"
+PLUGIN_DIST_DEST=$(find "$PLUGIN_NPM_DIR" -path '*/node_modules/@cortexkit/aft-opencode/dist' -type d | head -1)
+if [ -z "$PLUGIN_DIST_DEST" ]; then
+    echo "Unable to locate npm-installed @cortexkit/aft-opencode/dist under $PLUGIN_NPM_DIR" >&2
+    exit 2
 fi
+rm -rf "$PLUGIN_DIST_DEST"
+cp -R "$AFT_PLUGIN_DIST" "$PLUGIN_DIST_DEST"
+echo "  Injected local plugin dist into: $PLUGIN_DIST_DEST"
 
 # ---- Run shared harness ----------------------------------------------------
 # We don't use aimock's own server.js — the Linux harness drives aimock via
