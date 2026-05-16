@@ -133,6 +133,36 @@ fn edit_match_glob_succeeds_when_all_files_remain_syntax_valid() {
     assert!(status.success());
 }
 
+#[test]
+fn edit_match_omits_syntax_valid_when_language_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.unusual_extension");
+    fs::write(&file, "hello old world\n").unwrap();
+
+    let mut aft = AftProcess::spawn();
+    let req = json!({
+        "id": "unsupported-syntax-valid",
+        "command": "edit_match",
+        "file": file,
+        "match": "old",
+        "replacement": "new"
+    });
+    let resp = aft.send(&req.to_string());
+
+    assert_eq!(resp["success"], true, "expected edit success: {resp:?}");
+    assert!(
+        resp.get("syntax_valid").is_none(),
+        "syntax_valid must be absent when validation could not run: {resp:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.unusual_extension")).unwrap(),
+        "hello new world\n"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
 #[cfg(unix)]
 fn make_writable(path: &std::path::Path) {
     let mut permissions = fs::metadata(path).unwrap().permissions();

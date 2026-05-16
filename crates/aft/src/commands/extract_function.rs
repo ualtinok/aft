@@ -27,7 +27,9 @@ use crate::protocol::{RawRequest, Response};
 ///   - `end_line` (u32, required) — last line (exclusive, 1-based) of the range to extract
 ///
 /// Returns on success:
-///   `{ file, name, parameters, return_type, extracted_range, call_site_range, syntax_valid, backup_id }`
+///   `{ file, name, parameters, return_type, extracted_range, call_site_range, syntax_valid?, backup_id }`
+///
+/// `syntax_valid` is absent when syntax validation could not run.
 ///
 /// Error codes:
 ///   - `unsupported_language` — file is not TS/JS/TSX/Python
@@ -346,16 +348,17 @@ pub fn handle_extract_function(req: &RawRequest, ctx: &AppContext) -> Response {
     );
 
     // --- Build response ---
-    let syntax_valid = write_result.syntax_valid.unwrap_or(true);
-
     let mut result = serde_json::json!({
         "file": file,
         "name": name,
         "parameters": free_vars.parameters,
         "return_type": return_type,
-        "syntax_valid": syntax_valid,
         "formatted": write_result.formatted,
     });
+
+    if let Some(valid) = write_result.syntax_valid {
+        result["syntax_valid"] = serde_json::json!(valid);
+    }
 
     if let Some(ref reason) = write_result.format_skipped_reason {
         result["format_skipped_reason"] = serde_json::json!(reason);

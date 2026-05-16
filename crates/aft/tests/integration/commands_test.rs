@@ -36,6 +36,92 @@ fn read_allows_explicit_ranges_from_large_files() {
 
     assert_eq!(resp["success"], true, "read should succeed: {resp:?}");
     assert_eq!(resp["content"], "1: first\n2: second\n");
+    assert_eq!(resp["complete"], false, "range read is partial: {resp:?}");
+    assert_eq!(
+        resp["truncated"], true,
+        "range read should flag gap: {resp:?}"
+    );
+    assert_eq!(
+        resp["total_lines"], 4,
+        "total_lines must scan to EOF: {resp:?}"
+    );
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn read_range_reports_partial_and_accurate_total_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hundred.txt");
+    let content = (1..=100)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&path, content).expect("write ranged fixture");
+
+    let mut aft = AftProcess::spawn();
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "read-range-partial",
+            "command": "read",
+            "file": path,
+            "start_line": 1,
+            "end_line": 10,
+        })
+        .to_string(),
+    );
+
+    assert_eq!(resp["success"], true, "read should succeed: {resp:?}");
+    assert_eq!(resp["complete"], false, "range read is partial: {resp:?}");
+    assert_eq!(
+        resp["truncated"], true,
+        "range read should flag gap: {resp:?}"
+    );
+    assert_eq!(
+        resp["total_lines"], 100,
+        "total_lines must be full file count: {resp:?}"
+    );
+    assert_eq!(
+        resp["lines_read"], 10,
+        "should return requested slice: {resp:?}"
+    );
+
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn read_directory_truncation_reports_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..1001 {
+        fs::write(dir.path().join(format!("entry-{i:04}.txt")), "x").expect("write entry");
+    }
+
+    let mut aft = AftProcess::spawn();
+    let resp = aft.send(
+        &serde_json::json!({
+            "id": "read-dir-partial",
+            "command": "read",
+            "file": dir.path(),
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        resp["success"], true,
+        "directory read should succeed: {resp:?}"
+    );
+    assert_eq!(
+        resp["complete"], false,
+        "truncated directory is partial: {resp:?}"
+    );
+    assert_eq!(
+        resp["truncated"], true,
+        "directory should flag truncation: {resp:?}"
+    );
+    assert_eq!(
+        resp["total_entries"], 1001,
+        "must include total entries: {resp:?}"
+    );
 
     assert!(aft.shutdown().success());
 }

@@ -18,7 +18,8 @@ use crate::symbols::Range;
 ///   - `content` (string, optional) — replacement/insertion content (required for replace/insert_*)
 ///   - `scope` (string, optional) — scope qualifier to disambiguate (e.g. "ClassName")
 ///
-/// Returns on success: `{ file, symbol, operation, range, new_range?, syntax_valid, backup_id }`
+/// Returns on success: `{ file, symbol, operation, range, new_range?, syntax_valid?, backup_id }`.
+/// `syntax_valid` is absent when syntax validation could not run.
 /// Returns on ambiguity: `{ code: "ambiguous_symbol", candidates: [...] }`
 pub fn handle_edit_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     let op_id = crate::backup::new_op_id();
@@ -303,16 +304,17 @@ pub fn handle_edit_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
         _ => None,
     };
 
-    let syntax_valid = write_result.syntax_valid.unwrap_or(true);
-
     let mut result = serde_json::json!({
         "file": file,
         "symbol": symbol_name,
         "operation": operation,
         "range": original_range,
-        "syntax_valid": syntax_valid,
         "formatted": write_result.formatted,
     });
+
+    if let Some(valid) = write_result.syntax_valid {
+        result["syntax_valid"] = serde_json::json!(valid);
+    }
 
     if let Some(ref reason) = write_result.format_skipped_reason {
         result["format_skipped_reason"] = serde_json::json!(reason);

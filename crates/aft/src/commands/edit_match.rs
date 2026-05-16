@@ -28,7 +28,9 @@ use crate::protocol::{RawRequest, Response};
 ///
 /// When `file` is a literal path:
 ///   - Original single-file behavior
-///   - Returns: `{ file, replacements: 1, syntax_valid, backup_id? }`
+///   - Returns: `{ file, replacements: 1, syntax_valid?, backup_id? }`
+///
+/// `syntax_valid` is absent when syntax validation could not run.
 pub fn handle_edit_match(req: &RawRequest, ctx: &AppContext) -> Response {
     let op_id = crate::backup::new_op_id();
     if req.params.get("op").and_then(|v| v.as_str()) == Some("append") {
@@ -895,14 +897,15 @@ fn handle_single_file_edit_match(
 
     log::debug!("edit_match: {} in {}", match_str, file);
 
-    let syntax_valid = write_result.syntax_valid.unwrap_or(true);
-
     let mut result = serde_json::json!({
         "file": file,
         "replacements": count,
-        "syntax_valid": syntax_valid,
         "formatted": write_result.formatted,
     });
+
+    if let Some(valid) = write_result.syntax_valid {
+        result["syntax_valid"] = serde_json::json!(valid);
+    }
 
     if let Some(ref reason) = write_result.format_skipped_reason {
         result["format_skipped_reason"] = serde_json::json!(reason);

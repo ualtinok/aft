@@ -302,3 +302,44 @@ fn inline_symbol_does_not_substitute_shadowed_arrow_parameter() {
 
     aft.shutdown();
 }
+
+/// `inline_symbol` should accept a target call_site_line that points at the
+/// first line of a multiline call (e.g. `helper(\n  a,\n  b,\n)`), rather than
+/// rejecting it as call_not_found.
+#[test]
+fn inline_symbol_matches_multiline_call_starting_on_target_line() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let file = tmp.path().join("multiline.ts");
+    std::fs::write(
+        &file,
+        "function helper(a: number, b: number): number {\n  return a + b;\n}\n\nexport function main() {\n  const result = helper(\n    1,\n    2,\n  );\n  console.log(result);\n}\n",
+    )
+    .expect("write fixture");
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &tmp.path().display().to_string());
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"multiline","command":"inline_symbol","file":"{}","symbol":"helper","call_site_line":6}}"#,
+        file.display()
+    ));
+    assert_eq!(
+        resp["success"], true,
+        "inline should match multiline call by start line: {:?}",
+        resp
+    );
+
+    let content = std::fs::read_to_string(&file).expect("read file");
+    assert!(
+        !content.contains("helper(\n"),
+        "multiline call should be replaced:\n{}",
+        content
+    );
+    assert!(
+        content.contains("\n  const result = 1 + 2;\n"),
+        "expected inlined expression, got:\n{}",
+        content
+    );
+
+    aft.shutdown();
+}

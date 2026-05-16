@@ -25,7 +25,8 @@ struct ResolvedEdit {
 ///       - `{ "match": "...", "replacement": "..." }` — string match-replace
 ///       - `{ "line_start": N, "line_end": N, "content": "..." }` — line range replacement (1-based, inclusive)
 ///
-/// Returns on success: `{ file, edits_applied, syntax_valid, backup_id? }`
+/// Returns on success: `{ file, edits_applied, syntax_valid?, backup_id? }`.
+/// `syntax_valid` is absent when syntax validation could not run.
 /// Returns on failure: error with the failing edit index.
 pub fn handle_batch(req: &RawRequest, ctx: &AppContext) -> Response {
     let op_id = crate::backup::new_op_id();
@@ -150,14 +151,15 @@ pub fn handle_batch(req: &RawRequest, ctx: &AppContext) -> Response {
 
     log::debug!("batch: {} edits in {}", edits.len(), file);
 
-    let syntax_valid = write_result.syntax_valid.unwrap_or(true);
-
     let mut result = serde_json::json!({
         "file": file,
         "edits_applied": edits.len(),
-        "syntax_valid": syntax_valid,
         "formatted": write_result.formatted,
     });
+
+    if let Some(valid) = write_result.syntax_valid {
+        result["syntax_valid"] = serde_json::json!(valid);
+    }
 
     if let Some(ref reason) = write_result.format_skipped_reason {
         result["format_skipped_reason"] = serde_json::json!(reason);

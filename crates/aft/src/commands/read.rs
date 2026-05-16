@@ -32,7 +32,10 @@ fn is_binary(content: &[u8]) -> bool {
 ///   - `limit` (u32, optional) — max lines to return (default: 2000)
 ///
 /// Returns for files:
-///   `{ content, total_lines, lines_read, start_line, end_line, truncated, byte_size }`
+///   `{ content, complete, total_lines, lines_read, start_line, end_line, truncated, byte_size }`
+///
+/// `complete` is false whenever the returned content is a slice/truncated; in
+/// that case `truncated`, `total_lines`, and the returned range describe the gap.
 ///
 /// Returns for directories:
 ///   `{ entries[], total_entries }`
@@ -243,13 +246,13 @@ pub fn handle_read(req: &RawRequest, ctx: &AppContext) -> Response {
     }
 
     let actual_end = start_line + lines_read - if lines_read > 0 { 1 } else { 0 };
-    let has_more = (end_idx as u32) < total_lines || truncated_by_size;
+    let has_more = (start_idx > 0) || (end_idx as u32) < total_lines || truncated_by_size;
 
     Response::success(
         &req.id,
         serde_json::json!({
             "content": output,
-            "complete": true,
+            "complete": !has_more,
             "total_lines": total_lines,
             "lines_read": lines_read,
             "start_line": start_line,
@@ -319,7 +322,6 @@ fn handle_streaming_range_read(
 
     let mut selected_lines = Vec::new();
     let mut observed_lines = 0u32;
-    let mut has_more = false;
     let mut invalid_utf8 = false;
     let reader = std::io::BufReader::new(file);
 
@@ -342,9 +344,6 @@ fn handle_streaming_range_read(
         observed_lines = observed_lines.saturating_add(1);
         if index >= requested_start_idx && index < requested_end_idx {
             selected_lines.push(line);
-        } else if index >= requested_end_idx {
-            has_more = true;
-            break;
         }
     }
 
@@ -411,13 +410,14 @@ fn handle_streaming_range_read(
     }
 
     let actual_end = start_line + lines_read - if lines_read > 0 { 1 } else { 0 };
+    let has_more = requested_start_idx > 0 || (requested_end_idx as u32) < observed_lines;
     let truncated = has_more || truncated_by_size;
 
     Response::success(
         &req.id,
         serde_json::json!({
             "content": output,
-            "complete": true,
+            "complete": !truncated,
             "total_lines": observed_lines,
             "lines_read": lines_read,
             "start_line": start_line,
@@ -462,7 +462,8 @@ fn handle_directory(req: &RawRequest, path: &Path) -> Response {
     entries.sort();
 
     let total = entries.len();
-    if total > MAX_DIRECTORY_ENTRIES {
+    let truncated = total > MAX_DIRECTORY_ENTRIES;
+    if truncated {
         entries.truncate(MAX_DIRECTORY_ENTRIES);
         entries.push(format!(
             "\n... and {} more entries (truncated, showing first 1000)",
@@ -473,7 +474,8 @@ fn handle_directory(req: &RawRequest, path: &Path) -> Response {
         &req.id,
         serde_json::json!({
             "entries": entries,
-            "complete": true,
+            "complete": !truncated,
+            "truncated": truncated,
             "total_entries": total,
         }),
     )

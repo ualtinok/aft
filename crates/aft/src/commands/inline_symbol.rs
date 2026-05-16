@@ -25,7 +25,9 @@ use crate::protocol::{RawRequest, Response};
 ///   - `call_site_line` (u32, required) — line where the call expression is (1-based)
 ///
 /// Returns on success:
-///   `{ file, symbol, call_context, substitutions, conflicts, syntax_valid, backup_id }`
+///   `{ file, symbol, call_context, substitutions, conflicts, syntax_valid?, backup_id }`
+///
+/// `syntax_valid` is absent when syntax validation could not run.
 ///
 /// Error codes:
 ///   - `unsupported_language` — file is not TS/JS/TSX/Python
@@ -370,17 +372,18 @@ pub fn handle_inline_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     log::debug!("inline_symbol: {} at {}:{}", symbol, file, call_site_line);
 
     // --- Build response ---
-    let syntax_valid = write_result.syntax_valid.unwrap_or(true);
-
     let mut result = serde_json::json!({
         "file": file,
         "symbol": symbol,
         "call_context": call_context,
         "substitutions": substitution_count,
         "conflicts": [],
-        "syntax_valid": syntax_valid,
         "formatted": write_result.formatted,
     });
+
+    if let Some(valid) = write_result.syntax_valid {
+        result["syntax_valid"] = serde_json::json!(valid);
+    }
 
     if let Some(ref reason) = write_result.format_skipped_reason {
         result["format_skipped_reason"] = serde_json::json!(reason);
@@ -606,7 +609,8 @@ fn find_call_recursive<'a>(
 
     if call_kinds.contains(&node.kind())
         && node.start_byte() >= start_byte
-        && node.end_byte() <= end_byte
+        && node.start_byte() < end_byte
+        && node.end_byte() <= source.len()
     {
         if let Some(callee_name) = crate::calls::extract_callee_name(node, source) {
             if callee_name == symbol {
