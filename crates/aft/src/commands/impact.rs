@@ -69,6 +69,29 @@ pub fn handle_impact(req: &RawRequest, ctx: &AppContext) -> Response {
         Err(resp) => return resp,
     };
 
+    let project_root = ctx.config().project_root.clone();
+    if let Some(project_root) = project_root {
+        let canonical_root = std::fs::canonicalize(&project_root).unwrap_or(project_root.clone());
+        let input_for_resolution = if file_path.is_relative() {
+            project_root.join(&file_path)
+        } else {
+            file_path.clone()
+        };
+        let canonical_input =
+            std::fs::canonicalize(&input_for_resolution).unwrap_or(input_for_resolution);
+        if !canonical_input.starts_with(&canonical_root) {
+            return Response::error(
+                &req.id,
+                "path_outside_project_root",
+                format!(
+                    "Callgraph operations require paths inside project_root. Got: {} (project_root: {})",
+                    file_path.display(),
+                    project_root.display(),
+                ),
+            );
+        }
+    }
+
     // Build file data first to check if the symbol exists
     match graph.build_file(&file_path) {
         Ok(data) => {

@@ -1291,6 +1291,69 @@ fn callgraph_trace_data_approximation() {
     aft.shutdown();
 }
 
+/// Callgraph-backed commands reject absolute paths outside the configured
+/// project_root instead of reporting an honest-looking empty graph. These files
+/// are not indexed, so returning `success: true` with zero callers would be a
+/// tri-state contract violation.
+#[test]
+fn callgraph_navigation_rejects_paths_outside_project_root() {
+    let mut aft = AftProcess::spawn();
+    let fixtures = fixture_path("callgraph");
+    let root = fixtures.display().to_string();
+
+    let outside = tempfile::tempdir().expect("create outside temp dir");
+    let outside_file = outside.path().join("outside.ts");
+    fs::write(
+        &outside_file,
+        r#"export function outside(value: string): string {
+    const copied = value;
+    return copied;
+}
+"#,
+    )
+    .expect("write outside file");
+    let outside_path = outside_file.display().to_string();
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root
+    ));
+    assert_eq!(resp["success"], true, "configure should succeed: {resp:?}");
+
+    let requests = [
+        format!(
+            r#"{{"id":"2","command":"callers","file":"{}","symbol":"outside"}}"#,
+            outside_path
+        ),
+        format!(
+            r#"{{"id":"3","command":"impact","file":"{}","symbol":"outside"}}"#,
+            outside_path
+        ),
+        format!(
+            r#"{{"id":"4","command":"trace_to","file":"{}","symbol":"outside"}}"#,
+            outside_path
+        ),
+        format!(
+            r#"{{"id":"5","command":"trace_data","file":"{}","symbol":"outside","expression":"value"}}"#,
+            outside_path
+        ),
+    ];
+
+    for request in requests {
+        let resp = aft.send(&request);
+        assert_eq!(
+            resp["success"], false,
+            "outside project_root request should fail: {request} -> {resp:?}"
+        );
+        assert_eq!(
+            resp["code"], "path_outside_project_root",
+            "outside project_root request should use path_outside_project_root: {request} -> {resp:?}"
+        );
+    }
+
+    aft.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // max_callgraph_files guard: project_too_large error
 //
