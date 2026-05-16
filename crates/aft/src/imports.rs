@@ -396,10 +396,27 @@ pub fn generate_import_line(
     default_import: Option<&str>,
     type_only: bool,
 ) -> String {
+    generate_import_line_with_namespace(lang, module_path, names, default_import, None, type_only)
+}
+
+/// Generate an import line for the given language, including namespace imports
+/// for TS/JS/TSX (`import * as ns from 'mod'`).
+pub fn generate_import_line_with_namespace(
+    lang: LangId,
+    module_path: &str,
+    names: &[String],
+    default_import: Option<&str>,
+    namespace_import: Option<&str>,
+    type_only: bool,
+) -> String {
     match lang {
-        LangId::TypeScript | LangId::Tsx | LangId::JavaScript => {
-            generate_ts_import_line(module_path, names, default_import, type_only)
-        }
+        LangId::TypeScript | LangId::Tsx | LangId::JavaScript => generate_ts_import_line(
+            module_path,
+            names,
+            default_import,
+            namespace_import,
+            type_only,
+        ),
         LangId::Python => generate_py_import_line(module_path, names, default_import),
         LangId::Rust => generate_rs_import_line(module_path, names, type_only),
         LangId::Go => generate_go_import_line(module_path, default_import, false),
@@ -747,28 +764,65 @@ fn generate_ts_import_line(
     module_path: &str,
     names: &[String],
     default_import: Option<&str>,
+    namespace_import: Option<&str>,
     type_only: bool,
 ) -> String {
     let type_prefix = if type_only { "type " } else { "" };
 
     // Side-effect import
-    if names.is_empty() && default_import.is_none() {
+    if names.is_empty() && default_import.is_none() && namespace_import.is_none() {
         return format!("import '{module_path}';");
     }
 
-    // Default import only
+    // Namespace import only
+    if names.is_empty() && default_import.is_none() {
+        if let Some(namespace) = namespace_import {
+            return format!("import {type_prefix}* as {namespace} from '{module_path}';");
+        }
+    }
+
+    // Default + namespace import
     if names.is_empty() {
+        if let (Some(def), Some(namespace)) = (default_import, namespace_import) {
+            return format!("import {type_prefix}{def}, * as {namespace} from '{module_path}';");
+        }
+    }
+
+    // Default import only
+    if names.is_empty() && namespace_import.is_none() {
         if let Some(def) = default_import {
             return format!("import {type_prefix}{def} from '{module_path}';");
         }
     }
 
     // Named imports only
-    if default_import.is_none() {
+    if default_import.is_none() && namespace_import.is_none() {
         let mut sorted_names = names.to_vec();
         sort_named_specifiers(&mut sorted_names);
         let names_str = sorted_names.join(", ");
         return format!("import {type_prefix}{{ {names_str} }} from '{module_path}';");
+    }
+
+    // Namespace + named imports
+    if default_import.is_none() {
+        if let Some(namespace) = namespace_import {
+            let mut sorted_names = names.to_vec();
+            sort_named_specifiers(&mut sorted_names);
+            let names_str = sorted_names.join(", ");
+            return format!(
+                "import {type_prefix}{{ {names_str} }}, * as {namespace} from '{module_path}';"
+            );
+        }
+    }
+
+    // Default + named + namespace imports
+    if let (Some(def), Some(namespace)) = (default_import, namespace_import) {
+        let mut sorted_names = names.to_vec();
+        sort_named_specifiers(&mut sorted_names);
+        let names_str = sorted_names.join(", ");
+        return format!(
+            "import {type_prefix}{def}, {{ {names_str} }}, * as {namespace} from '{module_path}';"
+        );
     }
 
     // Both default and named imports

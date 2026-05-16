@@ -4,6 +4,7 @@
 //! using the fixtures in `tests/fixtures/callgraph/`.
 
 use crate::helpers::{fixture_path, AftProcess};
+use std::fs;
 
 /// `configure` sets project root and returns success.
 #[test]
@@ -613,6 +614,55 @@ fn callgraph_trace_to_no_entry_points() {
     assert!(resp.get("total_paths").is_some());
     assert!(resp.get("entry_points_found").is_some());
     assert!(resp.get("truncated_paths").is_some());
+
+    aft.shutdown();
+}
+
+#[test]
+fn callgraph_default_import_targets_real_default_export_name() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let root = tmp.path();
+    let main = root.join("main.ts");
+    let helper = root.join("helper.ts");
+
+    fs::write(
+        &main,
+        "import helper from './helper';\n\nexport function main() {\n  return helper();\n}\n",
+    )
+    .expect("write main");
+    fs::write(
+        &helper,
+        "export default function realName() {\n  return 1;\n}\n",
+    )
+    .expect("write helper");
+
+    let mut aft = AftProcess::spawn();
+    let root_str = root.display().to_string();
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root_str
+    ));
+    assert_eq!(resp["success"], true, "configure should succeed: {resp:?}");
+
+    let resp = aft.send(&format!(
+        r#"{{"id":"2","command":"call_tree","file":"{}","symbol":"main","depth":2}}"#,
+        main.display()
+    ));
+    assert_eq!(resp["success"], true, "call_tree should succeed: {resp:?}");
+
+    let children = resp["children"].as_array().expect("children array");
+    let default_child = children
+        .iter()
+        .find(|child| {
+            child["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("helper.ts"))
+        })
+        .expect("default import call should resolve into helper.ts");
+
+    assert_eq!(default_child["resolved"], true);
+    assert_eq!(default_child["name"], "realName");
+    assert_ne!(default_child["name"], "default");
 
     aft.shutdown();
 }

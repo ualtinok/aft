@@ -1,6 +1,8 @@
 //! Integration tests for the add_import command through the binary protocol.
 
 use super::helpers::{fixture_path, AftProcess};
+use aft::imports::{generate_import_line_with_namespace, parse_file_imports};
+use aft::parser::LangId;
 use std::fs;
 
 /// Helper: copy a fixture to a uniquely-named temp file for mutation testing.
@@ -1571,4 +1573,44 @@ fn organize_imports_ts_sorts_named_specifiers_by_imported_name() {
 
     fs::remove_file(&file).ok();
     aft.shutdown();
+}
+
+#[test]
+fn generate_ts_namespace_import_line_round_trips_namespace_only() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let file = tmp.path().join("namespace.ts");
+    fs::write(&file, "import * as ns from './mod';\n").expect("write import file");
+    let (_, _, block) = parse_file_imports(&file, LangId::TypeScript).expect("parse imports");
+    let import = block.imports.first().expect("parsed import");
+
+    let line = generate_import_line_with_namespace(
+        LangId::TypeScript,
+        &import.module_path,
+        &import.names,
+        import.default_import.as_deref(),
+        import.namespace_import.as_deref(),
+        false,
+    );
+
+    assert_eq!(line, "import * as ns from './mod';");
+}
+
+#[test]
+fn generate_ts_namespace_import_line_round_trips_default_and_namespace() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let file = tmp.path().join("default_namespace.ts");
+    fs::write(&file, "import Foo, * as ns from './mod';\n").expect("write import file");
+    let (_, _, block) = parse_file_imports(&file, LangId::TypeScript).expect("parse imports");
+    let import = block.imports.first().expect("parsed import");
+
+    let line = generate_import_line_with_namespace(
+        LangId::TypeScript,
+        &import.module_path,
+        &import.names,
+        import.default_import.as_deref(),
+        import.namespace_import.as_deref(),
+        false,
+    );
+
+    assert_eq!(line, "import Foo, * as ns from './mod';");
 }

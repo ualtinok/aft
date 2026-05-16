@@ -538,6 +538,8 @@ fn cached_query_for(lang: LangId) -> Result<Option<&'static Query>, AftError> {
 /// Cached parse result: mtime at parse time + the tree.
 struct CachedTree {
     mtime: SystemTime,
+    size: u64,
+    content_hash: blake3::Hash,
     tree: Tree,
 }
 
@@ -548,6 +550,40 @@ struct CachedSymbols {
     size: u64,
     content_hash: blake3::Hash,
     symbols: Vec<Symbol>,
+}
+
+fn content_hash_for_source(source: &str) -> blake3::Hash {
+    if source.len() as u64 > cache_freshness::CONTENT_HASH_SIZE_CAP {
+        cache_freshness::zero_hash()
+    } else {
+        cache_freshness::hash_bytes(source.as_bytes())
+    }
+}
+
+fn cached_file_is_fresh(
+    path: &Path,
+    cached_mtime: SystemTime,
+    cached_size: u64,
+    cached_content_hash: blake3::Hash,
+    fallback_mtime: SystemTime,
+) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let current_size = metadata.len();
+    if current_size != cached_size {
+        return false;
+    }
+
+    let current_mtime = metadata.modified().unwrap_or(fallback_mtime);
+    if current_size > cache_freshness::CONTENT_HASH_SIZE_CAP {
+        return current_mtime == cached_mtime;
+    }
+
+    matches!(
+        cache_freshness::hash_file_if_small(path, current_size),
+        Ok(Some(hash)) if hash == cached_content_hash
+    )
 }
 
 /// Shared symbol cache that can be pre-warmed in a background thread
@@ -627,11 +663,12 @@ impl SymbolCache {
         true
     }
 
-    /// Return cached symbols when the file mtime still matches.
+    /// Return cached symbols when the source file is still fresh.
     pub fn get(&self, path: &Path, mtime: SystemTime) -> Option<Vec<Symbol>> {
-        self.entries
-            .get(path)
-            .and_then(|cached| (cached.mtime == mtime).then(|| cached.symbols.clone()))
+        self.entries.get(path).and_then(|cached| {
+            cached_file_is_fresh(path, cached.mtime, cached.size, cached.content_hash, mtime)
+                .then(|| cached.symbols.clone())
+        })
     }
 
     /// Whether the cache has a still-valid entry for the given file mtime.
@@ -837,9 +874,17 @@ impl FileParser {
                 path: format!("{}: {}", path.display(), e),
             })?;
 
-        // Check cache validity
+        // Check cache validity. Mtime alone is not enough: editors and tests can
+        // restore timestamps after changing file contents, so small files fall
+        // back to a Blake3 content hash when size does not prove staleness.
         let needs_reparse = match self.cache.get(&canon) {
-            Some(cached) => cached.mtime != current_mtime,
+            Some(cached) => !cached_file_is_fresh(
+                path,
+                cached.mtime,
+                cached.size,
+                cached.content_hash,
+                current_mtime,
+            ),
             None => true,
         };
 
@@ -859,6 +904,8 @@ impl FileParser {
                 canon.clone(),
                 CachedTree {
                     mtime: current_mtime,
+                    size: source.len() as u64,
+                    content_hash: content_hash_for_source(&source),
                     tree,
                 },
             );
@@ -906,7 +953,7 @@ impl FileParser {
             path: format!("{}: {}", path.display(), e),
         })?;
         let size = source.len() as u64;
-        let content_hash = cache_freshness::hash_bytes(source.as_bytes());
+        let content_hash = content_hash_for_source(&source);
 
         let symbols = {
             let (tree, lang) = self.parse(path)?;
@@ -1180,6 +1227,110 @@ fn is_exported(node: &Node, export_ranges: &[std::ops::Range<usize>]) -> bool {
         .any(|er| er.start <= r.start && r.end <= er.end)
 }
 
+fn collect_exported_symbol_names(source: &str, root: &Node) -> HashSet<String> {
+    let mut exported = HashSet::new();
+    collect_exported_symbol_names_inner(source, root, &mut exported);
+    exported
+}
+
+fn collect_exported_symbol_names_inner(source: &str, node: &Node, exported: &mut HashSet<String>) {
+    if node.kind() == "export_statement" {
+        collect_names_from_export_statement(source, node, exported);
+    }
+
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+
+    loop {
+        let child = cursor.node();
+        collect_exported_symbol_names_inner(source, &child, exported);
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+fn collect_names_from_export_statement(source: &str, node: &Node, exported: &mut HashSet<String>) {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+
+    let mut saw_default = false;
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "default" => saw_default = true,
+            "export_clause" => collect_names_from_export_clause(source, &child, exported),
+            "identifier" | "type_identifier" | "property_identifier" if saw_default => {
+                exported.insert(node_text(source, &child).to_string());
+                return;
+            }
+            _ => {}
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+fn collect_names_from_export_clause(source: &str, node: &Node, exported: &mut HashSet<String>) {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+
+    loop {
+        let child = cursor.node();
+        if child.kind() == "export_specifier" {
+            if let Some(local_name) = first_identifier_text(source, &child) {
+                exported.insert(local_name);
+            }
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+fn first_identifier_text(source: &str, node: &Node) -> Option<String> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        let child = cursor.node();
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "type_identifier"
+                | "property_identifier"
+                | "shorthand_property_identifier"
+        ) {
+            return Some(node_text(source, &child).to_string());
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn mark_named_exports(symbols: &mut [Symbol], exported_names: &HashSet<String>) {
+    for symbol in symbols {
+        if symbol.scope_chain.is_empty()
+            && symbol.parent.is_none()
+            && exported_names.contains(&symbol.name)
+        {
+            symbol.exported = true;
+        }
+    }
+}
+
 /// Extract the first line of a node as its signature.
 fn extract_signature(source: &str, node: &Node) -> String {
     let text = node_text(source, node);
@@ -1196,6 +1347,7 @@ fn extract_ts_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Sy
     let capture_names = query.capture_names();
 
     let export_ranges = collect_export_ranges(source, root, query);
+    let exported_names = collect_exported_symbol_names(source, root);
 
     let mut symbols = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -1369,6 +1521,8 @@ fn extract_ts_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Sy
         }
     }
 
+    mark_named_exports(&mut symbols, &exported_names);
+
     // Deduplicate: methods can appear as both class and method captures
     dedup_symbols(&mut symbols);
     Ok(symbols)
@@ -1380,6 +1534,7 @@ fn extract_js_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Sy
     let capture_names = query.capture_names();
 
     let export_ranges = collect_export_ranges(source, root, query);
+    let exported_names = collect_exported_symbol_names(source, root);
 
     let mut symbols = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -1469,6 +1624,7 @@ fn extract_js_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<Sy
         }
     }
 
+    mark_named_exports(&mut symbols, &exported_names);
     dedup_symbols(&mut symbols);
     Ok(symbols)
 }

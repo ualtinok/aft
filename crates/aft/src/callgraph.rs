@@ -4,13 +4,14 @@
 //! using import chains. Supports depth-limited forward traversal with cycle
 //! detection.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
 use serde::Serialize;
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 use crate::calls::extract_calls_full;
 use crate::edit::line_col_to_byte;
@@ -68,6 +69,8 @@ pub struct FileCallData {
     pub exported_symbols: Vec<String>,
     /// Per-symbol metadata (kind, exported, signature).
     pub symbol_metadata: HashMap<String, SymbolMeta>,
+    /// Real or synthetic symbol name for this file's default export.
+    pub default_export_symbol: Option<String>,
     /// Parsed import block for cross-file resolution.
     pub import_block: ImportBlock,
     /// Language of the file.
@@ -521,15 +524,17 @@ impl CallGraph {
         &self.project_root
     }
 
-    fn resolve_cross_file_edge_with_exports<F>(
+    fn resolve_cross_file_edge_with_exports<F, D>(
         full_callee: &str,
         short_name: &str,
         caller_file: &Path,
         import_block: &ImportBlock,
         mut file_exports_symbol: F,
+        mut file_default_export_symbol: D,
     ) -> EdgeResolution
     where
         F: FnMut(&Path, &str) -> bool,
+        D: FnMut(&Path) -> Option<String>,
     {
         let caller_dir = caller_file.parent().unwrap_or(Path::new("."));
 
@@ -571,9 +576,11 @@ impl CallGraph {
             // Default import: import foo from './utils'
             if imp.default_import.as_deref() == Some(short_name) {
                 if let Some(resolved_path) = resolve_module_path(caller_dir, &imp.module_path) {
+                    let symbol = file_default_export_symbol(&resolved_path)
+                        .unwrap_or_else(|| synthetic_default_symbol(&resolved_path));
                     return EdgeResolution::Resolved {
                         file: resolved_path,
-                        symbol: "default".to_owned(),
+                        symbol,
                     };
                 }
             }
@@ -644,12 +651,14 @@ impl CallGraph {
         caller_file: &Path,
         import_block: &ImportBlock,
     ) -> EdgeResolution {
+        let graph = RefCell::new(self);
         Self::resolve_cross_file_edge_with_exports(
             full_callee,
             short_name,
             caller_file,
             import_block,
-            |path, symbol_name| self.file_exports_symbol(path, symbol_name),
+            |path, symbol_name| graph.borrow_mut().file_exports_symbol(path, symbol_name),
+            |path| graph.borrow_mut().file_default_export_symbol(path),
         )
     }
 
@@ -661,10 +670,21 @@ impl CallGraph {
         }
     }
 
+    fn file_default_export_symbol(&mut self, path: &Path) -> Option<String> {
+        self.build_file(path)
+            .ok()
+            .and_then(|data| data.default_export_symbol.clone())
+    }
+
     fn file_exports_symbol_cached(&self, path: &Path, symbol_name: &str) -> bool {
         self.lookup_file_data(path)
             .map(|data| data.exported_symbols.iter().any(|name| name == symbol_name))
             .unwrap_or(false)
+    }
+
+    fn file_default_export_symbol_cached(&self, path: &Path) -> Option<String> {
+        self.lookup_file_data(path)
+            .and_then(|data| data.default_export_symbol.clone())
     }
 
     /// Depth-limited forward call tree traversal.
@@ -893,6 +913,7 @@ impl CallGraph {
                         canon_caller.as_ref(),
                         &file_data.import_block,
                         |path, symbol_name| self.file_exports_symbol_cached(path, symbol_name),
+                        |path| self.file_default_export_symbol_cached(path),
                     );
 
                     let (target_file, target_symbol, resolved) = match edge {
@@ -2129,15 +2150,47 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
         }
     }
 
+    let default_export = find_default_export(&source, root, path, lang);
+
+    if let Some(default_export) = &default_export {
+        if default_export.synthetic {
+            let byte_start = default_export.node.byte_range().start;
+            let byte_end = default_export.node.byte_range().end;
+            let raw_calls = extract_calls_full(&source, root, byte_start, byte_end, lang);
+            let sites: Vec<CallSite> = raw_calls
+                .into_iter()
+                .filter(|(_, short, _)| *short != default_export.symbol)
+                .map(|(full, short, line)| CallSite {
+                    callee_name: short,
+                    full_callee: full,
+                    line,
+                    byte_start,
+                    byte_end,
+                })
+                .collect();
+            if !sites.is_empty() {
+                calls_by_symbol.insert(default_export.symbol.clone(), sites);
+            }
+        }
+    }
+
     // Collect exported symbol names
-    let exported_symbols: Vec<String> = symbols
+    let mut exported_symbols: Vec<String> = symbols
         .iter()
         .filter(|s| s.exported)
         .map(|s| s.name.clone())
         .collect();
+    if let Some(default_export) = &default_export {
+        if !exported_symbols
+            .iter()
+            .any(|name| name == &default_export.symbol)
+        {
+            exported_symbols.push(default_export.symbol.clone());
+        }
+    }
 
     // Build per-symbol metadata for entry point detection
-    let symbol_metadata: HashMap<String, SymbolMeta> = symbols
+    let mut symbol_metadata: HashMap<String, SymbolMeta> = symbols
         .iter()
         .map(|s| {
             (
@@ -2152,14 +2205,166 @@ fn build_file_data(path: &Path) -> Result<FileCallData, AftError> {
             )
         })
         .collect();
+    if let Some(default_export) = &default_export {
+        symbol_metadata
+            .entry(default_export.symbol.clone())
+            .or_insert_with(|| SymbolMeta {
+                kind: default_export.kind.clone(),
+                exported: true,
+                signature: Some(first_line_signature(&source, &default_export.node)),
+                line: default_export.node.start_position().row as u32 + 1,
+                range: crate::parser::node_range(&default_export.node),
+            });
+    }
 
     Ok(FileCallData {
         calls_by_symbol,
         exported_symbols,
         symbol_metadata,
+        default_export_symbol: default_export.map(|export| export.symbol),
         import_block,
         lang,
     })
+}
+
+#[derive(Debug, Clone)]
+struct DefaultExport<'tree> {
+    symbol: String,
+    synthetic: bool,
+    kind: SymbolKind,
+    node: Node<'tree>,
+}
+
+fn find_default_export<'tree>(
+    source: &str,
+    root: Node<'tree>,
+    path: &Path,
+    lang: LangId,
+) -> Option<DefaultExport<'tree>> {
+    if !matches!(lang, LangId::TypeScript | LangId::Tsx | LangId::JavaScript) {
+        return None;
+    }
+    find_default_export_inner(source, root, path)
+}
+
+fn find_default_export_inner<'tree>(
+    source: &str,
+    node: Node<'tree>,
+    path: &Path,
+) -> Option<DefaultExport<'tree>> {
+    if node.kind() == "export_statement" {
+        if let Some(default_export) = default_export_from_statement(source, node, path) {
+            return Some(default_export);
+        }
+    }
+
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        let child = cursor.node();
+        if let Some(default_export) = find_default_export_inner(source, child, path) {
+            return Some(default_export);
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn default_export_from_statement<'tree>(
+    source: &str,
+    node: Node<'tree>,
+    path: &Path,
+) -> Option<DefaultExport<'tree>> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    let mut saw_default = false;
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "default" => saw_default = true,
+            "function_declaration" | "generator_function_declaration" | "class_declaration"
+                if saw_default =>
+            {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    return Some(DefaultExport {
+                        symbol: source[name_node.byte_range()].to_string(),
+                        synthetic: false,
+                        kind: default_export_kind(&child),
+                        node: child,
+                    });
+                }
+                return Some(DefaultExport {
+                    symbol: synthetic_default_symbol(path),
+                    synthetic: true,
+                    kind: default_export_kind(&child),
+                    node: child,
+                });
+            }
+            "arrow_function"
+            | "function"
+            | "function_expression"
+            | "class"
+            | "class_expression"
+                if saw_default =>
+            {
+                return Some(DefaultExport {
+                    symbol: synthetic_default_symbol(path),
+                    synthetic: true,
+                    kind: default_export_kind(&child),
+                    node: child,
+                });
+            }
+            "identifier" | "type_identifier" | "property_identifier" if saw_default => {
+                return Some(DefaultExport {
+                    symbol: source[child.byte_range()].to_string(),
+                    synthetic: false,
+                    kind: SymbolKind::Function,
+                    node: child,
+                });
+            }
+            _ => {}
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn default_export_kind(node: &Node) -> SymbolKind {
+    if node.kind().contains("class") {
+        SymbolKind::Class
+    } else {
+        SymbolKind::Function
+    }
+}
+
+fn synthetic_default_symbol(path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    format!("<default:{file_name}>")
+}
+
+fn first_line_signature(source: &str, node: &Node) -> String {
+    let text = &source[node.byte_range()];
+    let first_line = text.lines().next().unwrap_or(text);
+    first_line
+        .trim_end()
+        .trim_end_matches('{')
+        .trim_end()
+        .to_string()
 }
 
 fn get_symbol_meta_from_data(file_data: &FileCallData, symbol_name: &str) -> (u32, Option<String>) {
