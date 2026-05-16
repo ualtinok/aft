@@ -71,4 +71,44 @@ describe("Pi Lane G plugin orchestration regressions", () => {
     ).toBe(false);
     expect(__test__.shouldPrepareOnnxRuntime({ semantic_search: false })).toBe(false);
   });
+
+  test("version mismatch handler downloads matching binary and hot-swaps pool", async () => {
+    const ensureCalls: string[] = [];
+    const replaceCalls: string[] = [];
+    const handler = __test__.createVersionMismatchHandler(
+      () => ({
+        replaceBinary: async (path: string) => {
+          replaceCalls.push(path);
+        },
+      }),
+      async (version?: string) => {
+        ensureCalls.push(version ?? "");
+        return "/cache/aft/v1.2.3/aft";
+      },
+    );
+
+    handler("1.0.0", "1.2.3");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ensureCalls).toEqual(["v1.2.3"]);
+    expect(replaceCalls).toEqual(["/cache/aft/v1.2.3/aft"]);
+  });
+
+  test("version mismatch handler only attempts one hot-swap per stale binary version", async () => {
+    const ensureCalls: string[] = [];
+    const handler = __test__.createVersionMismatchHandler(
+      () => ({ replaceBinary: async () => {} }),
+      async (version?: string) => {
+        ensureCalls.push(version ?? "");
+        return null;
+      },
+    );
+
+    handler("1.0.0", "1.2.3");
+    handler("1.0.0", "1.2.3");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ensureCalls).toEqual(["v1.2.3"]);
+  });
 });

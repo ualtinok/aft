@@ -43,7 +43,7 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
 
   if (hasOutline && hasZoom) {
     sections.push(
-      `**Web/URL access**: \`aft_outline({ url })\` first for structure, then \`aft_zoom({ url, symbol: "<heading>" })\` for the specific section.`,
+      `**Web/URL access**: \`aft_outline({ target: "<url>" })\` first for structure, then \`aft_zoom({ target: "<url>", symbol: "<heading>" })\` for the specific section.`,
     );
   }
 
@@ -70,7 +70,7 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
 
   if (hasBgBash) {
     sections.push(
-      `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. A completion reminder is delivered automatically — do not poll \`bash_status({ taskId })\`. Use \`bash_status\` only after the reminder arrives, or to inspect a task you already know is complete.`,
+      `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`task_id\`. A completion reminder is delivered automatically — do not poll \`bash_status({ task_id })\`. Use \`bash_status\` only after the reminder arrives, or to inspect a task you already know is complete.`,
     );
   }
 

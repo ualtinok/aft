@@ -22,7 +22,9 @@ export function readBinaryVersion(binaryPath: string): string | null {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
     });
-    const rawVersion = result.stdout?.trim();
+    const stdoutVersion = result.stdout?.trim();
+    const stderrVersion = result.stderr?.trim();
+    const rawVersion = stdoutVersion || stderrVersion;
     if (!rawVersion) return null;
     // `aft --version` outputs "aft 0.9.0" — extract just the version number
     return rawVersion.replace(/^aft\s+/, "");

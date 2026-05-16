@@ -6,7 +6,7 @@
 import type { AgentToolResult, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, resolveSessionId, textResult } from "./_shared.js";
+import { bridgeFor, callBridge, textResult } from "./_shared.js";
 import {
   accentPath,
   type RenderContextLike,
@@ -128,14 +128,17 @@ export function registerFsTools(pi: ExtensionAPI, ctx: PluginContext, surface: F
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
-        const sessionId = resolveSessionId(extCtx);
         // Single batched call so every file shares one op_id; one
         // `aft_safety undo` then restores the whole delete atomically.
-        const response = await bridge.send("delete_file", {
-          files: params.files,
-          recursive: params.recursive === true,
-          ...(sessionId ? { session_id: sessionId } : {}),
-        });
+        const response = await callBridge(
+          bridge,
+          "delete_file",
+          {
+            files: params.files,
+            recursive: params.recursive === true,
+          },
+          extCtx,
+        );
         const deletedEntries = (response.deleted as Array<{ file: string }> | undefined) ?? [];
         const skipped =
           (response.skipped_files as Array<{ file: string; reason: string }> | undefined) ?? [];

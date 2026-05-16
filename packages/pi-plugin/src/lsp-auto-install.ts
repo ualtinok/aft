@@ -19,7 +19,7 @@
  *           installed, log a warning and keep the existing version.
  *           Otherwise skip + warn.
  *
- *   3. Spawn `bun add <pkg>@<version> --cwd <cache_dir> --ignore-scripts`
+ *   3. Spawn `npm install --no-save <pkg>@<version> --ignore-scripts`
  *      in the background. Drop a lockfile while running. Log progress.
  *
  *   4. The newly-installed binary will be picked up on the user's NEXT
@@ -204,7 +204,7 @@ async function resolveTargetVersion(
 }
 
 /**
- * Spawn `bun add <pkg>@<version>` in the cache dir.
+ * Spawn `npm install --no-save <pkg>@<version>` in the cache dir.
  *
  * Uses `--ignore-scripts` to neutralize lifecycle hooks (the v0.16 audit
  * hardening). Output goes to plugin log.
@@ -225,9 +225,10 @@ function runInstall(
       return;
     }
 
-    const child = spawn("bun", ["add", target, "--cwd", cwd, "--ignore-scripts", "--silent"], {
+    const child = spawn("npm", ["install", "--no-save", "--ignore-scripts", "--silent", target], {
       stdio: ["ignore", "pipe", "pipe"],
-      // No PATH manipulation — uses the same `bun` that's running this plugin.
+      cwd,
+      // Pi runs on Node; npm is the explicit package manager for this runtime.
     });
     child.unref();
 
@@ -257,7 +258,7 @@ function runInstall(
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
     child.stdout?.on("data", () => {
-      // Suppress stdout — npm-bun chatter is noisy.
+      // Suppress stdout — npm chatter is noisy.
     });
     child.stderr?.on("data", (chunk) => {
       const text = String(chunk);

@@ -60,6 +60,19 @@ describe("fs tool adapters", () => {
     );
   });
 
+  test("aft_delete throws when bridge reports success=false", async () => {
+    const { api, tools } = makeMockApi();
+    const { bridge } = makeMockBridge(() => ({
+      success: false,
+      message: "Delete failed in bridge",
+    }));
+    registerFsTools(api, makePluginContext(bridge), { delete: true, move: false });
+
+    await expect(executeTool(tools.get("aft_delete")!, { files: ["locked.ts"] })).rejects.toThrow(
+      "Delete failed in bridge",
+    );
+  });
+
   test("aft_move maps filePath to file and destination to destination", async () => {
     const { api, tools } = makeMockApi();
     const { bridge, calls } = makeMockBridge(() => ({ success: true, moved: true }));

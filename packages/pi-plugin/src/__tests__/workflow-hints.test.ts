@@ -15,6 +15,8 @@ describe("Pi buildWorkflowHints", () => {
     expect(out).not.toBeNull();
     expect(out).toContain("## Prefer AFT tools for token efficiency");
     expect(out).toContain("**Web/URL access**");
+    expect(out).toContain('`aft_outline({ target: "<url>" })`');
+    expect(out).not.toContain("aft_outline({ url })");
     expect(out).toContain("**Code exploration**");
     expect(out).toContain("For exact identifiers (`useState`, function names, env vars)");
     expect(out).toContain(
@@ -26,6 +28,9 @@ describe("Pi buildWorkflowHints", () => {
     // bash_status back-to-back. Mirrors OpenCode plugin parity.
     expect(out).toContain("A completion reminder is delivered automatically");
     expect(out).toContain("do not poll");
+    expect(out).toContain("`task_id`");
+    expect(out).toContain("`bash_status({ task_id })`");
+    expect(out).not.toContain("taskId");
   });
 
   test("omits bg-bash section when background is disabled", () => {

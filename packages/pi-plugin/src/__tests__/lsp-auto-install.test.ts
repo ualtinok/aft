@@ -233,7 +233,7 @@ describe("runAutoInstall", () => {
       fakeFetch(),
     );
     // Synchronously the install was kicked off (installsStarted >= 1 before the
-    // promise settles). The actual `bun add` will fail (no network in test) but
+    // promise settles). The actual `npm install` will fail (no network in test) but
     // that is logged, not surfaced here.
     expect(result.installsStarted).toBeGreaterThan(0);
   });
@@ -252,8 +252,12 @@ describe("runAutoInstall", () => {
     expect(result.installsStarted).toBe(0);
   });
 
-  test("runInstall unreferences spawned bun children", () => {
+  test("runInstall uses npm for Pi and unreferences spawned children", () => {
     const source = readFileSync(new URL("../lsp-auto-install.ts", import.meta.url), "utf8");
+    expect(source).toContain(
+      'spawn("npm", ["install", "--no-save", "--ignore-scripts", "--silent", target]',
+    );
+    expect(source).not.toContain('spawn("bun"');
     expect(source).toContain("child.unref()");
   });
 });

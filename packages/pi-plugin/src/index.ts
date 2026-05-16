@@ -35,6 +35,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   BridgePool,
+  ensureBinary,
   ensureOnnxRuntime,
   findBinary,
   getManualInstallHint,
@@ -55,7 +56,7 @@ import {
   resolveExperimentalConfigForConfigure,
   resolveLspConfigForConfigure,
 } from "./config.js";
-import { bridgeLogger, log, warn } from "./logger.js";
+import { bridgeLogger, error, log, warn } from "./logger.js";
 import { abortInFlightAutoInstalls, runAutoInstall } from "./lsp-auto-install.js";
 import {
   abortInFlightGithubInstalls,
@@ -101,6 +102,58 @@ type BashLongRunningPayload = {
 type BridgePendingState = {
   hasPendingRequests(): boolean;
 };
+
+type VersionMismatchPool = {
+  replaceBinary(path: string): Promise<void>;
+};
+
+function createVersionMismatchHandler(
+  getPool: () => VersionMismatchPool | undefined,
+  ensureCompatibleBinary: (version?: string) => Promise<string | null> = ensureBinary,
+) {
+  // Track which binary version we already attempted to upgrade from.
+  // Prevents the loop: mismatch → fire-and-forget download → replaceBinary kills bridge →
+  // respawn with same binary → mismatch fires again → kills again → 3-attempt limit.
+  let versionUpgradeAttempted: string | null = null;
+
+  return (binaryVersion: string, minVersion: string) => {
+    if (versionUpgradeAttempted === binaryVersion) {
+      log(`Version ${binaryVersion} < ${minVersion} but upgrade already attempted — continuing`);
+      return;
+    }
+    versionUpgradeAttempted = binaryVersion;
+    warn(
+      `WARNING: aft binary v${binaryVersion} is older than plugin v${minVersion}. ` +
+        "Some features may not work. Attempting to download a compatible binary...",
+    );
+    // Fire-and-forget: try to download matching version and hot-swap future bridge spawns.
+    ensureCompatibleBinary(`v${minVersion}`).then(
+      (path) => {
+        if (!path) {
+          warn(`Could not find or download v${minVersion}. Continuing with v${binaryVersion}.`);
+          return;
+        }
+        const pool = getPool();
+        if (!pool) {
+          warn(`Found/downloaded compatible binary at ${path}, but bridge pool is not ready.`);
+          return;
+        }
+        log(`Found/downloaded compatible binary at ${path}. Replacing running bridges...`);
+        pool.replaceBinary(path).then(
+          () => {
+            log("Binary replaced successfully. New bridges will use the updated binary.");
+          },
+          (err) => error("Failed to replace binary:", err),
+        );
+      },
+      (err) => {
+        error(
+          `Auto-download failed: ${(err as Error).message}. Install manually: cargo install agent-file-tools@${minVersion}`,
+        );
+      },
+    );
+  };
+}
 
 /** Plugin version from package.json. */
 const PLUGIN_VERSION: string = (() => {
@@ -472,11 +525,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     warn(`[lsp] auto-install setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  let pool: BridgePool;
   const poolOptions: import("@cortexkit/aft-bridge").PoolOptions & {
     onBashLongRunning: (reminder: BashLongRunningPayload, bridge: BridgePendingState) => void;
   } = {
     errorPrefix: "[aft-pi]",
     minVersion: PLUGIN_VERSION,
+    onVersionMismatch: createVersionMismatchHandler(() => pool),
     onConfigureWarnings: async ({ projectRoot, sessionId, client, warnings }) => {
       const pendingWarnings = sessionId ? drainPendingEagerWarnings(projectRoot) : [];
       await handleConfigureWarningsForSession({
@@ -511,7 +566,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       );
     },
   };
-  const pool = new BridgePool(binaryPath, poolOptions, configOverrides);
+  pool = new BridgePool(binaryPath, poolOptions, configOverrides);
   const ctx: PluginContext = { pool, config, storageDir };
 
   // Settle the ONNX runtime download promise (started above) and patch the
@@ -731,4 +786,5 @@ export const __test__ = {
   resolveToolSurface,
   handleConfigureWarningsForSession,
   shouldPrepareOnnxRuntime,
+  createVersionMismatchHandler,
 };

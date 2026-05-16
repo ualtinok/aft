@@ -54,6 +54,13 @@ describe("readBinaryVersion", () => {
     expect(readBinaryVersion(fakeBin)).toBeNull();
   });
 
+  test("parses stderr-only version output when stdout is empty", () => {
+    const fakeBin = join(tmpDir, "fake-aft.sh");
+    writeFileSync(fakeBin, '#!/bin/sh\necho "aft 0.74.0" >&2\n');
+    chmodSync(fakeBin, 0o755);
+    expect(readBinaryVersion(fakeBin)).toBe("0.74.0");
+  });
+
   test("returns null for binaries that fail", () => {
     const fakeBin = join(tmpDir, "fake-aft.sh");
     writeFileSync(fakeBin, "#!/bin/sh\nexit 1\n");
