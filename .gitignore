@@ -60,7 +60,11 @@ tests/docker/fixtures/aft-linux-x64
 # E2E test fixture binary (locally-built aft, not committed)
 packages/pi-plugin/src/__tests__/e2e/fixtures/aft-bin
 packages/opencode-plugin/src/__tests__/e2e/fixtures/aft-bin
-.alfonso/
+# Ignore everything in .alfonso/ EXCEPT release-notes/ (CI reads from there).
+# Must use `.alfonso/*` rather than `.alfonso/` so git descends into the
+# directory and can re-include nested paths.
+.alfonso/*
+!.alfonso/release-notes/
 
 # Local smoke-test fixtures used during dogfooding investigations.
 # Findings get distilled into proper e2e tests under

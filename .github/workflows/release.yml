@@ -455,8 +455,19 @@ jobs:
           sha256sum aft-* > checksums.sha256
           cat checksums.sha256
 
+      - name: Verify curated release notes exist
+        run: |
+          notes_file=".alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "::error::Curated release notes missing: $notes_file"
+            echo "Draft them under .alfonso/release-notes/ before tagging the release."
+            exit 1
+          fi
+          echo "Using $notes_file as the release body."
+          wc -l "$notes_file"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: .alfonso/release-notes/${{ github.ref_name }}.md
           files: release-assets/*
