@@ -54,9 +54,17 @@ describe("cached LSP validation before lsp_paths_extra", () => {
     const binDir = join(pkgDir, "bin");
     mkdirSync(binDir, { recursive: true });
     writeFileSync(join(binDir, "clangd"), "tampered");
+    // Use binarySha256 (v0.27 metadata shape). Legacy sha256-only entries
+    // trigger a TOFU migration that accepts the current binary hash, so a
+    // tampered binary with a stale sha256 alone would no longer quarantine.
+    // binarySha256 is the authoritative field and must match exactly.
     writeFileSync(
       join(pkgDir, ".aft-installed"),
-      JSON.stringify({ version: "21.1.0", installedAt: "now", sha256: "0".repeat(64) }),
+      JSON.stringify({
+        version: "21.1.0",
+        installedAt: "now",
+        binarySha256: "0".repeat(64),
+      }),
     );
 
     const result = runGithubAutoInstall(new Set(), {
