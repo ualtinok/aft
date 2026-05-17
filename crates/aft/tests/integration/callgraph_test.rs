@@ -507,6 +507,134 @@ export function runWorkspaceImport(): string {
 }
 
 #[test]
+fn callgraph_resolves_workspace_package_imports_past_nested_lockfile() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("package.json"),
+        r#"{"private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+
+    let bridge = root.join("packages/aft-bridge");
+    let opencode = root.join("packages/opencode-plugin");
+    let pi = root.join("packages/pi-plugin");
+    fs::create_dir_all(bridge.join("src")).unwrap();
+    fs::create_dir_all(opencode.join("src/tools")).unwrap();
+    fs::create_dir_all(pi.join("src/tools")).unwrap();
+
+    fs::write(
+        bridge.join("package.json"),
+        r#"{"name":"@cortexkit/aft-bridge","exports":{".":{"import":"./dist/index.js"}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        bridge.join("src/index.ts"),
+        r#"export { fetchUrlToTempFile } from "./url-fetch.js";
+export { formatZoomText } from "./zoom-format.js";
+"#,
+    )
+    .unwrap();
+    fs::write(
+        bridge.join("src/url-fetch.ts"),
+        r#"export function fetchUrlToTempFile(url: string): string {
+  return url;
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        bridge.join("src/zoom-format.ts"),
+        r#"export function formatZoomText(text: string): string {
+  return text;
+}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        opencode.join("package.json"),
+        r#"{"name":"@cortexkit/aft-opencode","dependencies":{"@cortexkit/aft-bridge":"0.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(opencode.join("bun.lock"), "").unwrap();
+    fs::write(
+        opencode.join("src/tools/reading.ts"),
+        r#"import { fetchUrlToTempFile, formatZoomText } from "@cortexkit/aft-bridge";
+
+export function registerOpenCodeReadingTools(): string {
+  const path = fetchUrlToTempFile("https://example.com/opencode");
+  return formatZoomText(path);
+}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        pi.join("package.json"),
+        r#"{"name":"@cortexkit/aft-pi","dependencies":{"@cortexkit/aft-bridge":"0.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        pi.join("src/tools/reading.ts"),
+        r#"import { fetchUrlToTempFile, formatZoomText } from "@cortexkit/aft-bridge";
+
+export function registerPiReadingTools(): string {
+  const path = fetchUrlToTempFile("https://example.com/pi");
+  return formatZoomText(path);
+}
+"#,
+    )
+    .unwrap();
+
+    let mut aft = AftProcess::spawn();
+    let root_display = root.display().to_string();
+    let resp = aft.send(&format!(
+        r#"{{"id":"1","command":"configure","project_root":"{}"}}"#,
+        root_display
+    ));
+    assert_eq!(
+        resp["success"], true,
+        "configure should succeed: {:?}",
+        resp
+    );
+
+    for (id, file, symbol) in [
+        ("2", bridge.join("src/url-fetch.ts"), "fetchUrlToTempFile"),
+        ("3", bridge.join("src/zoom-format.ts"), "formatZoomText"),
+    ] {
+        let resp = aft.send(&format!(
+            r#"{{"id":"{}","command":"callers","file":"{}","symbol":"{}","depth":1}}"#,
+            id,
+            file.display(),
+            symbol
+        ));
+        assert_eq!(resp["success"], true, "callers should succeed: {:?}", resp);
+        assert_eq!(
+            resp["total_callers"], 2,
+            "both workspace package consumers should call {symbol}: {resp:?}"
+        );
+
+        let callers = resp["callers"].as_array().expect("callers array");
+        for expected_file in [
+            "packages/opencode-plugin/src/tools/reading.ts",
+            "packages/pi-plugin/src/tools/reading.ts",
+        ] {
+            assert!(
+                callers.iter().any(|group| group["file"]
+                    .as_str()
+                    .unwrap_or("")
+                    .ends_with(expected_file)),
+                "{symbol} caller should include {expected_file}: {:?}",
+                callers
+            );
+        }
+    }
+
+    aft.shutdown();
+}
+
+#[test]
 fn callgraph_prefers_workspace_package_source_over_existing_dist() {
     let temp = tempdir().unwrap();
     let root = temp.path();

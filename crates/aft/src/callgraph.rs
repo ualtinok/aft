@@ -2714,11 +2714,13 @@ fn find_workspace_root(from_dir: &Path) -> Option<PathBuf> {
 }
 
 fn is_workspace_root(dir: &Path) -> bool {
+    // Workspace package resolution depends on a package.json workspaces
+    // declaration. Package-manager lockfiles can also live inside nested
+    // package members; treating those as workspace roots stops the upward
+    // search before reaching the actual monorepo root.
     package_json_value(dir)
         .and_then(|value| value.get("workspaces").cloned())
         .is_some()
-        || dir.join("bun.lock").is_file()
-        || dir.join("package-lock.json").is_file()
 }
 
 fn resolve_workspace_package(workspace_root: &Path, package_name: &str) -> Option<PathBuf> {
