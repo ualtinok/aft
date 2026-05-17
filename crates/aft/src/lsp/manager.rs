@@ -116,7 +116,11 @@ pub fn post_edit_entry_is_fresh(
 
     match entry.version {
         Some(version) => version >= target_version,
-        None => true,
+        // Unversioned publishDiagnostics payloads cannot prove which document
+        // state they describe. Epoch advancement only proves arrival order; an
+        // old analysis result can still arrive after our pre-snapshot. Treat as
+        // pending/partial rather than fresh.
+        None => false,
     }
 }
 
@@ -756,6 +760,39 @@ impl LspManager {
         snapshots
     }
 
+    /// True when the current diagnostic entry for `server_key` can be tied to
+    /// that server's current in-memory document version for `file_path`.
+    ///
+    /// File-mode `lsp_diagnostics` uses this for push-only fallback after it
+    /// has synced/opened the document. Versioned publishes are accepted when
+    /// they match the current document version; unversioned publishes are not
+    /// accepted as fresh because epoch/wall-clock ordering alone is racy.
+    pub fn diagnostic_entry_is_fresh_for_document(
+        &self,
+        file_path: &Path,
+        server_key: &ServerKey,
+        pre: PreEditSnapshot,
+    ) -> bool {
+        let lookup_path = normalize_lookup_path(file_path);
+        let Some(entry) = self
+            .diagnostics
+            .entries_for_file(&lookup_path)
+            .into_iter()
+            .find_map(|(key, entry)| if key == server_key { Some(entry) } else { None })
+        else {
+            return false;
+        };
+
+        let target_version = self
+            .documents
+            .get(server_key)
+            .and_then(|store| store.version(&lookup_path))
+            .or(pre.document_version_at_capture)
+            .unwrap_or(0);
+
+        matches!(entry.version, Some(version) if version >= target_version)
+    }
+
     /// Wait for FRESH per-server diagnostics that match the just-sent
     /// document version. This is the v0.17.3 post-edit path that fixes the
     /// stale-diagnostics bug: instead of returning whatever is in the cache
@@ -1083,13 +1120,12 @@ impl LspManager {
             Err(err) => return Err(err),
         };
 
-        // Extract the items list. Partial responses stream via $/progress
-        // notifications which we don't subscribe to — treat them as soft
-        // empty (caller will see complete: true with files_reported empty,
-        // matching "got a partial response, no full report").
-        let items = match result {
-            lsp_types::WorkspaceDiagnosticReportResult::Report(report) => report.items,
-            lsp_types::WorkspaceDiagnosticReportResult::Partial(_) => Vec::new(),
+        // Extract the items list. Partial responses are not a complete
+        // workspace view, but the partial payload can still contain useful
+        // document reports; ingest those while surfacing complete=false.
+        let (items, complete) = match result {
+            lsp_types::WorkspaceDiagnosticReportResult::Report(report) => (report.items, true),
+            lsp_types::WorkspaceDiagnosticReportResult::Partial(partial) => (partial.items, false),
         };
 
         // Ingest each file report into the diagnostics store.
@@ -1121,7 +1157,7 @@ impl LspManager {
         Ok(PullWorkspaceResult {
             server_key: server_key.clone(),
             files_reported,
-            complete: true,
+            complete,
             cancelled: false,
             supports_workspace: true,
         })

@@ -157,6 +157,20 @@ impl LspClient {
         unsafe {
             use std::os::unix::process::CommandExt;
             command.pre_exec(|| {
+                #[cfg(target_os = "linux")]
+                {
+                    // If aft is killed with SIGKILL, Rust cleanup and our
+                    // signal-handler thread never run. Ask the kernel to kill
+                    // the LSP process group as soon as the parent dies. This is
+                    // best-effort Linux coverage for the otherwise unhandleable
+                    // parent-death path.
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::getppid() == 1 {
+                        return Err(io::Error::other("parent died before LSP spawn completed"));
+                    }
+                }
                 if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
@@ -164,9 +178,8 @@ impl LspClient {
             });
         }
 
-        let mut child = command.spawn()?;
+        let mut child = child_registry.spawn_tracked(&mut command)?;
         let child_pid = child.id();
-        child_registry.track(child_pid);
 
         let stdout = child
             .stdout

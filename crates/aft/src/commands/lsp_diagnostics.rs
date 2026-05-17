@@ -10,6 +10,7 @@ use crate::lsp::diagnostics::{DiagnosticSeverity, StoredDiagnostic};
 use crate::lsp::manager::{
     EnsureServerOutcomes, PullFileOutcome, PullFileResult, ServerAttemptResult,
 };
+use crate::lsp::roots::find_workspace_root;
 use crate::lsp::roots::ServerKey;
 use crate::protocol::{RawRequest, Response};
 
@@ -162,7 +163,16 @@ fn handle_file_mode(
         );
     }
 
-    // Step 2: pull diagnostics from every server that supports it. Track
+    // Step 2: snapshot before syncing/opening so push fallback freshness is
+    // anchored to LSP document versions, not wall-clock arrival time. A late
+    // publish for an older document version can arrive inside our wait window;
+    // version matching below rejects it.
+    let pre_push_snapshot = {
+        let lsp = ctx.lsp();
+        lsp.snapshot_pre_edit_state(&canonical)
+    };
+
+    // Step 3: pull diagnostics from every server that supports it. Track
     // which servers we got a fresh result for.
     let pull_results = {
         let mut lsp = ctx.lsp();
@@ -176,15 +186,14 @@ fn handle_file_mode(
     };
     update_status_with_pull(&mut server_status, &pull_results);
 
-    // Step 3: for servers that didn't support pull, drain push events for
+    // Step 4: for servers that didn't support pull, drain push events for
     // the requested wait_ms. Empty publishes are preserved as "checked
     // clean" so we can read them back.
-    let push_wait_started_at = Instant::now();
     if needs_push_wait(&pull_results) && wait_ms > 0 {
         wait_for_push(ctx, wait_ms);
     }
 
-    // Step 4: read the cache and build the response.
+    // Step 5: read the cache and build the response.
     //
     // v0.17.3 honest-reporting fix: `complete` is true only if every
     // expected server gave us a deterministically-fresh result for this
@@ -210,11 +219,8 @@ fn handle_file_mode(
             .successful
             .iter()
             .filter(|key| {
-                lsp.diagnostics_store_for_test().has_publish_for_file_after(
-                    key,
-                    &canonical,
-                    push_wait_started_at,
-                )
+                let pre = pre_push_snapshot.get(key).copied().unwrap_or_default();
+                lsp.diagnostic_entry_is_fresh_for_document(&canonical, key, pre)
             })
             .cloned()
             .collect()
@@ -483,8 +489,7 @@ fn compute_unchecked_files(ctx: &AppContext, dir: &Path) -> (Vec<String>, bool) 
         let path = entry.path();
         // Only track files that have a registered LSP server for their
         // extension — listing every random file is noise.
-        let has_server = !crate::lsp::registry::servers_for_file(path, &config).is_empty();
-        if !has_server {
+        if crate::lsp::registry::servers_for_file(path, &config).is_empty() {
             continue;
         }
 
@@ -501,12 +506,23 @@ fn compute_unchecked_files(ctx: &AppContext, dir: &Path) -> (Vec<String>, bool) 
 
     let mut unchecked = Vec::new();
     for path in resolvable_files {
-        let known = {
+        let missing_any_matching_server = {
             let lsp = ctx.lsp();
-            lsp.diagnostics_store_for_test()
-                .has_any_report_for_file(&path)
+            crate::lsp::registry::servers_for_file(&path, &config)
+                .into_iter()
+                .any(|def| {
+                    let Some(root) = find_workspace_root(&path, &def.root_markers) else {
+                        return true;
+                    };
+                    let key = ServerKey {
+                        kind: def.kind,
+                        root,
+                    };
+                    !lsp.diagnostics_store_for_test()
+                        .has_report_for_server_file(&key, &path)
+                })
         };
-        if !known {
+        if missing_any_matching_server {
             unchecked.push(path.display().to_string());
         }
     }

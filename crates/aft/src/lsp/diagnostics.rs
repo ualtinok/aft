@@ -238,6 +238,13 @@ impl DiagnosticsStore {
         self.entries.keys().any(|(_, f)| f == file)
     }
 
+    /// True if this exact server instance has reported (even an empty result)
+    /// for this exact file.
+    pub fn has_report_for_server_file(&self, server: &ServerKey, file: &Path) -> bool {
+        self.entries
+            .contains_key(&(server.clone(), file.to_path_buf()))
+    }
+
     /// True if this exact server instance published/replaced diagnostics for
     /// this exact file after `since`. This is intentionally per `(kind, root,
     /// file)`; a publish for another file must not prove freshness here.

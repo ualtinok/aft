@@ -46,6 +46,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -57,7 +58,6 @@ import {
   readVersionCheck,
   shouldRecheckVersion,
   withInstallLock,
-  writeInstalledMetaIn,
   writeVersionCheck,
 } from "./lsp-cache.js";
 import {
@@ -94,6 +94,16 @@ function ghExtractDir(spec: GithubServerSpec): string {
   return join(ghPackageDir(spec), "extracted");
 }
 
+const INSTALLED_META_FILE = ".aft-installed";
+
+interface GithubInstalledMeta {
+  version: string;
+  installedAt: string;
+  sha256?: string;
+  binarySha256?: string;
+  archiveSha256?: string;
+}
+
 /** Final binary path under our cache. */
 export function ghBinaryPath(spec: GithubServerSpec, platform: Platform): string {
   const ext = platform === "win32" ? ".exe" : "";
@@ -114,6 +124,51 @@ export function isGithubInstalled(spec: GithubServerSpec, platform: Platform): b
 function ghBinaryCandidates(spec: GithubServerSpec, platform: Platform): string[] {
   if (platform !== "win32") return [spec.binary];
   return [spec.binary, `${spec.binary}.cmd`, `${spec.binary}.exe`, `${spec.binary}.bat`];
+}
+
+function readGithubInstalledMetaIn(installDir: string): GithubInstalledMeta | null {
+  try {
+    const path = join(installDir, INSTALLED_META_FILE);
+    if (!statSync(path).isFile()) return null;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<GithubInstalledMeta>;
+    if (typeof parsed.version !== "string" || parsed.version.length === 0) return null;
+    return {
+      version: parsed.version,
+      installedAt: typeof parsed.installedAt === "string" ? parsed.installedAt : "",
+      ...(typeof parsed.sha256 === "string" && parsed.sha256.length > 0
+        ? { sha256: parsed.sha256 }
+        : {}),
+      ...(typeof parsed.binarySha256 === "string" && parsed.binarySha256.length > 0
+        ? { binarySha256: parsed.binarySha256 }
+        : {}),
+      ...(typeof parsed.archiveSha256 === "string" && parsed.archiveSha256.length > 0
+        ? { archiveSha256: parsed.archiveSha256 }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeGithubInstalledMetaIn(
+  installDir: string,
+  version: string,
+  binarySha256: string,
+  archiveSha256?: string,
+): void {
+  try {
+    mkdirSync(installDir, { recursive: true });
+    const meta: GithubInstalledMeta = {
+      version,
+      installedAt: new Date().toISOString(),
+      sha256: binarySha256,
+      binarySha256,
+      ...(archiveSha256 ? { archiveSha256 } : {}),
+    };
+    writeFileSync(join(installDir, INSTALLED_META_FILE), JSON.stringify(meta), "utf8");
+  } catch (err) {
+    warn(`[lsp] failed to write github installed metadata in ${installDir}: ${err}`);
+  }
 }
 
 /* ─────────────────────────── per-call config ─────────────────────────── */
@@ -633,7 +688,7 @@ export function validateExtraction(stagingRoot: string): void {
  *   4. Atomic rename: `staging → destDir`. Any prior `destDir` is removed first.
  *   5. Always cleanup staging on any failure.
  */
-function precheckArchiveSize(archivePath: string, archiveType: string): void {
+export function precheckArchiveContents(archivePath: string, archiveType: string): void {
   let totalBytes = 0;
   if (archiveType === "zip") {
     const out = execFileSync("unzip", ["-l", archivePath], { encoding: "utf8" });
@@ -642,6 +697,9 @@ function precheckArchiveSize(archivePath: string, archiveType: string): void {
   } else {
     const out = execFileSync("tar", ["-tvf", archivePath], { encoding: "utf8" });
     for (const line of out.split("\n")) {
+      if (line.startsWith("h")) {
+        throw new Error(`archive contains hardlink entry: ${line.trim()}`);
+      }
       const parts = line.trim().split(/\s+/);
       if (parts.length >= 6) {
         const numeric = parts
@@ -672,7 +730,7 @@ function extractArchiveSafely(archivePath: string, destDir: string, archiveType:
   mkdirSync(stagingDir, { recursive: true });
 
   try {
-    precheckArchiveSize(archivePath, archiveType);
+    precheckArchiveContents(archivePath, archiveType);
     runPlatformExtractor(archivePath, stagingDir, archiveType);
     validateExtraction(stagingDir);
 
@@ -709,7 +767,8 @@ function quarantineCachedGithubInstall(spec: GithubServerSpec, reason: string): 
 }
 
 function validateCachedGithubInstall(spec: GithubServerSpec, platform: Platform): boolean {
-  const meta = readInstalledMetaIn(ghPackageDir(spec));
+  const packageDir = ghPackageDir(spec);
+  const meta = readGithubInstalledMetaIn(packageDir);
   const binaryPath = ghBinaryCandidates(spec, platform)
     .map((candidate) => join(ghBinDir(spec), candidate))
     .find((candidate) => {
@@ -719,13 +778,31 @@ function validateCachedGithubInstall(spec: GithubServerSpec, platform: Platform)
         return false;
       }
     });
-  if (!meta?.sha256 || !meta.version || !isSafeVersion(meta.version) || !binaryPath) {
+  if (!meta?.version || !isSafeVersion(meta.version) || !binaryPath) {
     quarantineCachedGithubInstall(spec, "missing/unsafe metadata or binary");
     return false;
   }
   const currentHash = sha256OfFileSync(binaryPath);
-  if (currentHash !== meta.sha256) {
-    quarantineCachedGithubInstall(spec, `recorded ${meta.sha256}, current ${currentHash}`);
+  const recordedBinaryHash = meta.binarySha256 ?? meta.sha256;
+  if (recordedBinaryHash && currentHash === recordedBinaryHash) {
+    if (meta.sha256 !== currentHash || meta.binarySha256 !== currentHash) {
+      writeGithubInstalledMetaIn(packageDir, meta.version, currentHash, meta.archiveSha256);
+    }
+    return true;
+  }
+
+  if (meta.sha256 && !meta.binarySha256 && !meta.archiveSha256) {
+    writeGithubInstalledMetaIn(packageDir, meta.version, currentHash, meta.sha256);
+    return true;
+  }
+
+  if (!recordedBinaryHash) {
+    quarantineCachedGithubInstall(spec, "missing binary sha256 metadata");
+    return false;
+  }
+
+  if (currentHash !== recordedBinaryHash) {
+    quarantineCachedGithubInstall(spec, `recorded ${recordedBinaryHash}, current ${currentHash}`);
     return false;
   }
   return true;
@@ -782,7 +859,7 @@ function runPlatformExtractor(archivePath: string, destDir: string, archiveType:
 
 /**
  * Run the download + extract + binary-place flow for a single server.
- * Returns the archive's SHA-256 on success, or null on any failure.
+ * Returns archive and final-binary SHA-256 hashes on success, or null on any failure.
  *
  * Audit v0.17 #1: caller persists the hash in `.aft-installed` for TOFU
  * verification on subsequent installs of the same tag.
@@ -795,7 +872,7 @@ async function downloadAndInstall(
   arch: Arch,
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<{ archiveSha256: string; binarySha256: string } | null> {
   const version = stripTagV(tag);
   const expected = spec.resolveAsset(platform, arch, version);
   if (!expected) {
@@ -836,12 +913,14 @@ async function downloadAndInstall(
   }
   log(`[lsp] ${spec.id} ${tag} sha256=${archiveSha256}`);
 
-  const previousMeta = readInstalledMetaIn(ghPackageDir(spec));
-  if (previousMeta && previousMeta.version === tag && previousMeta.sha256) {
-    if (previousMeta.sha256 !== archiveSha256) {
+  const previousMeta = readGithubInstalledMetaIn(ghPackageDir(spec));
+  const previousArchiveSha256 =
+    previousMeta?.archiveSha256 ?? (previousMeta?.binarySha256 ? undefined : previousMeta?.sha256);
+  if (previousMeta && previousMeta.version === tag && previousArchiveSha256) {
+    if (previousArchiveSha256 !== archiveSha256) {
       error(
         `[lsp] ${spec.id} ${tag}: TOFU sha256 mismatch — refusing install. ` +
-          `Previously installed sha256=${previousMeta.sha256}, downloaded sha256=${archiveSha256}. ` +
+          `Previously installed archive sha256=${previousArchiveSha256}, downloaded sha256=${archiveSha256}. ` +
           `This means the published release for tag ${tag} changed. Investigate before proceeding.`,
       );
       try {
@@ -885,7 +964,9 @@ async function downloadAndInstall(
   }
 
   log(`[lsp] installed ${spec.id} ${tag} at ${targetBinary}`);
-  return archiveSha256;
+  const binarySha256 = await sha256OfFile(targetBinary);
+  log(`[lsp] ${spec.id} ${tag} binary_sha256=${binarySha256}`);
+  return { archiveSha256, binarySha256 };
 }
 
 /* ─────────────────────────── per-server flow (audit #2) ─────────────────────────── */
@@ -944,7 +1025,7 @@ async function ensureGithubInstalled(
 
     // Hold the lock through the entire download+extract. Errors are logged
     // but we still return `started: true` so the caller counts the attempt.
-    const archiveSha256 = await downloadAndInstall(
+    const hashes = await downloadAndInstall(
       spec,
       tag,
       assets,
@@ -956,12 +1037,10 @@ async function ensureGithubInstalled(
       error(`[lsp] github install ${spec.id} crashed: ${err}`);
       return null;
     });
-    if (!archiveSha256) {
+    if (!hashes) {
       return { started: true, reason: "install failed (see plugin log)" };
     }
-    // Audit v0.17 #4 + #1: record the tag and archive sha256 for future
-    // pin-change detection (#4) and TOFU verification (#1).
-    writeInstalledMetaIn(ghPackageDir(spec), tag, archiveSha256);
+    writeGithubInstalledMetaIn(ghPackageDir(spec), tag, hashes.binarySha256, hashes.archiveSha256);
     return { started: true };
   });
 
@@ -1178,5 +1257,5 @@ export {
   GITHUB_LSP_TABLE,
   type GithubServerSpec,
   type Platform,
-  precheckArchiveSize as _precheckArchiveSizeForTesting,
+  precheckArchiveContents as _precheckArchiveSizeForTesting,
 };

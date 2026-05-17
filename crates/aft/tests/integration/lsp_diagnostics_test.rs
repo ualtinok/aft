@@ -1414,6 +1414,40 @@ fn post_edit_wait_rejects_stale_pre_edit_publish() {
 }
 
 #[test]
+fn post_edit_wait_rejects_unversioned_epoch_only_publish() {
+    use aft::lsp::diagnostics::{DiagnosticEntry, StoredDiagnostic};
+    use aft::lsp::manager::{post_edit_entry_is_fresh, PreEditSnapshot};
+
+    let file = PathBuf::from("/tmp/aft-unversioned.rs");
+    let unversioned = DiagnosticEntry {
+        diagnostics: vec![StoredDiagnostic {
+            file,
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 2,
+            severity: DiagnosticSeverity::Error,
+            message: "unversioned".into(),
+            code: None,
+            source: Some("fake".into()),
+        }],
+        epoch: 8,
+        result_id: None,
+        version: None,
+    };
+
+    let pre_edit = PreEditSnapshot {
+        epoch: 7,
+        document_version_at_capture: Some(4),
+    };
+
+    assert!(
+        !post_edit_entry_is_fresh(&unversioned, 5, pre_edit),
+        "epoch advancement alone must not prove freshness for unversioned publishes"
+    );
+}
+
+#[test]
 fn push_only_per_file_freshness() {
     use aft::lsp::diagnostics::DiagnosticsStore;
 
@@ -1465,6 +1499,53 @@ fn directory_mode_with_walk_truncation_reports_complete_false() {
     assert_eq!(
         json["unchecked_files"].as_array().expect("unchecked").len(),
         50
+    );
+}
+
+#[test]
+fn directory_mode_requires_each_matching_server_to_cover_file() {
+    let (_temp_dir, root, files) = typescript_workspace_with_files(&["foo.ts"]);
+    let source = &files[0];
+    fs::write(root.join("biome.json"), "{}\n").expect("write biome config");
+    let config = Config {
+        project_root: Some(root.clone()),
+        ..Config::default()
+    };
+    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
+    {
+        let mut lsp = ctx.lsp();
+        // TypeScript and Biome both match .ts. Only Biome is allowed to start,
+        // so a Biome cache entry must not make the file look fully covered.
+        lsp.override_binary(
+            ServerKind::TypeScript,
+            PathBuf::from("/definitely/missing/ts-lsp"),
+        );
+        lsp.override_binary(ServerKind::Biome, fake_server_path());
+    }
+
+    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
+    wait_for_publish(&mut ctx.lsp());
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "diag-dir-missing-peer-server",
+        "command": "lsp_diagnostics",
+        "directory": root.join("src").display().to_string(),
+    }))
+    .expect("request parses");
+
+    let response = handle_lsp_diagnostics(&req, &ctx);
+    let json = serde_json::to_value(&response).expect("response serializes");
+    assert_eq!(json["success"], true);
+    assert_eq!(
+        json["complete"], false,
+        "missing tsserver coverage must be incomplete: {json}"
+    );
+    let unchecked = json["unchecked_files"].as_array().expect("unchecked files");
+    assert!(
+        unchecked
+            .iter()
+            .any(|path| path.as_str().is_some_and(|path| path.ends_with("foo.ts"))),
+        "foo.ts should be unchecked because one matching server never reported: {json}"
     );
 }
 

@@ -12,6 +12,8 @@
 //! happens on the natural stdin-closed exit path via `LspManager::shutdown_all`.
 
 use std::collections::HashSet;
+use std::io;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
@@ -29,6 +31,20 @@ impl LspChildRegistry {
         if let Ok(mut set) = self.inner.lock() {
             set.insert(pid);
         }
+    }
+
+    /// Spawn a child while holding the same mutex used by signal cleanup, then
+    /// insert its PID before releasing that mutex. This closes the SIGINT /
+    /// SIGTERM spawn→track race: if cleanup starts concurrently, it blocks
+    /// until the just-spawned child is present in the tracked set.
+    pub fn spawn_tracked(&self, command: &mut Command) -> io::Result<Child> {
+        let mut set = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("LSP child registry mutex poisoned"))?;
+        let child = command.spawn()?;
+        set.insert(child.id());
+        Ok(child)
     }
 
     /// Forget a PID (called when the client is dropped or shut down gracefully).
@@ -137,6 +153,26 @@ mod tests {
     fn kill_all_with_no_pids_returns_zero() {
         let reg = LspChildRegistry::new();
         assert_eq!(reg.kill_all(), 0);
+    }
+
+    #[test]
+    fn spawn_tracked_records_pid_before_returning() {
+        let reg = LspChildRegistry::new();
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+
+        let mut child = reg.spawn_tracked(&mut command).expect("spawn tracked");
+        let pid = child.id();
+        assert!(reg.pids().contains(&pid));
+        let _ = child.wait();
+        reg.untrack(pid);
     }
 
     // Regression for the npm-wrapper orphan bug: biome ships as `node
