@@ -1,20 +1,27 @@
 /// <reference path="../bun-test.d.ts" />
 /**
- * Regression coverage for the Effect runtime contract.
+ * Regression coverage for the `ctx.ask` Promise contract.
  *
- * Oracle audit (v0.19.5..HEAD): "No tests exercise the Effect-returning ask()
- * branch — every regression test stubbed `ask` as `mock(async () => {})`,
- * which is why a broken Effect.runPromise slipped through to production".
+ * The SDK contract for `ask()` has flipped twice:
+ *   - pre-1.14:           Promise<void>
+ *   - 1.14.x – 1.15.4:    Effect.Effect<void>   (silent-await bug landed here)
+ *   - 1.15.5+:            Promise<void>         (current AFT target)
  *
- * These tests use the SAME `effect` package version that
- * `@opencode-ai/plugin` ships with at runtime, so they pin the actual
- * deny-evaluation contract: rules MUST execute, allows MUST resolve cleanly,
- * and denies MUST surface as rejected promises with the underlying error
- * message intact for `askEditPermission`'s try/catch to read.
+ * These tests pin the rules that hold under EITHER shape, restated for the
+ * Promise contract we ship against today:
+ *
+ *   - rules MUST actually execute (no silent drop of the awaited body)
+ *   - allow resolves cleanly (askEditPermission returns undefined)
+ *   - deny surfaces as a rejected Promise with the underlying Error.message
+ *     intact, so askEditPermission's try/catch can pass it through to the
+ *     user-facing denial response.
+ *
+ * The file name is kept (`permissions-effect.test.ts`) to preserve git history;
+ * the contents target the Promise shape that `@opencode-ai/plugin@1.15.5`
+ * declares for `ToolContext["ask"]`.
  */
 import { describe, expect, test } from "bun:test";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { Effect } from "effect";
 import {
   askEditPermission,
   askGlobPermission,
@@ -22,27 +29,25 @@ import {
   runAsk,
 } from "../tools/permissions.js";
 
-describe("runAsk + Effect (real runtime)", () => {
-  test("Effect.succeed resolves cleanly through runAsk (allow path)", async () => {
+describe("runAsk + Promise", () => {
+  test("a resolving Promise body actually runs through runAsk (allow path)", async () => {
     let executed = false;
-    const ask = Effect.sync(() => {
+    const ask = (async () => {
       executed = true;
-    });
+    })();
     await runAsk(ask);
-    // The whole point of the v0.19.5 fix: the Effect must actually RUN.
-    // Old buggy code did `await effect` and the body never executed.
+    // Regression sentinel: if runAsk regressed to a no-op or fire-and-forget,
+    // we'd silently drop the ask body and the user's policy would never run.
     expect(executed).toBe(true);
   });
 
-  test("Effect.fail rejects runAsk with the underlying Error (deny path)", async () => {
-    const denied = Effect.fail(
-      new Error("Permission denied: bash deny rule"),
-    ) as unknown as Effect.Effect<void>;
+  test("a rejecting Promise surfaces the underlying Error (deny path)", async () => {
+    const denied = Promise.reject(new Error("Permission denied: bash deny rule"));
     await expect(runAsk(denied)).rejects.toThrow("Permission denied: bash deny rule");
   });
 
-  test("askEditPermission returns undefined when the Effect resolves", async () => {
-    const ctx = makeMockContext(() => Effect.sync(() => {}));
+  test("askEditPermission returns undefined when ask resolves", async () => {
+    const ctx = makeMockContext(async () => {});
     const result = await askEditPermission(ctx, ["src/foo.ts"]);
     // Convention: undefined = allowed; a string = denial reason.
     expect(result).toBeUndefined();
@@ -50,64 +55,61 @@ describe("runAsk + Effect (real runtime)", () => {
 
   test("askEditPermission reports unsupported host when context.ask is missing", async () => {
     const ctx = {
-      ...makeMockContext(() => Effect.sync(() => {})),
+      ...makeMockContext(async () => {}),
       ask: undefined,
     } as unknown as ToolContext;
     const result = await askEditPermission(ctx, ["src/foo.ts"]);
-    expect(result).toContain("OpenCode 1.14.39 or newer");
+    expect(result).toContain("OpenCode 1.15.5 or newer");
     expect(result).not.toContain("denied");
   });
 
-  test("askEditPermission surfaces deny message when the Effect fails", async () => {
-    const ctx = makeMockContext(
-      () =>
-        Effect.fail(
-          new Error("Permission denied for src/foo.ts"),
-        ) as unknown as Effect.Effect<void>,
-    );
+  test("askEditPermission surfaces deny message when ask rejects", async () => {
+    const ctx = makeMockContext(async () => {
+      throw new Error("Permission denied for src/foo.ts");
+    });
     const result = await askEditPermission(ctx, ["src/foo.ts"]);
     expect(result).toBe("Permission denied for src/foo.ts");
   });
 
-  test("askEditPermission falls back to default message when Effect fails without a useful message", async () => {
-    // Effect.die / Effect.fail with empty message — defect propagation.
-    const ctx = makeMockContext(() => Effect.fail(new Error("")) as unknown as Effect.Effect<void>);
+  test("askEditPermission falls back to default message when ask rejects without a useful message", async () => {
+    const ctx = makeMockContext(async () => {
+      throw new Error("");
+    });
     const result = await askEditPermission(ctx, ["src/foo.ts"]);
     expect(result).toBe("Permission denied.");
   });
 
-  test("ask Effect actually executes — proves we did not regress to silent await", async () => {
-    // This is the exact regression Oracle flagged. If runAsk reverts to
-    // `await maybe` (without Effect.runPromise), this test fails because
-    // the body of Effect.sync never runs.
+  test("ask body actually executes — proves we did not regress to a no-op", async () => {
+    // If runAsk ever became `async (_) => {}` (dropping the await), this fails
+    // because the body of the ask Promise never runs to set the flag.
     let askWasInvoked = false;
-    const ctx = makeMockContext(() =>
-      Effect.sync(() => {
-        askWasInvoked = true;
-      }),
-    );
+    const ctx = makeMockContext(async () => {
+      askWasInvoked = true;
+    });
     await askEditPermission(ctx, ["src/foo.ts"]);
     expect(askWasInvoked).toBe(true);
   });
 });
 
-describe("askGrepPermission / askGlobPermission (real Effect runtime)", () => {
+describe("askGrepPermission / askGlobPermission (Promise contract)", () => {
   test("askGrepPermission returns undefined on allow", async () => {
-    const ctx = makeMockContext(() => Effect.sync(() => {}));
+    const ctx = makeMockContext(async () => {});
     const result = await askGrepPermission(ctx, "TODO");
     expect(result).toBeUndefined();
   });
 
   test("askGrepPermission surfaces deny message", async () => {
-    const ctx = makeMockContext(
-      () => Effect.fail(new Error("Grep denied by policy")) as unknown as Effect.Effect<void>,
-    );
+    const ctx = makeMockContext(async () => {
+      throw new Error("Grep denied by policy");
+    });
     const result = await askGrepPermission(ctx, "TODO");
     expect(result).toBe("Grep denied by policy");
   });
 
-  test("askGrepPermission falls back to default message when Effect fails without one", async () => {
-    const ctx = makeMockContext(() => Effect.fail(new Error("")) as unknown as Effect.Effect<void>);
+  test("askGrepPermission falls back to default message when ask rejects without one", async () => {
+    const ctx = makeMockContext(async () => {
+      throw new Error("");
+    });
     const result = await askGrepPermission(ctx, "TODO");
     expect(result).toBe("Permission denied (grep).");
   });
@@ -115,12 +117,9 @@ describe("askGrepPermission / askGlobPermission (real Effect runtime)", () => {
   test("askGrepPermission forwards pattern + path + include in the ask payload", async () => {
     let observed: { permission?: string; patterns?: string[]; metadata?: Record<string, unknown> } =
       {};
-    const ctx = makeMockContext(
-      (args) =>
-        Effect.sync(() => {
-          observed = args as typeof observed;
-        }) as unknown as Effect.Effect<void>,
-    );
+    const ctx = makeMockContext(async (args) => {
+      observed = args as typeof observed;
+    });
     await askGrepPermission(ctx, "TODO\\b", { path: "src", include: "*.ts" });
     expect(observed.permission).toBe("grep");
     expect(observed.patterns).toEqual(["TODO\\b"]);
@@ -128,21 +127,23 @@ describe("askGrepPermission / askGlobPermission (real Effect runtime)", () => {
   });
 
   test("askGlobPermission returns undefined on allow", async () => {
-    const ctx = makeMockContext(() => Effect.sync(() => {}));
+    const ctx = makeMockContext(async () => {});
     const result = await askGlobPermission(ctx, "**/*.ts");
     expect(result).toBeUndefined();
   });
 
   test("askGlobPermission surfaces deny message", async () => {
-    const ctx = makeMockContext(
-      () => Effect.fail(new Error("Glob denied by policy")) as unknown as Effect.Effect<void>,
-    );
+    const ctx = makeMockContext(async () => {
+      throw new Error("Glob denied by policy");
+    });
     const result = await askGlobPermission(ctx, "**/*.ts");
     expect(result).toBe("Glob denied by policy");
   });
 
-  test("askGlobPermission falls back to default message when Effect fails without one", async () => {
-    const ctx = makeMockContext(() => Effect.fail(new Error("")) as unknown as Effect.Effect<void>);
+  test("askGlobPermission falls back to default message when ask rejects without one", async () => {
+    const ctx = makeMockContext(async () => {
+      throw new Error("");
+    });
     const result = await askGlobPermission(ctx, "**/*.ts");
     expect(result).toBe("Permission denied (glob).");
   });
@@ -150,12 +151,9 @@ describe("askGrepPermission / askGlobPermission (real Effect runtime)", () => {
   test("askGlobPermission forwards pattern + path in the ask payload", async () => {
     let observed: { permission?: string; patterns?: string[]; metadata?: Record<string, unknown> } =
       {};
-    const ctx = makeMockContext(
-      (args) =>
-        Effect.sync(() => {
-          observed = args as typeof observed;
-        }) as unknown as Effect.Effect<void>,
-    );
+    const ctx = makeMockContext(async (args) => {
+      observed = args as typeof observed;
+    });
     await askGlobPermission(ctx, "**/*.test.ts", { path: "src" });
     expect(observed.permission).toBe("glob");
     expect(observed.patterns).toEqual(["**/*.test.ts"]);
@@ -168,8 +166,8 @@ function makeMockContext(askFn: ToolContext["ask"]): ToolContext {
     sessionID: "test-session",
     messageID: "test-message",
     agent: "test-agent",
-    directory: "/tmp/aft-permissions-effect-test",
-    worktree: "/tmp/aft-permissions-effect-test",
+    directory: "/tmp/aft-permissions-promise-test",
+    worktree: "/tmp/aft-permissions-promise-test",
     abort: new AbortController().signal,
     metadata: () => {},
     ask: askFn,

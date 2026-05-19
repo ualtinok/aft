@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
-import { Effect } from "effect";
 import { astTools } from "../tools/ast.js";
 import { hoistedTools } from "../tools/hoisted.js";
 import {
@@ -25,7 +24,6 @@ type AskCall = {
   metadata?: Record<string, unknown>;
 };
 
-const VOID_EFFECT = Effect.asVoid(Effect.succeed(0));
 const windowsTest = process.platform === "win32" ? test : test.skip;
 let tmpRoot: string | null = null;
 
@@ -82,13 +80,12 @@ function recordingAsk(
   calls: AskCall[],
   deny?: { permission: string; message: string },
 ): ToolContext["ask"] {
-  return ((input: AskCall) => {
+  return (async (input: AskCall) => {
     calls.push(input);
     if (deny && input.permission === deny.permission) {
-      return Effect.fail(new Error(deny.message)) as unknown as ReturnType<ToolContext["ask"]>;
+      throw new Error(deny.message);
     }
-    return VOID_EFFECT as unknown as ReturnType<ToolContext["ask"]>;
-  }) as ToolContext["ask"];
+  }) as unknown as ToolContext["ask"];
 }
 
 async function makeProjectAndExternalDirs(): Promise<{ project: string; external: string }> {

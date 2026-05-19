@@ -5,7 +5,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { Effect } from "effect";
 import { createBashTool } from "../../tools/bash.js";
 import type { PluginContext } from "../../types.js";
 import { mockAsk, noopAsk } from "../test-helpers";
@@ -345,36 +344,37 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
   // Permission flow regression coverage (Oracle audit v0.19.5..HEAD).
   //
   // These tests exercise the FULL stack — Rust permission scan → bridge →
-  // plugin runAsk → real Effect runtime → response — through the OpenCode
+  // plugin runAsk → real ctx.ask Promise → response — through the OpenCode
   // adapter exactly as it ships. They sit in the e2e suite (not unit tests)
-  // because the runAsk regression that prompted them was a runtime mismatch
-  // between AFT's bundled effect@3 and OpenCode's effect@4: a unit test that
-  // mocks ctx.ask cannot catch that, but a real Effect from the same `effect`
-  // package the plugin SDK ships with does.
+  // because the original `bash: { "*": deny } doesn't deny` regression was a
+  // runtime mismatch between the bundled `effect` runtime and the SDK's, and
+  // we want a chokepoint that catches BOTH past failure modes:
+  //   - silent-await (current Promise-shape regression risk): runAsk must
+  //     actually `await` the returned Promise.
+  //   - runtime-mismatch (legacy Effect-shape regression risk): if the SDK
+  //     ever flips back to Effect, runAsk must execute the Effect body.
   //
   // Coverage matrix:
-  //   1. Effect resolves   → command runs, ask invoked exactly once.
-  //   2. Effect.fail       → bash deny propagates as a thrown Error.
-  //   3. Effect.sync body  → actually executes (was silently `await`-ed pre-fix).
+  //   1. Allow path        → command runs, ask invoked exactly once.
+  //   2. Deny path         → bash deny propagates as a thrown Error.
+  //   3. Body execution    → the ask body actually runs (no silent drop).
   //   4. permissions_granted → ask is bypassed entirely (Rust short-circuits).
   //   5. Multiple asks     → all asks are awaited before bash runs.
   // ─────────────────────────────────────────────────────────────────────────
 
-  test("Effect-returning ask resolves cleanly and bash runs (allow path)", async () => {
+  test("Promise-returning ask resolves cleanly and bash runs (allow path)", async () => {
     const { h, bash } = await pluginHarness();
 
     let askInvoked = false;
-    // Effect.sync mirrors what OpenCode does for an "allow" decision: it
-    // returns a synchronously-completing Effect with no error channel. If
-    // runAsk reverts to plain `await maybe`, the body of Effect.sync never
-    // runs and `askInvoked` stays false — the assertion below catches that
-    // class of regression even though the bash command itself would still
-    // succeed by accident.
-    const ask = mock((_input: unknown) =>
-      Effect.sync(() => {
-        askInvoked = true;
-      }),
-    ) as ToolContext["ask"];
+    // A bare async lambda mirrors what OpenCode 1.15.5 does for an "allow"
+    // decision: ask() returns Promise<void> that resolves with no error. If
+    // runAsk regresses to a no-op or fire-and-forget, the body never runs
+    // and `askInvoked` stays false — the assertion below catches that class
+    // of regression even though the bash command itself would still succeed
+    // by accident.
+    const ask = mock(async (_input: unknown) => {
+      askInvoked = true;
+    }) as ToolContext["ask"];
 
     const result = await callPluginBash(bash, h, { command: "echo allowed" }, { ask });
 
@@ -383,19 +383,17 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
     expect(result.metadata.exit).toBe(0);
   });
 
-  test("Effect.fail from ask propagates as a thrown Error (deny path)", async () => {
+  test("rejecting ask propagates as a thrown Error (deny path)", async () => {
     const { h, bash } = await pluginHarness();
 
-    // Effect.fail mirrors what OpenCode does when a permission rule denies
-    // the request. The plugin must surface this back through bash.execute as
-    // a thrown Error so OpenCode's tool runner records it as a deny — NOT
-    // silently let bash run anyway. Pre-fix runAsk used `await` on the
-    // Effect, which never even ran the failure path; the bug report was
-    // exactly "`bash: { '*': deny }` doesn't deny".
-    const ask = mock(
-      (_input: unknown) =>
-        Effect.fail(new Error("Permission denied by user")) as unknown as Effect.Effect<void>,
-    ) as ToolContext["ask"];
+    // A rejected Promise mirrors what OpenCode does when a permission rule
+    // denies the request. The plugin must surface this back through
+    // bash.execute as a thrown Error so OpenCode's tool runner records it
+    // as a deny — NOT silently let bash run anyway. The original bug report
+    // was exactly "`bash: { '*': deny }` doesn't deny".
+    const ask = mock(async (_input: unknown) => {
+      throw new Error("Permission denied by user");
+    }) as ToolContext["ask"];
 
     let captured: unknown;
     try {
@@ -434,15 +432,13 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
     const { h, bash } = await pluginHarness();
 
     // `find . | xargs grep foo` produces TWO bash asks (find, grep). Both
-    // must be Effect-resolved before the second bridge call runs the
-    // command. If runAsk silently dropped any of them, the bash deny would
-    // bypass for whichever subcommand the loop forgot to await.
+    // must be awaited before the second bridge call runs the command. If
+    // runAsk silently dropped any of them, the bash deny would bypass for
+    // whichever subcommand the loop forgot to await.
     let askCount = 0;
-    const ask = mock((_input: unknown) =>
-      Effect.sync(() => {
-        askCount += 1;
-      }),
-    );
+    const ask = mock(async (_input: unknown) => {
+      askCount += 1;
+    });
 
     await callPluginBash(
       bash,
@@ -461,10 +457,10 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
     // Inputs like `((i++))` parse cleanly in tree-sitter-bash but produce
     // ZERO `command` nodes. The Rust scanner's fail-closed branch must emit
     // a wildcard "*" ask in that case (Oracle audit MEDIUM #2). The plugin
-    // layer must then forward that ask to ctx.ask through the same Effect
+    // layer must then forward that ask to ctx.ask through the same Promise
     // path — proving the scanner+plugin chain doesn't silently let
     // command-less inputs bypass `bash: { "*": deny }`.
-    const ask = mock(() => Effect.sync(() => {}));
+    const ask = mock(async () => {});
 
     await callPluginBash(
       bash,

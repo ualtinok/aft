@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm --external @opencode-ai/plugin --external effect && bun build src/tui/index.tsx --outfile dist/tui.js --target bun --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tui --external @opentui/solid --external solid-js --external effect && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm --external @opencode-ai/plugin && bun build src/tui/index.tsx --outfile dist/tui.js --target bun --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tui --external @opentui/solid --external solid-js && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "pretest": "cd ../.. && cargo build",
     "test": "bun test",
@@ -29,8 +29,8 @@
   "dependencies": {
     "@clack/prompts": "^1.2.0",
     "@cortexkit/aft-bridge": "0.26.2",
-    "@opencode-ai/plugin": "^1.14.39",
-    "@opencode-ai/sdk": "^1.14.39",
+    "@opencode-ai/plugin": "^1.15.5",
+    "@opencode-ai/sdk": "^1.15.5",
     "comment-json": "^4.6.2",
     "undici": "^7.25.0",
     "zod": "^4.1.8"
@@ -61,7 +61,6 @@
     "tui"
   ],
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.14.0",
-    "effect": ">=4.0.0-beta.0"
+    "@opencode-ai/plugin": ">=1.15.5"
   }
 }

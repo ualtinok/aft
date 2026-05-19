@@ -1,32 +1,24 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { Effect } from "effect";
 
 const UNSUPPORTED_ASK_HOST =
-  "AFT requires OpenCode 1.14.39 or newer for permission asks; please upgrade OpenCode";
+  "AFT requires OpenCode 1.15.5 or newer for permission asks; please upgrade OpenCode";
 
 /**
  * Execute a `ctx.ask(...)` result.
  *
- * Why this exists: OpenCode's plugin contract returns `Effect.Effect<void>`
- * from `ask()` (since v1.14). Plain `await effect` resolves silently to the
- * Effect object without ever executing it — meaning the deny/ask evaluation
- * never runs and the user's `bash: { "*": deny }` (and edit/external_directory)
- * rules are silently ignored. The Effect must be run via `Effect.runPromise`.
+ * As of `@opencode-ai/plugin@1.15.5`, `ask()` returns `Promise<void>` again
+ * (it briefly returned `Effect.Effect<void>` in 1.14.x–1.15.4; the Promise
+ * shape is what the SDK originally used and what AFT supports today).
  *
- * `effect` is marked external in our bun build and listed as a peerDependency,
- * so this import resolves at runtime to the same `effect` runtime that
- * `@opencode-ai/plugin` is using to construct the Effect. Bundling our own
- * `effect` would create a runtime instance mismatch where
- * `Effect.runPromise(...)` rejects with "Not a valid effect".
- *
- * On deny, `Effect.runPromise` rejects with the underlying defect
- * (DeniedError / RejectedError) so callers can rely on `try/catch` to
- * detect denial.
+ * On deny, the Promise rejects with `DeniedError` / `RejectedError`, so
+ * callers can rely on a normal `try/catch` to detect denial. This helper
+ * stays as a single chokepoint so that if the SDK ever changes its return
+ * shape again, only this function needs to be touched.
  */
-export async function runAsk(maybe: Effect.Effect<void>): Promise<void> {
-  await Effect.runPromise(maybe);
+export async function runAsk(maybe: Promise<void>): Promise<void> {
+  await maybe;
 }
 
 export function resolveAbsolutePath(context: ToolContext, target: string): string {

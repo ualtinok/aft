@@ -5,7 +5,6 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Effect } from "effect";
 import { handleConfigureWarningsForSession } from "../configure-warnings.js";
 import { searchTools } from "../tools/search.js";
 import type { PluginContext } from "../types.js";
@@ -126,9 +125,8 @@ describe("Lane G plugin orchestration regressions", () => {
     const sdkCtx = {
       directory: project,
       worktree: project,
-      ask(input: Record<string, unknown>) {
+      async ask(input: Record<string, unknown>) {
         asks.push(input);
-        return Effect.sync(() => {});
       },
     } as any;
     try {
