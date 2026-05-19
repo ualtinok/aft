@@ -19,7 +19,7 @@
     },
     "packages/aft-bridge": {
       "name": "@cortexkit/aft-bridge",
-      "version": "0.26.2",
+      "version": "0.26.3",
       "dependencies": {
         "undici": "^8.2.0",
       },
@@ -30,7 +30,7 @@
     },
     "packages/aft-cli": {
       "name": "@cortexkit/aft",
-      "version": "0.26.2",
+      "version": "0.26.3",
       "bin": {
         "aft": "dist/index.js",
       },
@@ -45,10 +45,10 @@
     },
     "packages/opencode-plugin": {
       "name": "@cortexkit/aft-opencode",
-      "version": "0.26.2",
+      "version": "0.26.3",
       "dependencies": {
         "@clack/prompts": "^1.2.0",
-        "@cortexkit/aft-bridge": "0.26.2",
+        "@cortexkit/aft-bridge": "0.26.3",
         "@opencode-ai/plugin": "^1.15.5",
         "@opencode-ai/sdk": "^1.15.5",
         "comment-json": "^4.6.2",
@@ -60,11 +60,11 @@
         "typescript": "^5.8.0",
       },
       "optionalDependencies": {
-        "@cortexkit/aft-darwin-arm64": "0.26.2",
-        "@cortexkit/aft-darwin-x64": "0.26.2",
-        "@cortexkit/aft-linux-arm64": "0.26.2",
-        "@cortexkit/aft-linux-x64": "0.26.2",
-        "@cortexkit/aft-win32-x64": "0.26.2",
+        "@cortexkit/aft-darwin-arm64": "0.26.3",
+        "@cortexkit/aft-darwin-x64": "0.26.3",
+        "@cortexkit/aft-linux-arm64": "0.26.3",
+        "@cortexkit/aft-linux-x64": "0.26.3",
+        "@cortexkit/aft-win32-x64": "0.26.3",
       },
       "peerDependencies": {
         "@opencode-ai/plugin": ">=1.15.5",
@@ -72,9 +72,9 @@
     },
     "packages/pi-plugin": {
       "name": "@cortexkit/aft-pi",
-      "version": "0.26.2",
+      "version": "0.26.3",
       "dependencies": {
-        "@cortexkit/aft-bridge": "0.26.2",
+        "@cortexkit/aft-bridge": "0.26.3",
         "comment-json": "^5.0.0",
         "diff": "^8.0.4",
         "typebox": "^1.1.24",
@@ -88,11 +88,11 @@
         "typescript": "^5.8.0",
       },
       "optionalDependencies": {
-        "@cortexkit/aft-darwin-arm64": "0.26.2",
-        "@cortexkit/aft-darwin-x64": "0.26.2",
-        "@cortexkit/aft-linux-arm64": "0.26.2",
-        "@cortexkit/aft-linux-x64": "0.26.2",
-        "@cortexkit/aft-win32-x64": "0.26.2",
+        "@cortexkit/aft-darwin-arm64": "0.26.3",
+        "@cortexkit/aft-darwin-x64": "0.26.3",
+        "@cortexkit/aft-linux-arm64": "0.26.3",
+        "@cortexkit/aft-linux-x64": "0.26.3",
+        "@cortexkit/aft-win32-x64": "0.26.3",
       },
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
@@ -213,21 +213,11 @@
 
     "@cortexkit/aft-bridge": ["@cortexkit/aft-bridge@workspace:packages/aft-bridge"],
 
-    "@cortexkit/aft-darwin-arm64": ["@cortexkit/aft-darwin-arm64@0.26.2", "", { "os": "darwin", "cpu": "arm64", "bin": { "aft": "bin/aft" } }, "sha512-60fAoh+kuK6Me4lQJgR93LaZ2+jyDVQ0evGgM5e77lNCWEkku1NSgN/9GRTBmwvJOP2s1GWqNqxQT1MvsfWEDA=="],
-
-    "@cortexkit/aft-darwin-x64": ["@cortexkit/aft-darwin-x64@0.26.2", "", { "os": "darwin", "cpu": "x64", "bin": { "aft": "bin/aft" } }, "sha512-+3+k/xk+0yrw1oNwp5jPzWGGVF966vNPhHpjuyav/lIRBoIUmJd3ExQ5ewir2xqOPFqGmdSfU7o/YpyKrRPSdw=="],
-
-    "@cortexkit/aft-linux-arm64": ["@cortexkit/aft-linux-arm64@0.26.2", "", { "os": "linux", "cpu": "arm64", "bin": { "aft": "bin/aft" } }, "sha512-NOcGOk6Y9PBbkHDyIhMYw7EHran/7BNFkLf1PpbOPrQn6mRz6I2gT5ebkAcMnp3IWKIBpFwtH/cH7iDoD0b+vw=="],
-
-    "@cortexkit/aft-linux-x64": ["@cortexkit/aft-linux-x64@0.26.2", "", { "os": "linux", "cpu": "x64", "bin": { "aft": "bin/aft" } }, "sha512-W9uEaJfk05m9F552Wxwhg00pfnR7/+Oy15MiNXJM6dEnkAu8eexHviunL3Am1zZoLZgDViX514tRm2p9yaxC2w=="],
-
     "@cortexkit/aft-opencode": ["@cortexkit/aft-opencode@workspace:packages/opencode-plugin"],
 
     "@cortexkit/aft-pi": ["@cortexkit/aft-pi@workspace:packages/pi-plugin"],
 
     "@cortexkit/aft-pi-rpc-e2e": ["@cortexkit/aft-pi-rpc-e2e@workspace:tests/pi-rpc"],
-
-    "@cortexkit/aft-win32-x64": ["@cortexkit/aft-win32-x64@0.26.2", "", { "os": "win32", "cpu": "x64", "bin": { "aft": "bin/aft.exe" } }, "sha512-LdSdYX8QL5CVYHeoFuQJOj1XFQjV1jEyIN0sqEh66EmRCyQFo0mcQFroLPCfS9tvJbVFDNcHFIyBKWTqoNzjgw=="],
 
     "@earendil-works/pi-agent-core": ["@earendil-works/pi-agent-core@0.74.0", "", { "dependencies": { "@earendil-works/pi-ai": "^0.74.0", "typebox": "^1.1.24" } }, "sha512-6GMR7/wwjEJ1EsXLWEz03QOWin4AMrJ/AZoMpgm5DJ6GHsF6q6GOhQbj5Zip4dow3vo/TmBAVqM+vmGfrjGAFQ=="],
 
